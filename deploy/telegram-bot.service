@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram OpenCode Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/WorkingDirectory/ExecStart to match your host
+User=youruser
+WorkingDirectory=/opt/agent-bot
+Environment=NODE_ENV=production
+Environment=BOT_LOG_FILE=/opt/agent-bot/data/bot.log
+EnvironmentFile=/opt/agent-bot/.env
+ExecStart=/usr/local/bin/node dist/index.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/agent-bot/data/bot.log
+StandardError=append:/opt/agent-bot/data/bot.log
+
+[Install]
+WantedBy=multi-user.target

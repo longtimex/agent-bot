@@ -1,0 +1,120 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "custom/gemini-3.8-flash-high",
+  "small_model": "custom/gemini-3.8-flash-high",
+  "tools": {
+    "qoder": true
+  },
+  "provider": {
+    "custom": {
+      "name": "Custom",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": [
+        "MY_API_KEY"
+      ],
+      "options": {
+        "baseURL": "https://your-provider.example/v1",
+        "apiKey": "{env:MY_API_KEY}"
+      },
+      "models": {
+        "gemini-3.8-flash-high": {
+          "name": "Gemini 3.8 Flash High",
+          "attachment": true,
+          "capabilities": {
+            "input": [
+              "text",
+              "image",
+              "audio",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "claude-sonnet-5-5-high": {
+          "name": "Claude Sonnet 5.5 High",
+          "attachment": true,
+          "capabilities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "claude-opus-5-5-high": {
+          "name": "Claude Opus 5.5 High",
+          "attachment": true,
+          "capabilities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "gemini-4-argon-high": {
+          "name": "Gemini 4 Argon High",
+          "attachment": true,
+          "capabilities": {
+            "input": [
+              "text",
+              "image",
+              "audio",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "gemini-3.5-flash-lite": {
+          "name": "Gemini 3.5 Flash Lite"
+        },
+        "gemini-3.1-flash-lite": {
+          "name": "Gemini 3.1 Flash Lite"
+        },
+        "gemini-3-flash": {
+          "name": "Gemini 3 Flash"
+        },
+        "gpt-oss-120b-medium": {
+          "name": "GPT OSS 120B Medium"
+        }
+      }
+    },
+    "grok": {
+      "name": "grok",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://your-grok-provider.example/v1",
+        "apiKey": "{env:GROK_API_KEY}"
+      },
+      "models": {
+        "grok-4.7": {
+          "name": "grok-4.7",
+          "limit": {
+            "context": 1048576,
+            "output": 1048576
+          },
+          "attachment": true,
+          "capabilities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

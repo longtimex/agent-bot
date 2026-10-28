@@ -1,0 +1,32 @@
+{
+  "name": "telegram-opencode-bot",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge a personal Telegram bot to a local opencode server",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "serve": "opencode serve --port 4096 --hostname 127.0.0.1",
+    "serve:proxy": "bash -c 'set -a; [ -f data/proxy.env ] && . data/proxy.env; set +a; exec opencode serve --port 4096 --hostname 127.0.0.1'",
+    "restart": "bash scripts/restart.sh"
+  },
+  "dependencies": {
+    "grammy": "^1.39.3",
+    "playwright-core": "^1.64.1",
+    "socks": "^2.8.10",
+    "undici": "^8.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
