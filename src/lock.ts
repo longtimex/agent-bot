@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs"
+import { linkSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import type { Logger } from "./logger.js"
 
 function isAlive(pid: number): boolean {
@@ -27,19 +27,44 @@ export function acquireLock(path: string, log: Logger): () => void {
   const ownerStart = processStartTime(process.pid)
   const owner = ownerStart ? `${process.pid} ${ownerStart}` : String(process.pid)
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Write the owner first, then hard-link it into place: link() is atomic and
+  // fails with EEXIST, so a competing process can never observe an empty lock
+  // file and mistake it for a crashed owner.
+  const staging = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`
+
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const fd = openSync(path, "wx", 0o600)
-      writeSync(fd, owner)
-      closeSync(fd)
+      writeFileSync(staging, owner, { mode: 0o600 })
+      try {
+        linkSync(staging, path)
+      } finally {
+        try {
+          unlinkSync(staging)
+        } catch {
+          // staging already cleaned up
+        }
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
 
+      // Reclaim the existing lock by moving it aside: rename() is atomic, so only one
+      // of several concurrently starting processes can take the stale file. Deleting
+      // it in place would let a second starter unlink the fresh lock the first one has
+      // just linked, and both would then run.
+      const claim = `${path}.claim.${process.pid}.${Date.now().toString(36)}`
+      try {
+        renameSync(path, claim)
+      } catch (moveErr) {
+        // Someone else reclaimed it first; the path is free again.
+        if ((moveErr as NodeJS.ErrnoException).code === "ENOENT") continue
+        throw moveErr
+      }
+
       let content = ""
       try {
-        content = readFileSync(path, "utf8").trim()
+        content = readFileSync(claim, "utf8").trim()
       } catch {
-        // lock disappeared meanwhile; retry
+        // treat an unreadable claim as stale
       }
       const tokens = content.split(/\s+/)
       const pid = Number.parseInt(tokens[0] ?? "", 10)
@@ -47,14 +72,26 @@ export function acquireLock(path: string, log: Logger): () => void {
       const currentStart = pid > 0 ? processStartTime(pid) : undefined
       const sameProcess = !storedStart || !currentStart || storedStart === currentStart
       if (Number.isFinite(pid) && pid > 0 && isAlive(pid) && sameProcess) {
+        // We raced with a lock that was fresh after all: put it back, unless a third
+        // process has linked its own lock in the meantime.
+        try {
+          linkSync(claim, path)
+        } catch {
+          // another owner won the free slot
+        }
+        try {
+          unlinkSync(claim)
+        } catch {
+          // claim already gone
+        }
         throw new Error(`已有实例正在运行（PID ${pid}，锁文件 ${path}）。如需重启请执行 npm run restart。`)
       }
 
       log.warn(`removing stale lock file ${path} (owner ${content || "unknown"})`)
       try {
-        unlinkSync(path)
+        unlinkSync(claim)
       } catch {
-        // another process may have removed it first
+        // claim already gone
       }
       continue
     }

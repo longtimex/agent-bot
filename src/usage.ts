@@ -1,5 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
+import { readJsonObject } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 
 export type UsageOutcome = "ok" | "failed" | "cancelled"
@@ -20,12 +21,14 @@ export interface UsageRecord {
 }
 
 export interface UsageSummary extends UsageDay {
-  engines: { opencode: number; qoder: number }
+  engines: Record<string, number>
   lastAt?: number
   lastEngine?: string
   lastModel?: string
   today: UsageDay
 }
+
+export type UsageTrendDay = UsageDay & { day: string }
 
 interface ChatUsage extends UsageDay {
   engines: Record<string, number>
@@ -41,6 +44,9 @@ interface UsageFile {
 }
 
 const KEEP_DAYS = 31
+const DAY_MS = 86_400_000
+/** Dormant chats are swept at most this often, so the hot path stays a single map pass. */
+const PRUNE_INTERVAL_MS = 60 * 60_000
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
 
 function emptyDay(): UsageDay {
@@ -48,7 +54,13 @@ function emptyDay(): UsageDay {
 }
 
 function emptyChat(): ChatUsage {
-  return { ...emptyDay(), engines: {}, days: {} }
+  // Null prototypes: the keys of every map below come from the data file, and an
+  // inherited name such as "constructor" must not read back as stored usage
+  return {
+    ...emptyDay(),
+    engines: Object.create(null) as Record<string, number>,
+    days: Object.create(null) as Record<string, UsageDay>,
+  }
 }
 
 const dayFormatters = new Map<string, Intl.DateTimeFormat>()
@@ -62,6 +74,16 @@ export function dateKey(timestamp: number, timeZone: string): string {
   const parts: Record<string, string> = {}
   for (const part of formatter.formatToParts(timestamp)) parts[part.type] = part.value
   return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+/**
+ * One calendar day earlier, independent of the local wall clock: subtracting
+ * 24 h twice can land on the same local day across a DST fall-back.
+ */
+function previousDay(day: string): string {
+  const parts = day.split("-").map(Number)
+  const [year = 1970, month = 1, date = 1] = parts
+  return new Date(Date.UTC(year, month - 1, date) - DAY_MS).toISOString().slice(0, 10)
 }
 
 function count(value: unknown): number {
@@ -82,14 +104,20 @@ function sanitizeDay(value: unknown): UsageDay {
 export class UsageStore {
   readonly #path: string
   readonly #log: Logger
-  readonly #timeZone: string
-  #chats: Record<string, ChatUsage> = {}
+  #timeZone: string
+  #chats: Record<string, ChatUsage> = Object.create(null) as Record<string, ChatUsage>
+  #prunedAt = 0
 
   constructor(path: string, log: Logger, timeZone: string) {
     this.#path = path
     this.#log = log
     this.#timeZone = timeZone
     this.#load()
+  }
+
+  /** /timezone applies without a restart; per-day totals stay on the day they were recorded. */
+  setTimeZone(timeZone: string): void {
+    this.#timeZone = timeZone
   }
 
   record(key: string, input: UsageRecord, now = Date.now()): void {
@@ -100,10 +128,15 @@ export class UsageStore {
     chat.tasks += 1
     chat[outcome] += 1
     chat.totalMs += ms
-    chat.engines[input.engine] = (chat.engines[input.engine] ?? 0) + 1
+    // Own-property read: engine ids come from user-managed profiles, and an
+    // inherited name such as "toString" would otherwise count as NaN
+    const engineTotal = Object.hasOwn(chat.engines, input.engine) ? chat.engines[input.engine]! : 0
+    chat.engines[input.engine] = engineTotal + 1
     chat.lastAt = now
     chat.lastEngine = input.engine
-    if (input.model) chat.lastModel = input.model
+    // Keep lastModel aligned with the newest task: a task without a model must not
+    // surface the previous task's (possibly different engine's) model.
+    chat.lastModel = input.model || undefined
 
     const day = dateKey(now, this.#timeZone)
     const entry = chat.days[day] ?? emptyDay()
@@ -116,7 +149,28 @@ export class UsageStore {
     for (const stale of days.slice(0, Math.max(0, days.length - KEEP_DAYS))) delete chat.days[stale]
 
     this.#chats[key] = chat
+    this.#prune(now)
     this.#save()
+  }
+
+  /**
+   * Forgets chats that have been idle for longer than the daily-trend window. Without
+   * it a long-lived allow-all bot grows both the map and the file that every task
+   * rewrites in full, while a dormant chat's totals are never shown again.
+   */
+  #prune(now: number): number {
+    if (now - this.#prunedAt < PRUNE_INTERVAL_MS) return 0
+    this.#prunedAt = now
+    const cutoff = now - KEEP_DAYS * DAY_MS
+    let dropped = 0
+    for (const [key, chat] of Object.entries(this.#chats)) {
+      // A record with no timestamp cannot be placed in the window, so it is kept
+      if (chat.lastAt === undefined || chat.lastAt >= cutoff) continue
+      delete this.#chats[key]
+      dropped++
+    }
+    if (dropped > 0) this.#log.debug(`dropped usage stats for ${dropped} dormant chat(s)`)
+    return dropped
   }
 
   summary(key: string, now = Date.now()): UsageSummary {
@@ -127,10 +181,7 @@ export class UsageStore {
       failed: chat.failed,
       cancelled: chat.cancelled,
       totalMs: chat.totalMs,
-      engines: {
-        opencode: chat.engines.opencode ?? 0,
-        qoder: chat.engines.qoder ?? 0,
-      },
+      engines: { ...chat.engines },
       lastAt: chat.lastAt,
       lastEngine: chat.lastEngine,
       lastModel: chat.lastModel,
@@ -138,10 +189,23 @@ export class UsageStore {
     }
   }
 
+  /** Chronological per-day totals for the last `count` calendar days, zero-filled. */
+  recentDays(key: string, count = 7, now = Date.now()): UsageTrendDay[] {
+    const size = Math.max(1, Math.min(KEEP_DAYS, Math.floor(count)))
+    const days: UsageTrendDay[] = []
+    const chat = this.#chats[key]
+    let day = dateKey(now, this.#timeZone)
+    for (let offset = 0; offset < size; offset++) {
+      days.unshift({ day, ...(chat?.days[day] ?? emptyDay()) })
+      day = previousDay(day)
+    }
+    return days
+  }
+
   #load(): void {
-    if (!existsSync(this.#path)) return
+    const parsed = readJsonObject(this.#path, (message) => this.#log.warn(message)) as Partial<UsageFile> | undefined
+    if (!parsed) return
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<UsageFile>
       const chats =
         parsed.chats && typeof parsed.chats === "object"
           ? (parsed.chats as unknown as Record<string, unknown>)

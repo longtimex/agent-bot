@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -23,6 +23,22 @@ test("acquireLock refuses a second live instance and releases cleanly", () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+test("a refused acquire leaves the live owner's lock file in place", () => {
+  // Reclaiming moves the file aside first, so a live lock must be put back:
+  // losing it would let yet another start believe no instance is running.
+  const { dir, path } = tempLockDir()
+  const release = acquireLock(path, log)
+  try {
+    const before = readFileSync(path, "utf8")
+    assert.throws(() => acquireLock(path, log), /已有实例正在运行/)
+    assert.equal(readFileSync(path, "utf8"), before)
+    assert.deepEqual(readdirSync(dir), ["bot.lock"], "no claim file may be left behind")
+  } finally {
+    release()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("acquireLock replaces a lock left by a dead process", () => {
   const { dir, path } = tempLockDir()
   const dead = spawnSync(process.execPath, ["-e", ""])
@@ -32,6 +48,7 @@ test("acquireLock replaces a lock left by a dead process", () => {
   const release = acquireLock(path, log)
   try {
     assert.equal(existsSync(path), true)
+    assert.deepEqual(readdirSync(dir), ["bot.lock"], "the claimed stale file must be cleaned up")
   } finally {
     release()
     rmSync(dir, { recursive: true, force: true })
@@ -44,6 +61,30 @@ test("release is idempotent", () => {
   release()
   release()
   rmSync(dir, { recursive: true, force: true })
+})
+
+test("acquireLock leaves no staging files behind", () => {
+  const { dir, path } = tempLockDir()
+  const release = acquireLock(path, log)
+  try {
+    assert.match(readFileSync(path, "utf8"), new RegExp(`^${process.pid}( \\d+)?$`))
+    assert.deepEqual(readdirSync(dir), ["bot.lock"])
+  } finally {
+    release()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("acquireLock reclaims an empty lock file", () => {
+  const { dir, path } = tempLockDir()
+  writeFileSync(path, "")
+  const release = acquireLock(path, log)
+  try {
+    assert.match(readFileSync(path, "utf8"), new RegExp(`^${process.pid}( \\d+)?$`))
+  } finally {
+    release()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test("acquireLock reclaims a lock whose PID was recycled", { skip: !existsSync("/proc/self/stat") }, () => {

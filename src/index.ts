@@ -1,18 +1,73 @@
 import { mkdirSync } from "node:fs"
 import { resolve } from "node:path"
+import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
-import { loadConfig } from "./config.js"
+import { CcSwitchService, redactSecrets } from "./ccswitch.js"
+import { ConfigError, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
 import { acquireLock } from "./lock.js"
 import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
 import { pruneOutbox } from "./media.js"
+import { ModelAdmin } from "./modelAdmin.js"
 import { Opencode } from "./opencode.js"
 import { ProxyService } from "./proxy.js"
-import { QoderService } from "./qoder.js"
+import { canRunSetup, setupFromCli } from "./setup.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
 
+function setupHint(detail: string): string {
+  return (
+    `${detail}\n\n首次连接 Telegram Bot：\n` +
+    "1. 在 Telegram 向 @BotFather 发送 /newbot，复制返回的 HTTP API Token\n" +
+    "2. 向 @userinfobot 发送任意消息，获取你的数字用户 ID\n" +
+    "3. 在 .env 中填写 TELEGRAM_BOT_TOKEN 与 TELEGRAM_ALLOW_USERS\n" +
+    "在终端中运行 npm run setup 可进入交互式连接向导。"
+  )
+}
+
+let botToken: string | undefined
+
+/** Crash output lands in bot.log and is read by whoever tails it, so it must never carry credentials. */
+function fatalText(err: unknown): string {
+  const raw = err instanceof Error ? (err.stack ?? err.message) : String(err)
+  const redacted = redactSecrets(raw)
+  return botToken ? redacted.split(botToken).join("***") : redacted
+}
+
+function installCrashGuards(): void {
+  process.on("unhandledRejection", (reason) => {
+    // One stray rejection must not take down other chats' in-flight tasks
+    console.error(`unhandled rejection (kept running): ${fatalText(reason)}`)
+  })
+  process.on("uncaughtException", (err) => {
+    console.error(`uncaught exception, exiting: ${fatalText(err)}`)
+    process.exit(1)
+  })
+}
+
+async function loadConfigOrSetup(): Promise<BotConfig> {
+  try {
+    return loadConfig()
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err
+    if (!canRunSetup()) throw new ConfigError(setupHint(err.message))
+
+    console.log("检测到尚未完成 Telegram 连接配置，进入首次连接向导…\n")
+    const result = await setupFromCli()
+    if (!result.ok || !result.token || !result.users?.length) {
+      throw new ConfigError("未完成 Telegram 连接配置。可重新运行 npm run setup。")
+    }
+    // loadEnvFile does not override existing (possibly empty) environment values
+    process.env.TELEGRAM_BOT_TOKEN = result.token
+    process.env.TELEGRAM_ALLOW_USERS = result.users.join(",")
+    console.log("\n✅ 配置已就绪，继续启动 Bot…\n")
+    return loadConfig()
+  }
+}
+
 async function main(): Promise<void> {
-  const cfg = loadConfig()
+  installCrashGuards()
+  const cfg = await loadConfigOrSetup()
+  botToken = cfg.telegram.token
   const log = createLogger(cfg.logLevel)
   mkdirSync(cfg.dataDir, { recursive: true })
   mkdirSync(cfg.outboxDir, { recursive: true })
@@ -56,33 +111,87 @@ async function main(): Promise<void> {
 
   const store = new SessionStore(resolve(cfg.dataDir, "sessions.json"), log)
   const proxies = new ProxyService(resolve(cfg.dataDir, "proxies.json"), log)
-  const qoder = new QoderService(process.cwd(), store, log, cfg.taskTimeoutMs, cfg.taskMaxTimeoutMs, () =>
-    proxies.env(),
+  const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
+  const agents = new AgentCliService(
+    process.cwd(),
+    store,
+    log,
+    cfg.taskTimeoutMs,
+    cfg.taskMaxTimeoutMs,
+    () => proxies.env(),
+    agentRegistry,
+  )
+  const allProfiles = agentRegistry.list()
+  const detectedAgents = allProfiles.filter((profile) => agentRegistry.binPath(profile))
+  const installable = allProfiles.filter((profile) => profile.installSpec && !agentRegistry.binPath(profile))
+  log.info(
+    `agent CLI detection: ${detectedAgents.length}/${allProfiles.length} installed` +
+      (detectedAgents.length > 0 ? ` (${detectedAgents.map((profile) => profile.label).join(", ")})` : ""),
+  )
+  if (installable.length > 0) {
+    log.info(
+      `installable from Telegram with /agents install <id>: ${installable.map((profile) => profile.id).join(", ")}`,
+    )
+  }
+  log.info("recommended engine: opencode (multi-model, tools, attachments, scheduling)")
+  const ccswitch = new CcSwitchService({
+    bin: cfg.ccswitch.bin,
+    app: cfg.ccswitch.app,
+    projectDir: process.cwd(),
+  })
+  if (!ccswitch.available) {
+    log.info("cc-switch CLI 未安装；/cc 面板可用但需要先运行 npm run cc-switch:install")
+  }
+  const models = new ModelAdmin(
+    resolve(cfg.dataDir, "models.json"),
+    process.cwd(),
+    cfg.opencode.agent ?? "assistant",
+    store,
   )
 
-  const tgBridge = new TelegramBridge(cfg, oc, qoder, store, log, proxies)
-  await tgBridge.start()
+  const tgBridge = new TelegramBridge(cfg, oc, agents, store, log, proxies, undefined, ccswitch, models)
 
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, code = 0): Promise<void> => {
     log.info(`received ${signal}, shutting down`)
+    process.exitCode = code
     clearInterval(pruneTimer)
     if (logTimer) clearInterval(logTimer)
-    qoder.dispose()
+    agents.dispose()
     proxies.dispose()
     await tgBridge.stop().catch(() => {})
     releaseLock()
-    setTimeout(() => process.exit(0), 100).unref()
+    setTimeout(() => process.exit(code), 100).unref()
   }
 
-  process.once("SIGINT", () => {
-    shutdown("SIGINT").catch(() => process.exit(0))
-  })
-  process.once("SIGTERM", () => {
-    shutdown("SIGTERM").catch(() => process.exit(0))
-  })
+  try {
+    await tgBridge.start({
+      // A polling loop that stopped for good must not linger: systemd/the restart
+      // script only recover when the process actually exits.
+      onFatal: (err) => {
+        void shutdown(`polling stopped (${err.message})`, 1).catch((fatal: unknown) => {
+          console.error(`shutdown failed: ${fatalText(fatal)}`)
+          process.exit(1)
+        })
+      },
+    })
+  } catch (err) {
+    log.error((err as Error).message)
+    await shutdown("startup failure", 1).catch(() => {})
+    return
+  }
+
+  const onSignal = (signal: string): void => {
+    shutdown(signal).catch((err: unknown) => {
+      console.error(`shutdown failed: ${fatalText(err)}`)
+      process.exit(1)
+    })
+  }
+  process.once("SIGINT", () => onSignal("SIGINT"))
+  process.once("SIGTERM", () => onSignal("SIGTERM"))
 }
 
 main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : err)
+  // Startup configuration problems already carry user-facing guidance: no stack
+  console.error(err instanceof StartupConfigError ? err.message : fatalText(err))
   process.exit(1)
 })

@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { clip } from "./messages.js"
 
 export type AttachmentKind = "image" | "audio" | "document"
 
@@ -50,17 +51,45 @@ export function sanitizeFilename(name: string, fallback: string): string {
 }
 
 export function saveAttachment(dir: string, chatId: number, name: string, data: Buffer): { path: string; name: string } {
-  mkdirSync(dir, { recursive: true })
-  const finalName = `${chatId}-${Date.now()}-${sanitizeFilename(name, "file.bin")}`
+  // Uploads routinely carry config files with API keys: keep them private to the
+  // service account instead of relying on the host umask.
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const base = `${chatId}-${Date.now()}-${sanitizeFilename(name, "file.bin")}`
+  // Two uploads of the same file in the same millisecond (an album, a retried update)
+  // would otherwise share one name and silently overwrite each other
+  let finalName = base
+  const dot = base.lastIndexOf(".")
+  for (let n = 1; existsSync(join(dir, finalName)); n += 1) {
+    finalName = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`
+  }
   const path = join(dir, finalName)
-  writeFileSync(path, data)
+  writeFileSync(path, data, { mode: 0o600 })
   return { path, name: finalName }
 }
 
 export function readTextAttachment(path: string, limit = INLINE_LIMIT): { text: string; truncated: boolean } {
-  const raw = readFileSync(path, "utf8")
-  if (raw.length <= limit) return { text: raw, truncated: false }
-  return { text: raw.slice(0, limit), truncated: true }
+  const cap = Math.max(0, Math.floor(limit))
+  const size = statSync(path).size
+  // Read only the window that is shown: a 20 MB log would otherwise be decoded in
+  // full, and the UTF-8 decode plus its copies block every other chat
+  const want = Math.min(size, cap * 4 + 4)
+  const buffer = Buffer.allocUnsafe(want)
+  const fd = openSync(path, "r")
+  let bytesRead = 0
+  try {
+    while (bytesRead < want) {
+      const step = readSync(fd, buffer, bytesRead, want - bytesRead, bytesRead)
+      if (step === 0) break
+      bytesRead += step
+    }
+  } finally {
+    closeSync(fd)
+  }
+  // A cut in the middle of a multi-byte character decodes to one trailing placeholder
+  const decoded = buffer.toString("utf8", 0, bytesRead)
+  const text = bytesRead < size ? decoded.replace(/\ufffd$/, "") : decoded
+  const shown = clip(text, cap) ?? ""
+  return { text: shown, truncated: bytesRead < size || shown.length < text.length }
 }
 
 export function pruneInbox(dir: string, maxAgeMs = INBOX_MAX_AGE_MS): number {

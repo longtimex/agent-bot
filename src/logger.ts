@@ -49,7 +49,8 @@ export function pruneRotatedLogs(path: string, keep = 7): number {
   }
 }
 
-const order: Record<LogLevel, number> = {  debug: 0,
+const order: Record<LogLevel, number> = {
+  debug: 0,
   info: 1,
   warn: 2,
   error: 3,

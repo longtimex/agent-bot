@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import type { Logger } from "./logger.js"
 
@@ -28,6 +28,8 @@ export interface Reminder {
   attempts?: number
   retryAt?: number
   repeat?: ReminderRepeat
+  /** Set while a due reminder is being delivered; cleared on load after a crash. */
+  runningAt?: number
 }
 
 interface ReminderFile {
@@ -85,10 +87,10 @@ function zonedToUtc(year: number, month: number, day: number, hour: number, minu
   return guess - offsetMs(guess - offset, timeZone)
 }
 
-function absoluteDue(hour: number, minute: number, now: number, timeZone: string, tomorrow: boolean): number {
+function absoluteDue(hour: number, minute: number, now: number, timeZone: string, dayOffset = 0): number {
   const parts = zonedParts(now, timeZone)
-  let dueAt = zonedToUtc(parts.year, parts.month, parts.day + (tomorrow ? 1 : 0), hour, minute, timeZone)
-  if (!tomorrow && dueAt <= now + 1_000) {
+  let dueAt = zonedToUtc(parts.year, parts.month, parts.day + dayOffset, hour, minute, timeZone)
+  if (dayOffset === 0 && dueAt <= now + 1_000) {
     dueAt = zonedToUtc(parts.year, parts.month, parts.day + 1, hour, minute, timeZone)
   }
   return dueAt
@@ -111,8 +113,7 @@ function validateClock(hour: number, minute: number): void {
 
 export function formatReminderTime(dueAt: number, timeZone = DEFAULT_TIMEZONE): string {
   const parts = zonedParts(dueAt, timeZone)
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return `${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}`
+  return `${pad2(parts.month)}-${pad2(parts.day)} ${pad2(parts.hour)}:${pad2(parts.minute)}`
 }
 
 export function formatRemaining(ms: number): string {
@@ -156,7 +157,7 @@ export function nextReminderDue(
 ): number | undefined {
   const repeat = reminder.repeat
   if (!repeat) return undefined
-  if (repeat.type === "daily") return absoluteDue(repeat.hour, repeat.minute, now, timeZone, false)
+  if (repeat.type === "daily") return absoluteDue(repeat.hour, repeat.minute, now, timeZone)
   if (reminder.dueAt > now) return reminder.dueAt
   // Skip occurrences missed while the bot was offline instead of replaying them all
   const steps = Math.floor((now - reminder.dueAt) / repeat.ms) + 1
@@ -170,7 +171,9 @@ export function sanitizeRepeat(value: unknown): ReminderRepeat | undefined {
     record.type === "interval" &&
     typeof record.ms === "number" &&
     Number.isFinite(record.ms) &&
-    record.ms >= MIN_DELAY_MS
+    record.ms >= MIN_DELAY_MS &&
+    // A hand-edited file must not schedule occurrences past the normal 365-day cap
+    record.ms <= MAX_DELAY_MS
   ) {
     return { type: "interval", ms: record.ms }
   }
@@ -196,6 +199,60 @@ function durationMs(token: string): number {
   return ms
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, "0")
+}
+
+// 每天 / 明天 / 后天 / 今晚 / 下午 既可以独立成词，也可以和时间粘在同一个词里
+const TIME_PREFIX_RE =
+  /^(每隔|每天|每日|每|everyday|daily|every|each|前天|明天|后天|今天|今晚|明晚|凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)(.*)$/i
+const DAY_PARTS_PM = new Set(["中午", "下午", "傍晚", "晚上"])
+const HORIZON: Record<string, number> = {
+  前天: -1,
+  今天: 0,
+  今晚: 0,
+  明天: 1,
+  明晚: 1,
+  后天: 2,
+}
+
+function peelTimePrefixes(token: string): { prefixes: string[]; rest: string } {
+  const prefixes: string[] = []
+  let rest = token
+  for (;;) {
+    const match = TIME_PREFIX_RE.exec(rest)
+    if (!match) break
+    prefixes.push(match[1]!.toLowerCase())
+    rest = match[2] ?? ""
+  }
+  return { prefixes, rest }
+}
+
+/** 5分钟后 / 1小时30分钟 / 半小时 / 一刻钟 → 5m / 1h30m / 30m / 15m */
+function toDurationToken(token: string): string {
+  return token
+    .replace(/半小时/g, "30m")
+    .replace(/一刻钟/g, "15m")
+    .replace(/(?:以后|之后|内|后)$/, "")
+    .replace(/分钟|分/g, "m")
+    .replace(/小时/g, "h")
+    .replace(/秒钟|秒/g, "s")
+    .replace(/天/g, "d")
+}
+
+/** 18:30 / 8点 / 8点半 / 20点15 / 8点30分 */
+function parseClockToken(token: string): { hour: number; minute: number } | undefined {
+  const colon = /^(\d{1,2}):(\d{2})$/.exec(token)
+  if (colon) return { hour: Number(colon[1]), minute: Number(colon[2]) }
+  const cn = /^(\d{1,2})\s*[点時时]\s*(半|[0-5]?\d\s*分?)?$/.exec(token)
+  if (!cn) return undefined
+  const hour = Number(cn[1])
+  const tail = (cn[2] ?? "").replace(/\s+/g, "")
+  if (!tail) return { hour, minute: 0 }
+  if (tail === "半") return { hour, minute: 30 }
+  return { hour, minute: Number(tail.replace(/分$/, "")) }
+}
+
 export interface ParseReminderOptions {
   maxTextLength?: number
   /** Command shown in usage errors, e.g. "/remind". */
@@ -214,85 +271,85 @@ export function parseReminder(
   const label = options.label ?? "提醒"
   const maxTextLength = options.maxTextLength ?? MAX_TEXT_LENGTH
   const tokens = input.trim().split(/\s+/).filter(Boolean)
-  const first = tokens[0]
-  if (!first) throw new Error(`用法：${command} 30m 喝水`)
+  if (!tokens[0]) throw new Error(`用法：${command} 30m 喝水`)
 
   const usage =
-    "支持：30s / 10m / 2h / 1d / 1h30m / 18:30 / 明天 08:30 / every 30m / 每天 08:30"
+    `支持：30m / 1h30m / 5分钟后 / 半小时 / 18:30 / 8点半 / 今天下午3点 / 明天 08:30 / ` +
+    `每天 08:30 / every 30m / 每30分钟`
+
+  // Consume leading modifier words until a token carries the actual time expression
+  const prefixes: string[] = []
+  let cursor = 0
+  let timeToken = ""
+  for (;;) {
+    const token = tokens[cursor]
+    if (!token) break
+    const peeled = peelTimePrefixes(token)
+    prefixes.push(...peeled.prefixes)
+    if (peeled.rest) {
+      timeToken = peeled.rest
+      break
+    }
+    cursor += 1
+  }
+  const daily = prefixes.includes("每天") || prefixes.includes("每日") || prefixes.includes("daily") || prefixes.includes("everyday")
+  const every = prefixes.includes("每隔") || prefixes.includes("每") || prefixes.includes("every") || prefixes.includes("each")
+  const dayPart =
+    prefixes.find((prefix) => ["凌晨", "清晨", "早上", "上午", "中午", "下午", "傍晚", "晚上"].includes(prefix)) ??
+    (prefixes.includes("今晚") || prefixes.includes("明晚") ? "晚上" : undefined)
+  const horizon = prefixes
+    .map((prefix) => HORIZON[prefix])
+    .find((value): value is number => value !== undefined)
+
   const requireText = (text: string): string => {
     const value = text.trim()
     if (!value) throw new Error(`请补充${label}内容，例如：${command} 30m 喝水`)
     if (value.length > maxTextLength) throw new Error(`${label}内容不能超过 ${maxTextLength} 字。`)
     return value
   }
+  // Text is only required once the time expression itself parsed, so a missing time never
+  // masks the usage error
+  const takeText = (): string => requireText(tokens.slice(cursor + 1).join(" "))
 
-  // 每天 08:30 / 每日 08:30 / 每天08:30
-  if (first === "每天" || first === "每日" || /^每[天日]\d{1,2}:\d{2}$/.test(first)) {
-    const clockToken = first === "每天" || first === "每日" ? (tokens[1] ?? "") : first.replace(/^每[天日]/, "")
-    const match = /^(\d{1,2}):(\d{2})$/.exec(clockToken)
-    if (!match) throw new Error(`每日${label}的格式应为：${command} 每天 08:30 打卡`)
-    const hour = Number(match[1])
-    const minute = Number(match[2])
-    validateClock(hour, minute)
-    const textStart = first === "每天" || first === "每日" ? 2 : 1
-    const dueAt = absoluteDue(hour, minute, now, timeZone, false)
-    validateDelay(dueAt - now, label)
-    return {
-      dueAt,
-      text: requireText(tokens.slice(textStart).join(" ")),
-      repeat: { type: "daily", hour, minute },
-    }
-  }
-
-  // every 30m / 每30m / 每隔30m
-  const isEveryWord = first.toLowerCase() === "every"
-  const isChineseEvery = /^每(?:隔)?(?:\d+[smhd])+$/i.test(first)
-  if (isEveryWord || isChineseEvery) {
-    const durationToken = isEveryWord ? (tokens[1] ?? "") : first.replace(/^每(?:隔)?/i, "")
-    const textStart = isEveryWord ? 2 : 1
-    if (!DURATION_TOKEN.test(durationToken)) {
-      throw new Error(`重复${label}的格式应为：${command} every 30m 喝水 或 ${command} 每天 08:30 打卡`)
-    }
+  const durationToken = toDurationToken(timeToken)
+  if (DURATION_TOKEN.test(durationToken)) {
     const ms = durationMs(durationToken)
     validateDelay(ms, label)
-    return {
-      dueAt: now + ms,
-      text: requireText(tokens.slice(textStart).join(" ")),
-      repeat: { type: "interval", ms },
-    }
+    if (!every && !daily) return { dueAt: now + ms, text: takeText() }
+    return { dueAt: now + ms, text: takeText(), repeat: { type: "interval", ms } }
   }
 
-  // 明天 08:30 / 明天08:30
-  if (first === "明天" || first === "明日" || /^明[天日]\d{1,2}:\d{2}$/.test(first)) {
-    const clockToken = first === "明天" || first === "明日" ? (tokens[1] ?? "") : first.replace(/^明[天日]/, "")
-    const match = /^(\d{1,2}):(\d{2})$/.exec(clockToken)
-    if (!match) throw new Error(`明天${label}的格式应为：${command} 明天 08:30 内容`)
-    const hour = Number(match[1])
-    const minute = Number(match[2])
-    validateClock(hour, minute)
-    const textStart = first === "明天" || first === "明日" ? 2 : 1
-    const text = requireText(tokens.slice(textStart).join(" "))
-    return { dueAt: absoluteDue(hour, minute, now, timeZone, true), text }
-  }
-
-  // 30s / 10m / 2h / 1d / 1h30m
-  if (DURATION_TOKEN.test(first)) {
-    const ms = durationMs(first)
-    validateDelay(ms, label)
-    return { dueAt: now + ms, text: requireText(tokens.slice(1).join(" ")) }
-  }
-
-  // 18:30
-  const clock = /^(\d{1,2}):(\d{2})$/.exec(first)
+  const clock = parseClockToken(timeToken)
   if (clock) {
-    const hour = Number(clock[1])
-    const minute = Number(clock[2])
+    const hour = dayPart && DAY_PARTS_PM.has(dayPart) && clock.hour < 12 ? clock.hour + 12 : clock.hour
+    const minute = clock.minute
     validateClock(hour, minute)
-    validateDelay(absoluteDue(hour, minute, now, timeZone, false) - now, label)
-    return { dueAt: absoluteDue(hour, minute, now, timeZone, false), text: requireText(tokens.slice(1).join(" ")) }
+    if (daily) {
+      return {
+        dueAt: absoluteDue(hour, minute, now, timeZone),
+        text: takeText(),
+        repeat: { type: "daily", hour, minute },
+      }
+    }
+    if (horizon !== undefined && horizon < 0) {
+      throw new Error(`${label}时间不能是过去。`)
+    }
+    if (horizon === 0) {
+      const parts = zonedParts(now, timeZone)
+      const dueAt = zonedToUtc(parts.year, parts.month, parts.day, hour, minute, timeZone)
+      if (dueAt <= now) {
+        throw new Error(`今天 ${pad2(hour)}:${pad2(minute)} 已过，请改用“明天 …”或相对时间。`)
+      }
+      return { dueAt, text: takeText() }
+    }
+    return { dueAt: absoluteDue(hour, minute, now, timeZone, horizon ?? 0), text: takeText() }
   }
 
-  throw new Error(`无法识别时间“${first}”。${usage}`)
+  if (daily) throw new Error(`每日${label}的格式应为：${command} 每天 08:30 打卡`)
+  if (every) {
+    throw new Error(`重复${label}的格式应为：${command} every 30m 喝水 或 ${command} 每天 08:30 打卡`)
+  }
+  throw new Error(`无法识别时间“${timeToken || (tokens[0] ?? "")}”。${usage}`)
 }
 
 export class ReminderStore {
@@ -300,6 +357,7 @@ export class ReminderStore {
   readonly #log: Logger
   #nextId = 1
   #reminders: Reminder[] = []
+  #unreadable = false
 
   constructor(path: string, log: Logger) {
     this.#path = path
@@ -308,6 +366,7 @@ export class ReminderStore {
   }
 
   add(chatId: number, userId: number, text: string, dueAt: number, repeat?: ReminderRepeat): Reminder {
+    this.#assertWritable()
     const reminder: Reminder = { id: this.#nextId++, chatId, userId, text, dueAt, createdAt: Date.now() }
     if (repeat) reminder.repeat = repeat
     this.#reminders.push(reminder)
@@ -326,30 +385,48 @@ export class ReminderStore {
   cancel(chatId: number, id: number): Reminder | undefined {
     const index = this.#reminders.findIndex((item) => item.id === id && item.chatId === chatId)
     if (index < 0) return undefined
+    this.#assertWritable()
     const [removed] = this.#reminders.splice(index, 1)
     this.#save()
     return removed
   }
 
   takeDue(now: number): Reminder[] {
-    const isDue = (item: Reminder): boolean => item.dueAt <= now && (item.retryAt ?? 0) <= now
+    const isDue = (item: Reminder): boolean =>
+      !item.runningAt && item.dueAt <= now && (item.retryAt ?? 0) <= now
     const due = this.#reminders.filter(isDue)
-    if (due.length === 0) return due
-    this.#reminders = this.#reminders.filter((item) => !isDue(item))
+    if (due.length === 0) return []
+    for (const item of due) item.runningAt = now
     this.#save()
-    return due
+    return due.map((item) => ({ ...item }))
   }
 
-  restore(reminders: Reminder[]): void {
-    if (reminders.length === 0) return
-    this.#reminders.push(...reminders)
+  /**
+   * Persist the outcome of a delivery. Without a patch the reminder is removed
+   * (one-shot); with dueAt/retryAt it is rescheduled and marked idle again.
+   */
+  settle(id: number, patch?: Partial<Pick<Reminder, "dueAt" | "attempts" | "retryAt">>): void {
+    const index = this.#reminders.findIndex((item) => item.id === id)
+    if (index < 0) return
+    if (!patch) {
+      this.#reminders.splice(index, 1)
+    } else {
+      const item = this.#reminders[index]!
+      if (patch.dueAt !== undefined) item.dueAt = patch.dueAt
+      item.attempts = patch.attempts
+      item.retryAt = patch.retryAt
+      item.runningAt = undefined
+    }
     this.#save()
   }
 
   #load(): void {
     if (!existsSync(this.#path)) return
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<ReminderFile>
+      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<ReminderFile> | null
+      if (typeof parsed !== "object" || parsed === null || (parsed.reminders !== undefined && !Array.isArray(parsed.reminders))) {
+        throw new Error("提醒文件结构无效")
+      }
       this.#nextId = Number.isInteger(parsed.nextId) && (parsed.nextId ?? 0) > 0 ? parsed.nextId! : 1
       const items = Array.isArray(parsed.reminders) ? parsed.reminders : []
       for (const item of items) {
@@ -376,16 +453,31 @@ export class ReminderStore {
       }
       this.#log.debug(`loaded ${this.#reminders.length} reminder(s) from ${this.#path}`)
     } catch (err) {
+      this.#unreadable = true
       this.#log.warn(`failed to read reminder store ${this.#path}:`, (err as Error).message)
     }
   }
 
+  #assertWritable(): void {
+    if (!this.#unreadable) return
+    throw new Error(
+      `提醒文件 ${this.#path} 无法解析，为避免丢失已有提醒已拒绝写入。请先修复该文件（或备份后删除）再重试。`,
+    )
+  }
+
   #save(): void {
+    // A store we could not read holds (at most) what we recovered; writing it back would
+    // replace every reminder the parse dropped with the reduced set
+    if (this.#unreadable) {
+      this.#log.warn(`reminder store ${this.#path} is unreadable; skipped writing it`)
+      return
+    }
     try {
       mkdirSync(dirname(this.#path), { recursive: true })
       const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, JSON.stringify({ nextId: this.#nextId, reminders: this.#reminders }, null, 2))
+      writeFileSync(tmp, JSON.stringify({ nextId: this.#nextId, reminders: this.#reminders }, null, 2), { mode: 0o600 })
       renameSync(tmp, this.#path)
+      chmodSync(this.#path, 0o600)
     } catch (err) {
       this.#log.warn("failed to persist reminder store:", (err as Error).message)
     }
@@ -398,14 +490,27 @@ export class ReminderService {
   readonly #store: ReminderStore
   readonly #send: ReminderSender
   readonly #log: Logger
-  readonly #timeZone: string
+  readonly #access: (userId: number) => boolean
+  #timeZone: string
   #timer?: NodeJS.Timeout
   #ticking = false
 
-  constructor(path: string, send: ReminderSender, log: Logger, timeZone = DEFAULT_TIMEZONE) {
+  constructor(
+    path: string,
+    send: ReminderSender,
+    log: Logger,
+    timeZone = DEFAULT_TIMEZONE,
+    access?: (userId: number) => boolean,
+  ) {
     this.#store = new ReminderStore(path, log)
     this.#send = send
     this.#log = log
+    this.#timeZone = timeZone
+    this.#access = access ?? (() => true)
+  }
+
+  /** /timezone applies without a restart; already-scheduled due times are kept. */
+  setTimeZone(timeZone: string): void {
     this.#timeZone = timeZone
   }
 
@@ -447,15 +552,19 @@ export class ReminderService {
         if (now - reminder.dueAt > MAX_OVERDUE_MS) {
           if (reminder.repeat) {
             // Keep the recurrence alive after a long outage but skip the stale occurrence
-            reminder.dueAt = nextReminderDue(reminder, now, this.#timeZone) ?? now + TICK_MS
-            reminder.attempts = undefined
-            reminder.retryAt = undefined
-            this.#store.restore([reminder])
+            const next = nextReminderDue(reminder, now, this.#timeZone) ?? now + TICK_MS
+            this.#store.settle(reminder.id, { dueAt: next })
             this.#log.warn(
-              `skipped stale occurrence of recurring reminder #${reminder.id}; next at ${new Date(reminder.dueAt).toISOString()}`,
+              `skipped stale occurrence of recurring reminder #${reminder.id}; next at ${new Date(next).toISOString()}`,
             )
           } else {
+            this.#store.settle(reminder.id)
             this.#log.warn(`dropped reminder #${reminder.id}; it was overdue by over 7 days`)
+            // Deleting it in silence looks exactly like the bot lost the reminder, so say so
+            await this.#send(
+              reminder.chatId,
+              `⏰ 提醒 #${reminder.id} 已过期未发送：Bot 停机期间它超过 7 天没有触发，已自动删除。`,
+            ).catch(() => {})
           }
           continue
         }
@@ -464,19 +573,32 @@ export class ReminderService {
         if (late) tags.push("补发")
         const prefix = tags.length > 0 ? `⏰ 提醒（${tags.join("，")}）` : "⏰ 提醒"
         try {
+          // A chat whose owner was taken off the access list must not keep receiving
+          // bot output; the failure path keeps the recurrence and drops it on backoff
+          if (!this.#access(reminder.userId)) throw new Error("用户已不在访问白名单中")
           await this.#sendWithTimeout(reminder.chatId, `${prefix} #${reminder.id}：${reminder.text}`)
           if (reminder.repeat) {
             const next = nextReminderDue(reminder, now, this.#timeZone)
-            if (next) {
-              reminder.dueAt = next
-              reminder.attempts = undefined
-              reminder.retryAt = undefined
-              this.#store.restore([reminder])
-            }
+            if (next) this.#store.settle(reminder.id, { dueAt: next })
+            else this.#store.settle(reminder.id)
+          } else {
+            this.#store.settle(reminder.id)
           }
         } catch (err) {
           const attempts = (reminder.attempts ?? 0) + 1
+          if (reminder.repeat) {
+            // A recurring reminder must outlive a Telegram outage or an unreachable
+            // chat: skip this occurrence and keep the recurrence instead of deleting it
+            const next = nextReminderDue(reminder, now, this.#timeZone) ?? now + TICK_MS
+            this.#store.settle(reminder.id, { dueAt: next })
+            this.#log.warn(
+              `skipped occurrence of reminder #${reminder.id} after ${attempts} failed delivery attempt(s); ` +
+                `next at ${new Date(next).toISOString()}: ${(err as Error).message}`,
+            )
+            continue
+          }
           if (attempts >= MAX_ATTEMPTS) {
+            this.#store.settle(reminder.id)
             this.#log.error(
               `dropped reminder #${reminder.id} after ${attempts} failed deliveries:`,
               (err as Error).message,
@@ -484,10 +606,8 @@ export class ReminderService {
             continue
           }
           const delay = RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)]!
-          reminder.attempts = attempts
-          reminder.retryAt = now + delay
-          // Put it back with a backoff so a transient Telegram outage doesn't lose the reminder
-          this.#store.restore([reminder])
+          // Keep the reminder with a backoff so a transient Telegram outage doesn't lose it
+          this.#store.settle(reminder.id, { attempts, retryAt: now + delay })
           this.#log.warn(
             `failed to deliver reminder #${reminder.id} (attempt ${attempts}), retry in ${Math.round(delay / 1000)}s:`,
             (err as Error).message,

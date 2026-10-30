@@ -1,9 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { Agent, ProxyAgent, fetch, type Dispatcher } from "undici"
+import { readJsonObject } from "./jsonStore.js"
 import { SocksClient } from "socks"
 import tls from "node:tls"
 import type { Logger } from "./logger.js"
+import { clip } from "./messages.js"
 import { describeFetchError } from "./opencode.js"
 
 export type ProxyProtocol = "http" | "https" | "socks4" | "socks5"
@@ -69,7 +71,13 @@ export function parseProxyUrl(input: string): { url: string; protocol: ProxyProt
   const port = parsed.port ? Number(parsed.port) : DEFAULT_PORTS[protocol]
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("代理端口无效。")
 
-  const auth = parsed.username ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ""}@` : ""
+  // URL.username/password stay percent-encoded (the getters do not decode), so the
+  // userinfo round-trips as typed; rebuilding it also keeps a password-only URL
+  // such as `socks5://:pass@host` from silently losing its credentials
+  const auth =
+    parsed.username || parsed.password
+      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ""}@`
+      : ""
   return {
     url: `${parsed.protocol}//${auth}${parsed.hostname}:${port}`,
     protocol,
@@ -86,8 +94,27 @@ export function maskProxyUrl(raw: string): string {
   }
 }
 
+/**
+ * Credentials for a hand-built SOCKS handshake. The URL getters keep userinfo
+ * percent-encoded, so it is decoded here once — but a lone `%` (an invalid escape
+ * the parser leaves verbatim) would make decodeURIComponent throw a URIError and
+ * abort the connection, so it falls back to the raw text.
+ */
+export function socksCredentials(url: URL): { userId?: string; password?: string } {
+  const decode = (value: string): string | undefined => {
+    if (!value) return undefined
+    try {
+      return decodeURIComponent(value)
+    } catch {
+      return value
+    }
+  }
+  return { userId: decode(url.username), password: decode(url.password) }
+}
+
 function socksDispatcher(url: URL): Agent {
   const type = url.protocol.startsWith("socks4") ? 4 : 5
+  const { userId, password } = socksCredentials(url)
   return new Agent({
     connectTimeout: TEST_TIMEOUT_MS,
     headersTimeout: 30_000,
@@ -99,8 +126,8 @@ function socksDispatcher(url: URL): Agent {
           host: url.hostname,
           port: Number(url.port) || 1080,
           type,
-          userId: url.username ? decodeURIComponent(url.username) : undefined,
-          password: url.password ? decodeURIComponent(url.password) : undefined,
+          userId,
+          password,
         },
         command: "connect",
         destination: { host: options.hostname, port },
@@ -150,7 +177,9 @@ async function defaultTester(url: string, protocol: ProxyProtocol): Promise<void
 
 function cleanName(input: string | undefined, fallback: string): string {
   const value = (input ?? "").replace(/\s+/g, " ").trim()
-  return (value || fallback).slice(0, 40)
+  // A display name is echoed in panel buttons; cutting a surrogate pair in half
+  // makes Telegram reject the whole keyboard
+  return clip(value || fallback, 40) ?? ""
 }
 
 export class ProxyService {
@@ -219,6 +248,9 @@ export class ProxyService {
     if (this.#activeId === null) return
     this.#log.info(`proxy disabled #${this.#activeId}`)
     this.#activeId = null
+    // Closing is otherwise lazy: without this the tunnel to a proxy the user
+    // just turned off stays open with pooled sockets until the next download
+    this.#closeDispatcher()
     this.#save()
     this.#writeEnv()
   }
@@ -229,6 +261,7 @@ export class ProxyService {
     const [removed] = this.#proxies.splice(index, 1)
     if (this.#activeId === id) {
       this.#activeId = null
+      this.#closeDispatcher()
       this.#writeEnv()
     }
     this.#save()
@@ -291,9 +324,9 @@ export class ProxyService {
   }
 
   #load(): void {
-    if (!existsSync(this.#path)) return
+    const parsed = readJsonObject(this.#path, (message) => this.#log.warn(message)) as Partial<ProxyFile> | undefined
+    if (!parsed) return
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<ProxyFile>
       this.#nextId = Number.isInteger(parsed.nextId) && (parsed.nextId ?? 0) > 0 ? parsed.nextId! : 1
       const items = Array.isArray(parsed.proxies) ? parsed.proxies : []
       for (const item of items) {

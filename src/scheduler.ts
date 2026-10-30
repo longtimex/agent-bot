@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import type { Logger } from "./logger.js"
+import { clip } from "./messages.js"
 import { AVAILABLE_MODELS, resolveModelKey, resolveQoderModel } from "./models.js"
 import {
   DEFAULT_TIMEZONE,
@@ -18,6 +19,10 @@ export const MAX_SCHEDULE_PROMPT = 2_000
 const TICK_MS = 15_000
 const MAX_OVERDUE_MS = 7 * 24 * 60 * 60 * 1000
 const OUTCOMES: UsageOutcome[] = ["ok", "failed", "cancelled"]
+const ENGINE_ID_RE = /^[a-z0-9][a-z0-9._-]*$/
+/** One-shot tasks hit transient backend/network errors, so retry before discarding them. */
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000]
+const MAX_FAILURE_ATTEMPTS = RETRY_DELAYS_MS.length
 
 export interface ScheduledModel {
   providerID: string
@@ -34,18 +39,20 @@ export interface ScheduledTask {
   createdAt: number
   engine: BackendEngine
   model?: ScheduledModel
-  qoderModel?: string
+  cliModel?: string
   repeat?: ReminderRepeat
   paused?: boolean
   runningAt?: number
   lastRunAt?: number
   lastStatus?: UsageOutcome
+  /** Number of failed runs that are being retried; only used by one-shot tasks. */
+  attempts?: number
 }
 
 export interface ScheduleDefaults {
   engine: BackendEngine
   model?: ScheduledModel
-  qoderModel?: string
+  cliModel?: string
 }
 
 export interface ScheduleDraft {
@@ -54,7 +61,18 @@ export interface ScheduleDraft {
   repeat?: ReminderRepeat
   engine: BackendEngine
   model?: ScheduledModel
-  qoderModel?: string
+  cliModel?: string
+}
+
+/**
+ * Lets the scheduler resolve arbitrary CLI engine ids and their models.
+ * `AgentCliRegistry` implements this interface.
+ */
+export interface ScheduleEngineResolver {
+  resolveEngine(raw: string): string | undefined
+  label(engine: string): string
+  resolveModel(engine: string, raw: string): string | undefined
+  defaultModel(engine: string): string | undefined
 }
 
 interface ScheduleFile {
@@ -62,9 +80,20 @@ interface ScheduleFile {
   tasks: ScheduledTask[]
 }
 
+interface StoredTask extends Partial<ScheduledTask> {
+  qoderModel?: string
+}
+
 function modelFromInfo(key: string): ScheduledModel {
   const info = AVAILABLE_MODELS[key]!
   return { providerID: info.providerID, modelID: info.modelID, label: info.label }
+}
+
+function legacyResolveEngine(raw: string): string | undefined {
+  const norm = raw.toLowerCase()
+  if (norm === "qoder" || norm === "q") return "qoder"
+  if (norm === "opencode" || norm === "oc" || norm === "open") return "opencode"
+  return undefined
 }
 
 export function parseScheduleAdd(
@@ -72,6 +101,7 @@ export function parseScheduleAdd(
   defaults: ScheduleDefaults,
   now = Date.now(),
   timeZone = DEFAULT_TIMEZONE,
+  resolver?: ScheduleEngineResolver,
 ): ScheduleDraft {
   let rest = input.trim()
   const flags: { engine?: string; model?: string } = {}
@@ -88,31 +118,46 @@ export function parseScheduleAdd(
 
   let engine = defaults.engine
   if (flags.engine) {
-    const norm = flags.engine.toLowerCase()
-    if (norm === "qoder" || norm === "q") engine = "qoder"
-    else if (norm === "opencode" || norm === "oc" || norm === "open") engine = "opencode"
-    else throw new Error("引擎仅支持 opencode 或 qoder。")
+    const resolved = resolver?.resolveEngine(flags.engine) ?? legacyResolveEngine(flags.engine)
+    if (!resolved) {
+      throw new Error(
+        resolver
+          ? `未识别的引擎：${flags.engine}。发送 /agent 查看可用引擎。`
+          : "引擎仅支持 opencode 或 qoder。",
+      )
+    }
+    engine = resolved
   }
 
-  let model = engine === "opencode" ? defaults.model : undefined
-  let qoderModel = engine === "qoder" ? defaults.qoderModel : undefined
+  // Defaults belong to the chat's current engine; do not carry them across --engine switches
+  const sameEngine = engine === defaults.engine
+  let model = engine === "opencode" && sameEngine ? defaults.model : undefined
+  let cliModel = engine !== "opencode" && sameEngine ? defaults.cliModel : undefined
 
   if (flags.model) {
-    if (engine === "qoder") {
-      const resolved = resolveQoderModel(flags.model)
-      if (!resolved) throw new Error("Qoder 仅支持 deepseek 或 qwen 模型。")
-      qoderModel = resolved
-    } else {
+    if (engine === "opencode") {
       const key = resolveModelKey(flags.model)
       if (!key) throw new Error(`未识别的模型：${flags.model}。发送 /model 查看可用列表。`)
       model = modelFromInfo(key)
+    } else {
+      const resolved = resolver
+        ? resolver.resolveModel(engine, flags.model)
+        : engine === "qoder"
+          ? resolveQoderModel(flags.model)
+          : flags.model.trim()
+      if (!resolved) {
+        throw new Error(engine === "qoder" ? "Qoder 仅支持 deepseek 或 qwen 模型。" : `未识别的模型：${flags.model}。`)
+      }
+      cliModel = resolved
     }
   }
 
-  if (engine === "qoder") {
-    qoderModel ||= "Qwen3.8-Flash"
-  } else {
+  if (engine === "opencode") {
     model ??= modelFromInfo("gemini")
+    cliModel = undefined
+  } else {
+    cliModel ??= resolver?.defaultModel(engine) ?? (engine === "qoder" ? "Qwen3.8-Flash" : undefined)
+    model = undefined
   }
 
   if (!rest) {
@@ -130,13 +175,19 @@ export function parseScheduleAdd(
     repeat: parsed.repeat,
     engine,
     model,
-    qoderModel,
+    cliModel,
   }
 }
 
-export function scheduleTargetLabel(task: Pick<ScheduledTask, "engine" | "model" | "qoderModel">): string {
-  if (task.engine === "qoder") return `Qoder / ${task.qoderModel ?? "Qwen3.8-Flash"}`
-  return `OpenCode / ${task.model?.label ?? "默认模型"}`
+export function scheduleTargetLabel(
+  task: Pick<ScheduledTask, "engine" | "model" | "cliModel">,
+  resolver?: ScheduleEngineResolver,
+): string {
+  if (task.engine === "opencode") return `OpenCode / ${task.model?.label ?? "默认模型"}`
+  const label = resolver?.label(task.engine) ?? (task.engine === "qoder" ? "Qoder" : task.engine)
+  const model =
+    task.cliModel ?? resolver?.defaultModel(task.engine) ?? (task.engine === "qoder" ? "Qwen3.8-Flash" : undefined)
+  return `${label} / ${model ?? "CLI 默认"}`
 }
 
 function sanitizeModel(value: unknown): ScheduledModel | undefined {
@@ -160,6 +211,7 @@ export class ScheduleStore {
   readonly #log: Logger
   #nextId = 1
   #tasks: ScheduledTask[] = []
+  #unreadable = false
 
   constructor(path: string, log: Logger) {
     this.#path = path
@@ -168,6 +220,7 @@ export class ScheduleStore {
   }
 
   add(task: Omit<ScheduledTask, "id">): ScheduledTask {
+    this.#assertWritable()
     const stored: ScheduledTask = { ...task, id: this.#nextId++ }
     this.#tasks.push(stored)
     this.#save()
@@ -192,7 +245,9 @@ export class ScheduleStore {
 
   updateById(
     id: number,
-    patch: Partial<Pick<ScheduledTask, "dueAt" | "paused" | "runningAt" | "lastRunAt" | "lastStatus">>,
+    patch: Partial<
+      Pick<ScheduledTask, "dueAt" | "paused" | "runningAt" | "lastRunAt" | "lastStatus" | "attempts">
+    >,
   ): ScheduledTask | undefined {
     const task = this.#tasks.find((item) => item.id === id)
     if (!task) return undefined
@@ -204,6 +259,7 @@ export class ScheduleStore {
   remove(chatId: number, id: number): ScheduledTask | undefined {
     const index = this.#tasks.findIndex((item) => item.id === id && item.chatId === chatId)
     if (index < 0) return undefined
+    this.#assertWritable()
     const [removed] = this.#tasks.splice(index, 1)
     this.#save()
     return removed ? { ...removed } : undefined
@@ -228,50 +284,80 @@ export class ScheduleStore {
   #load(): void {
     if (!existsSync(this.#path)) return
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<ScheduleFile>
+      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<ScheduleFile> | null
+      if (typeof parsed !== "object" || parsed === null || (parsed.tasks !== undefined && !Array.isArray(parsed.tasks))) {
+        throw new Error("定时任务文件结构无效")
+      }
       this.#nextId = Number.isInteger(parsed.nextId) && (parsed.nextId ?? 0) > 0 ? parsed.nextId! : 1
-      const items = Array.isArray(parsed.tasks) ? parsed.tasks : []
+      const items = Array.isArray(parsed.tasks) ? (parsed.tasks as StoredTask[]) : []
       const seen = new Set<number>()
       for (const item of items) {
-        if (!item || !Number.isInteger(item.id) || seen.has(item.id)) continue
+        const id = item?.id
+        if (!Number.isInteger(id) || seen.has(id!)) continue
+        const chatId = item.chatId
+        const dueAt = item.dueAt
         if (
-          !Number.isFinite(item.chatId) ||
-          !Number.isFinite(item.dueAt) ||
+          !Number.isFinite(chatId) ||
+          !Number.isFinite(dueAt) ||
           typeof item.prompt !== "string" ||
           !item.prompt.trim()
         ) {
           continue
         }
-        const engine: BackendEngine = item.engine === "qoder" ? "qoder" : "opencode"
+        const rawEngine = typeof item.engine === "string" ? item.engine.trim().toLowerCase() : ""
+        const engine: BackendEngine = ENGINE_ID_RE.test(rawEngine) ? rawEngine : "opencode"
         const model = sanitizeModel(item.model)
-        const qoderModel = typeof item.qoderModel === "string" && item.qoderModel ? item.qoderModel : undefined
+        const cliModel =
+          typeof item.cliModel === "string" && item.cliModel
+            ? item.cliModel
+            : engine === "qoder" && typeof item.qoderModel === "string" && item.qoderModel
+              ? item.qoderModel
+              : undefined
         this.#tasks.push({
-          id: item.id,
-          chatId: item.chatId,
-          userId: Number.isFinite(item.userId) ? item.userId : 0,
-          prompt: item.prompt.slice(0, MAX_SCHEDULE_PROMPT),
-          dueAt: item.dueAt,
-          createdAt: Number.isFinite(item.createdAt) ? item.createdAt : item.dueAt,
+          id: id!,
+          chatId: chatId!,
+          userId: Number.isFinite(item.userId) ? item.userId! : 0,
+          prompt: clip(item.prompt, MAX_SCHEDULE_PROMPT) ?? item.prompt,
+          dueAt: dueAt!,
+          createdAt: Number.isFinite(item.createdAt) ? item.createdAt! : dueAt!,
           engine,
           model: engine === "opencode" ? (model ?? modelFromInfo("gemini")) : undefined,
-          qoderModel: engine === "qoder" ? (qoderModel ?? "Qwen3.8-Flash") : undefined,
+          cliModel: engine !== "opencode" ? (cliModel ?? (engine === "qoder" ? "Qwen3.8-Flash" : undefined)) : undefined,
           repeat: sanitizeRepeat(item.repeat),
           paused: item.paused === true,
           // A persisted runningAt means the bot died mid-run; clear it so the task runs again
           runningAt: undefined,
-          lastRunAt: Number.isFinite(item.lastRunAt) ? item.lastRunAt : undefined,
+          lastRunAt: Number.isFinite(item.lastRunAt) ? item.lastRunAt! : undefined,
           lastStatus: sanitizeOutcome(item.lastStatus),
+          attempts:
+            Number.isInteger(item.attempts) && (item.attempts ?? 0) > 0
+              ? Math.min(item.attempts!, MAX_FAILURE_ATTEMPTS)
+              : undefined,
         })
-        seen.add(item.id)
-        if (item.id >= this.#nextId) this.#nextId = item.id + 1
+        seen.add(id!)
+        if (id! >= this.#nextId) this.#nextId = id! + 1
       }
       this.#log.debug(`loaded ${this.#tasks.length} scheduled task(s) from ${this.#path}`)
     } catch (err) {
+      this.#unreadable = true
       this.#log.warn(`failed to read schedule store ${this.#path}:`, (err as Error).message)
     }
   }
 
+  #assertWritable(): void {
+    if (!this.#unreadable) return
+    throw new Error(
+      `定时任务文件 ${this.#path} 无法解析，为避免丢失已有任务已拒绝写入。请先修复该文件（或备份后删除）再重试。`,
+    )
+  }
+
   #save(): void {
+    // Writing the recovered subset over a file we could not parse would delete every
+    // task the damaged section held
+    if (this.#unreadable) {
+      this.#log.warn(`schedule store ${this.#path} is unreadable; skipped writing it`)
+      return
+    }
     try {
       mkdirSync(dirname(this.#path), { recursive: true })
       const tmp = `${this.#path}.tmp`
@@ -290,16 +376,45 @@ export class ScheduleService {
   readonly #store: ScheduleStore
   readonly #executor: ScheduleExecutor
   readonly #log: Logger
-  readonly #timeZone: string
+  #timeZone: string
+  readonly #resolver?: ScheduleEngineResolver
+  readonly #access: (userId: number) => boolean
+  readonly #notice?: (chatId: number, text: string) => Promise<void> | void
   readonly #inflight = new Set<Promise<void>>()
   #timer?: NodeJS.Timeout
   #ticking = false
   #stopping = false
 
-  constructor(path: string, executor: ScheduleExecutor, log: Logger, timeZone = DEFAULT_TIMEZONE) {
+  constructor(
+    path: string,
+    executor: ScheduleExecutor,
+    log: Logger,
+    timeZone = DEFAULT_TIMEZONE,
+    resolver?: ScheduleEngineResolver,
+    access?: (userId: number) => boolean,
+    notice?: (chatId: number, text: string) => Promise<void> | void,
+  ) {
     this.#store = new ScheduleStore(path, log)
     this.#executor = executor
     this.#log = log
+    this.#timeZone = timeZone
+    this.#resolver = resolver
+    this.#access = access ?? (() => true)
+    this.#notice = notice
+  }
+
+  /** A failed notice must never abort the tick loop that is delivering other tasks. */
+  async #notify(task: ScheduledTask, text: string): Promise<void> {
+    if (!this.#notice) return
+    try {
+      await this.#notice(task.chatId, text)
+    } catch (err) {
+      this.#log.warn(`failed to deliver schedule notice #${task.id}:`, (err as Error).message)
+    }
+  }
+
+  /** /timezone applies without a restart; already-computed due times are kept. */
+  setTimeZone(timeZone: string): void {
     this.#timeZone = timeZone
   }
 
@@ -307,7 +422,7 @@ export class ScheduleService {
     if (this.#store.count(chatId) >= MAX_SCHEDULES_PER_CHAT) {
       throw new Error(`每个会话最多创建 ${MAX_SCHEDULES_PER_CHAT} 个定时任务，请先删除部分任务。`)
     }
-    const draft = parseScheduleAdd(input, defaults, now, this.#timeZone)
+    const draft = parseScheduleAdd(input, defaults, now, this.#timeZone, this.#resolver)
     return this.#store.add({
       chatId,
       userId,
@@ -316,7 +431,7 @@ export class ScheduleService {
       createdAt: now,
       engine: draft.engine,
       model: draft.model,
-      qoderModel: draft.qoderModel,
+      cliModel: draft.cliModel,
       repeat: draft.repeat,
     })
   }
@@ -339,6 +454,32 @@ export class ScheduleService {
 
   remove(chatId: number, id: number): ScheduledTask | undefined {
     return this.#store.remove(chatId, id)
+  }
+
+  /**
+   * Runs a task immediately on demand. dueAt/repeat stay untouched, so the
+   * upcoming automatic run is not moved or consumed; only runningAt and the
+   * last-run bookkeeping change.
+   */
+  runNow(chatId: number, id: number): ScheduledTask | undefined {
+    const task = this.#store.find(chatId, id)
+    if (!task) return undefined
+    if (task.runningAt) throw new Error(`定时任务 #${id} 正在执行中，请等待当前运行结束后再试。`)
+    this.#store.updateById(id, { runningAt: Date.now() })
+    const run = this.#runManual(task).finally(() => this.#inflight.delete(run))
+    this.#inflight.add(run)
+    return task
+  }
+
+  async #runManual(task: ScheduledTask): Promise<void> {
+    this.#log.info(`scheduled task #${task.id} run manually (${scheduleTargetLabel(task, this.#resolver)})`)
+    let outcome: UsageOutcome = "failed"
+    try {
+      outcome = await this.#executor(task)
+    } catch (err) {
+      this.#log.error(`scheduled task #${task.id} manual run failed:`, (err as Error).message)
+    }
+    this.#store.updateById(task.id, { runningAt: undefined, lastRunAt: Date.now(), lastStatus: outcome })
   }
 
   start(): void {
@@ -377,7 +518,21 @@ export class ScheduleService {
           } else {
             this.#store.removeById(task.id)
             this.#log.warn(`dropped scheduled task #${task.id}; it was overdue by over 7 days`)
+            // Removing it in silence looks exactly like the bot lost the task
+            await this.#notify(task, `🗓 定时任务 #${task.id} 已过期未执行：Bot 停机期间它超过 7 天没有触发，已自动删除。`)
           }
+          continue
+        }
+        if (!this.#access(task.userId)) {
+          // The owner is off the access list, so no reply could ever be delivered:
+          // pause the task instead of spending an AI run on it at every due time
+          this.#store.updateById(task.id, {
+            runningAt: undefined,
+            paused: true,
+            lastRunAt: Date.now(),
+            lastStatus: "cancelled",
+          })
+          this.#log.warn(`scheduled task #${task.id} paused: user ${task.userId} is no longer allowed`)
           continue
         }
         const run = this.#execute(task).finally(() => this.#inflight.delete(run))
@@ -389,7 +544,7 @@ export class ScheduleService {
   }
 
   async #execute(task: ScheduledTask): Promise<void> {
-    this.#log.info(`scheduled task #${task.id} triggered (${scheduleTargetLabel(task)})`)
+    this.#log.info(`scheduled task #${task.id} triggered (${scheduleTargetLabel(task, this.#resolver)})`)
     let outcome: UsageOutcome = "failed"
     try {
       outcome = await this.#executor(task)
@@ -421,9 +576,43 @@ export class ScheduleService {
         runningAt: undefined,
         lastRunAt: finishedAt,
         lastStatus: outcome,
+        attempts: undefined,
       })
-    } else {
-      this.#store.removeById(task.id)
+      return
+    }
+
+    if (outcome === "cancelled") {
+      // The user stopped this queued run, so the task never executed; keep it paused
+      // instead of deleting it, and let /schedule resume or run decide what happens
+      this.#store.updateById(task.id, {
+        runningAt: undefined,
+        paused: true,
+        lastRunAt: finishedAt,
+        lastStatus: outcome,
+      })
+      this.#log.warn(`scheduled task #${task.id} was cancelled before running; paused it`)
+      return
+    }
+
+    const attempts = (task.attempts ?? 0) + 1
+    if (outcome === "failed" && attempts <= MAX_FAILURE_ATTEMPTS) {
+      const delay = RETRY_DELAYS_MS[attempts - 1]!
+      this.#store.updateById(task.id, {
+        dueAt: finishedAt + delay,
+        runningAt: undefined,
+        lastRunAt: finishedAt,
+        lastStatus: outcome,
+        attempts,
+      })
+      this.#log.warn(
+        `scheduled task #${task.id} failed (retry ${attempts}/${MAX_FAILURE_ATTEMPTS} in ${Math.round(delay / 1000)}s)`,
+      )
+      return
+    }
+    this.#store.removeById(task.id)
+    if (outcome === "failed") {
+      this.#log.warn(`dropped scheduled task #${task.id} after ${attempts} failed run(s)`)
+      await this.#notify(task, `🗓 定时任务 #${task.id} 连续失败 ${attempts} 次，已自动删除。可发送 /history 查看执行记录。`)
     }
   }
 }

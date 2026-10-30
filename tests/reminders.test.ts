@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -13,6 +13,7 @@ import {
   parseReminder,
   ReminderService,
   ReminderStore,
+  sanitizeRepeat,
 } from "../src/reminders.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} }
@@ -58,6 +59,15 @@ test("parseReminder understands recurring intervals and daily reminders", () => 
   assert.throws(() => parseReminder("every 5s 喝水", now), /10 秒/)
   assert.throws(() => parseReminder("every 喝水", now), /重复提醒的格式/)
   assert.throws(() => parseReminder("每天 打卡", now), /每日提醒的格式/)
+})
+
+test("sanitizeRepeat rejects intervals outside the supported range", () => {
+  assert.deepEqual(sanitizeRepeat({ type: "interval", ms: 60_000 }), { type: "interval", ms: 60_000 })
+  assert.equal(sanitizeRepeat({ type: "interval", ms: 5_000 }), undefined)
+  assert.equal(sanitizeRepeat({ type: "interval", ms: 400 * 86_400_000 }), undefined)
+  assert.equal(sanitizeRepeat({ type: "interval", ms: Number.POSITIVE_INFINITY }), undefined)
+  assert.deepEqual(sanitizeRepeat({ type: "daily", hour: 8, minute: 30 }), { type: "daily", hour: 8, minute: 30 })
+  assert.equal(sanitizeRepeat({ type: "daily", hour: 24, minute: 0 }), undefined)
 })
 
 test("describeRepeat and nextReminderDue describe recurring schedules", () => {
@@ -109,6 +119,20 @@ test("parseReminder resolves wall-clock times in the configured timezone", () =>
   })
 })
 
+test("parseReminder accepts wall-clock times only a few seconds away", () => {
+  // 2026-01-01 18:29:55 Asia/Shanghai
+  const now = Date.UTC(2026, 0, 1, 10, 29, 55)
+  assert.deepEqual(parseReminder("18:30 开会", now, "Asia/Shanghai"), {
+    dueAt: Date.UTC(2026, 0, 1, 10, 30),
+    text: "开会",
+  })
+  assert.deepEqual(parseReminder("每天 18:30 站会", now, "Asia/Shanghai"), {
+    dueAt: Date.UTC(2026, 0, 1, 10, 30),
+    text: "站会",
+    repeat: { type: "daily", hour: 18, minute: 30 },
+  })
+})
+
 test("formatting helpers render local time and durations", () => {
   assert.equal(formatReminderTime(Date.UTC(2026, 0, 1, 10, 30), "Asia/Shanghai"), "01-01 18:30")
   assert.equal(formatRemaining(30_000), "30 秒")
@@ -144,6 +168,29 @@ test("ReminderStore persists reminders and keeps ids monotonic", () => {
     assert.equal(reloaded.cancel(1, sooner.id), undefined)
     assert.equal(reloaded.cancel(2, sooner.id), undefined)
     assert.equal(reloaded.count(1), 2)
+    assert.equal(statSync(path).mode & 0o777, 0o600)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ReminderStore keeps a due reminder on disk until delivery settles", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+  try {
+    const path = join(dir, "reminders.json")
+    const store = new ReminderStore(path, log)
+    const now = Date.now()
+    const reminder = store.add(1, 10, "喝水", now - 5_000)
+
+    const due = store.takeDue(now)
+    assert.deepEqual(due.map((item) => item.id), [reminder.id])
+    // A crash right after takeDue must not lose the reminder
+    assert.equal(new ReminderStore(path, log).count(1), 1)
+    // ...but it must not be picked up twice while it is being delivered
+    assert.equal(store.takeDue(now).length, 0)
+
+    store.settle(reminder.id)
+    assert.equal(new ReminderStore(path, log).count(1), 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -195,7 +242,8 @@ test("ReminderService marks late deliveries and drops stale ones", async () => {
 
     service.add(42, 7, "10s 报告", now)
     await service.tick(now + 8 * 86_400_000)
-    assert.equal(sent.length, 1)
+    assert.equal(sent.length, 2, "the expired reminder is reported instead of vanishing")
+    assert.match(sent[1] ?? "", /已过期未发送/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -230,6 +278,36 @@ test("ReminderService retries when delivery fails", async () => {
     await service.tick(now + 80_000)
     assert.equal(sent.length, 1)
     assert.equal(service.list(42).length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ReminderService keeps recurring reminders through a delivery outage", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+  try {
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async () => {
+        throw new Error("network down")
+      },
+      log,
+    )
+    const now = Date.now()
+    const once = service.add(42, 7, "10s 备份", now)
+    const daily = service.add(42, 7, "every 1m 打卡", now)
+    assert.equal(once.repeat, undefined)
+    assert.ok(daily.repeat)
+
+    // Two hours per tick clears every backoff window; after 8 failures the one-shot is
+    // dropped while the recurrence keeps moving to its next occurrence
+    for (let step = 1; step <= 12; step++) await service.tick(now + step * 2 * 60 * 60_000)
+
+    const left = service.list(42)
+    assert.equal(left.length, 1, "the recurrence must outlive the outage")
+    assert.equal(left[0]?.id, daily.id)
+    assert.ok((left[0]?.dueAt ?? 0) > now, "the skipped occurrence advanced the schedule")
+    assert.equal(new ReminderStore(join(dir, "reminders.json"), log).count(42), 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -338,6 +416,111 @@ test("ReminderService caps reminders per chat and start() delivers immediately",
     service.dispose()
     assert.equal(sent.length, 1)
     assert.match(sent[0] ?? "", /立即/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("parseReminder accepts Chinese durations, day parts and relative days", () => {
+  // 2026-01-01 10:00 Asia/Shanghai
+  const now = Date.UTC(2026, 0, 1, 2, 0)
+  const tz = "Asia/Shanghai"
+
+  assert.deepEqual(parseReminder("5分钟后 喝水", now, tz), { dueAt: now + 5 * 60_000, text: "喝水" })
+  assert.deepEqual(parseReminder("半小时后 休息", now, tz), { dueAt: now + 30 * 60_000, text: "休息" })
+  assert.deepEqual(parseReminder("1小时30分钟后 站会", now, tz), { dueAt: now + 90 * 60_000, text: "站会" })
+  assert.deepEqual(parseReminder("每5分钟 喝水", now, tz), {
+    dueAt: now + 5 * 60_000,
+    text: "喝水",
+    repeat: { type: "interval", ms: 5 * 60_000 },
+  })
+
+  assert.deepEqual(parseReminder("下午3点 开会", now, tz), { dueAt: Date.UTC(2026, 0, 1, 7, 0), text: "开会" })
+  assert.deepEqual(parseReminder("今晚8点半 电影", now, tz), { dueAt: Date.UTC(2026, 0, 1, 12, 30), text: "电影" })
+  assert.deepEqual(parseReminder("明天早上8点 打卡", now, tz), { dueAt: Date.UTC(2026, 0, 2, 0, 0), text: "打卡" })
+  assert.deepEqual(parseReminder("后天 09:00 复诊", now, tz), { dueAt: Date.UTC(2026, 0, 3, 1, 0), text: "复诊" })
+  assert.deepEqual(parseReminder("每天8点半 打卡", now, tz), {
+    dueAt: Date.UTC(2026, 0, 2, 0, 30),
+    text: "打卡",
+    repeat: { type: "daily", hour: 8, minute: 30 },
+  })
+
+  // 20:00 local: 18:00 today is already gone rather than silently moved to tomorrow
+  assert.throws(() => parseReminder("今天晚上6点 开会", Date.UTC(2026, 0, 1, 12, 0), tz), /已过/)
+  assert.throws(() => parseReminder("前天 08:30 复盘", now, tz), /过去/)
+})
+
+test("ReminderService does not deliver to a user who lost bot access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-rem-"))
+  try {
+    const sent: string[] = []
+    const now = Date.now()
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async (chatId, text) => {
+        sent.push(`${chatId}:${text}`)
+      },
+      log,
+      "Asia/Shanghai",
+      () => false,
+    )
+    service.add(42, 7, "30m 喝水", now - 30 * 60_000)
+    await service.tick(now)
+
+    assert.deepEqual(sent, [])
+    assert.equal(service.list(42).length, 1, "the reminder keeps its slot and backs off")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a corrupt reminder store refuses to overwrite the damaged file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-rem-"))
+  const path = join(dir, "reminders.json")
+  const broken = '{"nextId":4,"reminders":[{"id":2,"chatId":42,"text'
+  try {
+    writeFileSync(path, broken)
+    const service = new ReminderService(path, async () => {}, log, "Asia/Shanghai")
+
+    assert.throws(() => service.add(42, 7, "30m 喝水", Date.now()), /无法解析/)
+    assert.equal(readFileSync(path, "utf8"), broken, "the recoverable file must survive untouched")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a reminder that expired during downtime is reported instead of vanishing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-rem-"))
+  try {
+    const now = Date.now()
+    const eightDaysLate = now - 8 * 24 * 60 * 60 * 1000
+    const sent: string[] = []
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async (_chatId, text) => {
+        sent.push(text)
+      },
+      log,
+      "Asia/Shanghai",
+    )
+    service.add(42, 7, "30m 喝水", eightDaysLate)
+    await service.tick(now)
+
+    assert.equal(service.list(42).length, 0)
+    assert.equal(sent.length, 1, `expected one expiry notice, got ${JSON.stringify(sent)}`)
+    assert.match(sent[0] ?? "", /已过期未发送/)
+
+    const broken = new ReminderService(
+      join(dir, "reminders2.json"),
+      async () => {
+        throw new Error("403: bot was blocked by the user")
+      },
+      log,
+      "Asia/Shanghai",
+    )
+    broken.add(42, 7, "30m 喝水", eightDaysLate)
+    await broken.tick(now)
+    assert.equal(broken.list(42).length, 0, "an undeliverable notice must not wedge the tick")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
