@@ -178,3 +178,86 @@ export class TaskHistoryStore {
     }
   }
 }
+
+
+export interface HistoryFormatOptions {
+  /** Chat label shown in the document header (e.g. "Telegram 12345" or "App"). */
+  source?: string
+  /** IANA timezone for the timestamps. */
+  timeZone?: string
+}
+
+const OUTCOME_BADGE: Record<string, string> = {
+  ok: "✅",
+  cancelled: "🚫",
+  failed: "❌",
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0")
+}
+
+function formatStamp(at: number, timeZone?: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(at))
+    const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? ""
+    return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`
+  } catch {
+    const d = new Date(at)
+    return `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`
+  }
+}
+
+/**
+ * Renders task history as a standalone Markdown document. Blockquotes carry the
+ * prompt so prompts that contain code fences or headings cannot break the layout.
+ */
+export function formatHistoryMarkdown(
+  entries: HistoryEntry[],
+  options: HistoryFormatOptions = {},
+): string {
+  const zone = options.timeZone
+  const lines: string[] = ["# Agent Bot 任务历史", ""]
+  if (options.source) {
+    lines.push(`来源：${options.source}`)
+  }
+  if (entries.length === 0) {
+    lines.push("", "_暂无任务记录。_")
+    return lines.join("\n")
+  }
+  const newest = entries.reduce((max, item) => (item.at > max ? item.at : max), 0)
+  const oldest = entries.reduce((min, item) => (item.at < min ? item.at : min), newest)
+  const ok = entries.filter((item) => item.outcome === "ok").length
+  lines.push(
+    `共 ${entries.length} 条（成功 ${ok} · 失败 ${entries.filter((item) => item.outcome === "failed").length} · 取消 ${entries.filter((item) => item.outcome === "cancelled").length}）`,
+    `时间范围：${formatStamp(oldest, zone)} ~ ${formatStamp(newest, zone)}`,
+    "",
+    "---",
+    "",
+  )
+  for (const entry of entries) {
+    const badge = OUTCOME_BADGE[entry.outcome] ?? "❔"
+    const meta = [
+      entry.engine ?? "unknown",
+      entry.model,
+      `${(entry.ms / 1000).toFixed(1)}s`,
+      entry.scheduled ? "定时" : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ")
+    lines.push(`## ${badge} ${formatStamp(entry.at, zone)}`, "", `\`${meta}\``, "")
+    for (const line of entry.prompt.split("\n")) {
+      lines.push(`> ${line}`)
+    }
+    lines.push("")
+  }
+  return lines.join("\n")
+}

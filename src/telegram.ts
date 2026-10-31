@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import QRCode from "qrcode"
 import { readFileSync, statSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { relative, resolve, sep } from "node:path"
@@ -16,13 +17,21 @@ import {
   type SavedAttachment,
 } from "./attachments.js"
 import type { BotConfig, ModelRef } from "./config.js"
-import { CcSwitchService, redactSecrets, stripAnsi, type CcSwitchProvider, type CcSwitchSpeedtest } from "./ccswitch.js"
-import { TaskHistoryStore } from "./history.js"
+import { CcSwitchService, redactSecrets, CcSwitchProviderDraft } from "./ccswitch.js"
+import { AliasStore } from "./aliases.js"
+import { CcCommands, type CcHost } from "./ccCommands.js"
+import { formatHistoryMarkdown, TaskHistoryStore } from "./history.js"
+import { CC_HELP, HELP, HELP_FULL } from "./help.js"
 import type { Logger } from "./logger.js"
+
+export { HELP_FULL }
 import { assertUrlAllowed, mediaLabel, parseReply, pinnedLookup, resolveMedia, safeMediaTarget, type ReplyPart } from "./media.js"
-import { clip, splitMessage } from "./messages.js"
+import { clip, escapeMarkdown, pruneChatState, splitMessage, type Panel } from "./messages.js"
+export { pruneChatState }
+export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { AgentCliService, normalizeWorkDirInput, type AgentCliProfile } from "./agentCli.js"
+import { buildAttachmentSections } from "./attachmentInput.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import {
   AVAILABLE_MODELS,
@@ -30,11 +39,13 @@ import {
   resolveModelKey,
   type ModelInfo,
 } from "./models.js"
-import { Opencode, OpencodeError, type PromptFile } from "./opencode.js"
+import { callEngine, resolveOpencodeModel, type EngineCallDeps } from "./engineCall.js"
+import { resolveApiToken } from "./api.js"
+import { Opencode, type PromptFile } from "./opencode.js"
 import { OPS_ENV_KEYS, OPS_ENV_RULES, OpsService, type OpsDiagnostics, type OpsResult } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
 import { maskProxyUrl, ProxyService } from "./proxy.js"
-import { describeRepeat, formatRemaining, formatReminderTime, MAX_PER_CHAT, ReminderService, zonedParts } from "./reminders.js"
+import { describeRepeat, formatRemaining, formatReminderTime, MAX_PER_CHAT, ReminderService, type Reminder, zonedParts } from "./reminders.js"
 import { scheduleTargetLabel, ScheduleService, type ScheduleDefaults, type ScheduledTask } from "./scheduler.js"
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
@@ -53,28 +64,6 @@ const CHAT_STATE_LIMIT = 500
 /** Failure cards keep their prompt for the 重试 button; only the newest ones survive. */
 const RETRY_CARD_LIMIT = 100
 
-/**
- * Drops the oldest entries that are no longer in use until the map fits `limit`.
- * Insertion order is first-seen order, not recency (re-`set` on an existing key
- * keeps its position), so the longest-standing chats leave first. That is fine
- * here: the survivors only lose a retry prompt and a generation counter, and a
- * chat with work in flight is protected by `isActive`.
- */
-export function pruneChatState<K>(
-  map: Map<K, unknown>,
-  isActive: (key: K) => boolean,
-  limit: number,
-): number {
-  if (map.size <= limit) return 0
-  let removed = 0
-  for (const key of map.keys()) {
-    if (map.size <= limit) break
-    if (isActive(key)) continue
-    map.delete(key)
-    removed++
-  }
-  return removed
-}
 
 // Control commands routed through the per-chat queue (they touch session state);
 // everything else that reaches the queue is a prompt and must respect the cap.
@@ -85,84 +74,6 @@ let jobSequence = 0
 
 /** `/model <word>` spellings that drop the chat's own selection and fall back to the configured default. */
 const MODEL_DEFAULT_WORDS = new Set(["default", "reset", "clear", "auto", "默认", "恢复默认"])
-
-const HELP = `🤖 *AI 私人助手 · 功能菜单*
-
-*对话*
-• 直接发送消息即可对话，支持图片、文件与语音
-• \`/new\` 新会话 · \`/stop\` 停止 · \`/retry\` 重试 · \`/queue\` 队列
-
-*引擎与模型*
-• \`/agent\` 切换 Agent 引擎（推荐 OpenCode）
-• \`/model\` 切换模型（\`/model default\` 恢复默认） · \`/agents\` 安装/卸载 CLI
-• \`/dir\` 设置本会话 CLI 工作目录 · \`/status\` 运行状态
-• \`/usage\` 使用统计 · \`/history\` 任务历史
-
-*任务与提醒*
-• \`/schedule\` 定时 AI 任务 · \`/reminders\` 待触发提醒
-• \`/remind 30m 喝水\` 设定提醒
-
-*集成*
-• \`/cc\` cc-switch 控制台（Provider / MCP / 提示词等）
-• \`/proxy\` 网络代理
-
-*运维*
-• \`/ops\` 运维中心 · \`/logs\` 日志 · \`/diag\` 诊断
-• \`/update\` 更新项目 · \`/restart\` 重启 Bot
-• \`/service\` OpenCode 服务 · \`/env\` 配置项 · \`/access\` 白名单 · \`/timezone\` 时区
-
-_更多：\`/help full\` 查看完整说明 · \`/help cc\` 查看 cc-switch 指令_`
-
-export const HELP_FULL = `🤖 *AI 私人助手 (Telegram 版)*
-
-*常用核心命令：*
-• \`/agent\` - 查看并切换 Agent 引擎（OpenCode / Claude Code / Codex / Gemini / Qoder 等）
-• \`/agent claude\` - 切换至 Claude Code 等本地 Agent CLI
-• \`/agent opencode\` - 切换回 OpenCode 引擎（推荐）
-• \`/agents\` - 检测本机 Agent CLI，安装/更新/卸载 Bot 托管的 CLI
-• \`/agents install <id>\` - 通过 npm/pip 安装内置 Agent CLI
-• \`/agents update <id>\` - 更新由 Bot 安装的 CLI（需确认）
-• \`/agents uninstall <id>\` - 卸载由 Bot 安装的 CLI（需确认）
-• \`/model\` - 查看或切换当前引擎的底层模型；\`/model default\` 取消本会话选择、恢复默认模型
-• \`/dir\` - 查看本会话 CLI 工作目录；\`/dir <路径>\` 切换（支持 \`~\` 与相对路径），\`/dir reset\` 恢复默认
-• \`/new\` 或 \`/reset\` - 重置会话上下文
-• \`/stop\` - 立即停止当前正在执行的任务
-• \`/retry\` - 重新发送上一条任务
-• \`/queue\` - 查看或清空排队中的消息
-• \`/status\` - 查看引擎、模型、运行时长与排队数
-• \`/usage\` - 查看任务量、成功率与耗时统计
-• \`/history [条数]\` - 查看最近的任务执行历史（引擎、模型、耗时与结果）
-• \`/schedule\` - 查看/管理定时 AI 任务
-• \`/schedule add 每天 09:00 检查服务器\` - 到点自动执行 AI 任务
-• \`/schedule add --engine claude --model sonnet 2h 汇总日志\` - 指定引擎与模型
-• \`/remind 30m 喝水\` - 设定定时提醒（支持 30s/10m/2h/1d、18:30、明天 08:30）
-• \`/remind every 30m 喝水\` - 重复提醒（也支持 \`每5分钟\`、\`每天 08:30\`、\`下午3点\`）
-• \`/reminders\` - 查看待触发的提醒
-• \`/cancel 编号\` - 取消指定提醒
-• \`/timezone\` - 查看/切换时区（提醒、定时任务、每日统计立即生效）
-• \`/timezone Asia/Shanghai\` - 直接指定 IANA 时区
-• \`/proxy\` - 管理网络代理（HTTP/HTTPS/SOCKS），支持测试、启用与删除
-• \`/cc\` - cc-switch 控制台：Provider/MCP/提示词/配置/代理/会话/认证等全部命令
-• \`/cc help\` - 查看 cc-switch 全部指令（含通用 \`/cc run\` 入口）
-• \`/cc model\` - 模型管理：为 Bot 或其他 agent 添加/删除模型、指定 agent 模型
-• \`/ops\` - 运维中心：诊断、日志、更新、重启、OpenCode 服务与配置
-• \`/diag\` / \`/logs [行数]\` - 系统诊断 / 查看 Bot 日志
-• \`/update\` - 拉取代码、安装依赖并构建（需确认）
-• \`/restart\` - 重启 Bot（需确认，systemd 部署会拒绝）
-• \`/service opencode start|stop|restart\` - 管理 OpenCode 服务
-• \`/env\` / \`/env set KEY VALUE\` / \`/env unset KEY\` - 安全查看与修改非密钥配置
-• \`/access\` / \`/access add <ID>\` / \`/access del <ID>\` - 管理 Telegram 访问白名单，立即生效
-• \`/id\` - 查看你的会话与当前配置信息
-• \`/help\` - 分类帮助；\`/help full\` 查看本文，\`/help cc\` 查看 cc-switch 指令
-
-*功能支持：*
-• 编程代码生成、分析与调试
-• 发送图片、文件、语音（文本文件会直接读取内容）
-• 图片、视频、语音与文件发送传输
-• Markdown 代码块语法高亮排版
-
-💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务能力最完整。
-💡 发送 \`/menu\` 打开功能菜单；各面板底部可一键返回主菜单。`
 
 const SCHEDULE_USAGE = `🗓 *定时 AI 任务*
 
@@ -175,98 +86,6 @@ const SCHEDULE_USAGE = `🗓 *定时 AI 任务*
 
 时间格式与 \`/remind\` 相同；提示词上限 2000 字，每个会话最多 20 个任务。`
 
-const CC_HELP = `🔌 *cc-switch 控制台*
-
-*Provider*
-• \`/cc provider list|current\`
-• \`/cc use <id>\` · \`/cc test [id]\` · \`/cc stream <id>\`
-• \`/cc models <id>\` · \`/cc quota <id> [--json]\`
-• \`/cc provider add ...\`（原生参数；建议用 --config-file 避免密钥进入聊天）
-• \`/cc provider del <id>\`（需确认） · \`/cc provider dup <id>\`
-• \`/cc provider set-default <id> [--model X]\`
-• \`/cc provider remove-from-config <id>\` · \`/cc provider import-live\`
-• \`/cc provider export <id> [-o 路径]\`
-
-*MCP*
-• \`/cc mcp [list|sync|import]\`
-• \`/cc mcp add <JSON>\`（自动补 mcpServers 外层）
-• \`/cc mcp del <id>\`（需确认）
-• \`/cc mcp enable|disable <id> [--apps a,b]\`
-• \`/cc mcp set-apps <id> --apps a,b\` · \`/cc mcp validate <命令>\`
-
-*提示词*
-• \`/cc prompts [list|current|live]\`
-• \`/cc prompts show <id>\` · \`/cc prompts use <id>\` · \`/cc prompts off\`
-• \`/cc prompts new <名称> <内容>\`
-• \`/cc prompts rename <id> --name 新名 [--id 新ID]\`
-• \`/cc prompts del <id>\`（需确认） · \`/cc prompts import\`
-
-*配置 / 代理 / 环境*
-• \`/cc config path|validate|show|backup\`
-• \`/cc config export <文件>\` · \`/cc config import <文件>\`（需确认）
-• \`/cc proxy show|enable|disable\`
-• \`/cc proxy config --listen-address 127.0.0.1 --listen-port 8787\`
-• \`/cc env list|check|tools\`
-
-*会话 / 认证 / 守护进程*
-• \`/cc sessions list|show <id>|messages <id>|search <关键词>\`
-• \`/cc sessions delete <id>\`（需确认） · \`/cc sessions sync-usage\`
-• \`/cc auth status|list|default <账号>\`
-• \`/cc auth remove <账号>\` / \`/cc auth logout\`（需确认）
-• \`/cc daemon status|logs|stop|start --detach\`
-
-*技能 / 故障转移 / 设置*
-• \`/cc skills list|info <名称>|install <名称>|update [名称]|sync\`
-• \`/cc skills uninstall <名称>\`（需确认） · \`/cc skills repos add owner/name\`
-• \`/cc failover show|list|available|add|remove|move|clear\`（clear 需确认）
-• \`/cc settings show|language [en|zh]\`
-
-*其他*
-• \`/cc deeplink <ccswitch://网址>\`（导入会覆盖配置，需确认）
-• \`/cc update --check\` · \`/cc update\`（升级二进制，需确认）
-• \`/cc hermes memory ...\`
-• \`/cc run <任意非交互参数>\`（通用入口）
-• \`/cc model ...\`（模型与 Agent 管理）
-
-⚠️ 只能由 TUI/编辑器/OAuth 完成的交互命令无法在聊天中执行：
-\`provider edit\`、\`mcp edit\`、\`prompts edit\`、\`auth login\`、\`sessions resume\`、
-\`config restore\`、\`start\`、\`proxy serve\`、前台 \`daemon start\`、\`completions\`、\`interactive\`。
-输出中的 API Key / Token 会自动打码。`
-
-const CC_GROUPS = new Set([
-  "provider",
-  "mcp",
-  "prompts",
-  "prompt",
-  "skills",
-  "config",
-  "proxy",
-  "failover",
-  "sessions",
-  "auth",
-  "daemon",
-  "env",
-  "settings",
-  "deeplink",
-  "update",
-  "hermes",
-])
-
-const CC_DEFAULTS: Record<string, string[]> = {
-  provider: ["provider", "list"],
-  mcp: ["mcp", "list"],
-  prompts: ["prompts", "list"],
-  skills: ["skills", "list"],
-  config: ["config", "path"],
-  proxy: ["proxy", "show"],
-  failover: ["failover", "show"],
-  sessions: ["sessions", "list"],
-  auth: ["auth", "status"],
-  daemon: ["daemon", "status"],
-  env: ["env", "tools"],
-  settings: ["settings", "show"],
-  hermes: ["hermes", "help"],
-}
 
 const CC_SUB_ALIASES: Record<string, [string, string]> = {
   "provider del": ["provider", "delete"],
@@ -298,6 +117,8 @@ interface Job {
   engine?: BackendEngine
   model?: { providerID: string; modelID: string; label: string }
   cliModel?: string
+  /** Prompt captured when a queued /retry was submitted; the live last-prompt may change. */
+  retryOf?: { text: string; attachments?: AttachmentDescriptor[] }
   onOutcome?: (outcome: UsageOutcome) => void
 }
 
@@ -321,6 +142,7 @@ export const BOT_MENU_COMMANDS = [
   { command: "retry", description: "重新发送上一条任务" },
   { command: "usage", description: "查看任务量、成功率与耗时统计" },
   { command: "history", description: "查看最近的任务执行历史" },
+  { command: "export", description: "导出任务历史为 Markdown/JSON 文件" },
   { command: "proxy", description: "管理网络代理（添加/测试/启用/删除）" },
   { command: "cc", description: "cc-switch：Provider、MCP、提示词与环境诊断" },
   { command: "ops", description: "运维中心：诊断、日志、更新与服务管理" },
@@ -331,6 +153,8 @@ export const BOT_MENU_COMMANDS = [
   { command: "service", description: "管理 OpenCode 服务" },
   { command: "env", description: "查看或修改非密钥配置" },
   { command: "access", description: "管理 Telegram 访问白名单（立即生效）" },
+  { command: "api", description: "安卓 App 配对信息（HTTP API 地址与令牌）" },
+  { command: "alias", description: "自定义快捷指令（/alias add 名称 指令内容）" },
   { command: "timezone", description: "查看或切换时区（立即生效）" },
   { command: "id", description: "查看会话与配置信息" },
 ]
@@ -370,8 +194,11 @@ function formatDateTime(timestamp: number, timeZone: string): string {
   return `${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}`
 }
 
-function escapeMarkdown(text: string): string {
-  return text.replace(/[_*`[\]\\]/g, "\\$&")
+
+function describeRemainingLabel(minutes: number): string {
+  if (minutes >= 1440) return `${Math.round(minutes / 1440)} 天`
+  if (minutes >= 60) return `${Math.round(minutes / 60)} 小时`
+  return `${minutes} 分钟`
 }
 
 function isMessageNotModified(err: unknown): boolean {
@@ -380,41 +207,16 @@ function isMessageNotModified(err: unknown): boolean {
   return /message is not modified/i.test(`${message} ${description}`)
 }
 
-function tokenizeCcArgs(text: string): string[] {
-  const tokens: string[] = []
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g
-  for (const match of text.matchAll(re)) {
-    tokens.push(match[1] ?? match[2] ?? match[3] ?? "")
-  }
-  return tokens.filter((token) => token.length > 0)
-}
 
-interface Panel {
-  text: string
-  keyboard: InlineKeyboard
-}
 
-interface PendingCcAction {
-  /** Confirmation tokens are only valid in the chat that requested them. */
-  chatId: number
-  args: string[]
-  label: string
-  bare?: boolean
-  pty?: boolean
-  appendArgs?: string[]
-  timeoutMs?: number
-  kind?: "provider-use" | "model-delete"
-  providerId?: string
-  modelKey?: string
-  modelForce?: boolean
-  createdAt: number
-}
+/**
+ * `/cc provider add 名称 键=值…` → the same validated draft the HTTP form sends.
+ * Returns an error string for the chat instead of throwing, so a typo stays advice.
+ */
 
-const CC_CONFIRM_TTL_MS = 5 * 60_000
-const OPS_CONFIRM_TTL_MS = 5 * 60_000
 const AGENT_CONFIRM_TTL_MS = 5 * 60_000
-const CC_LONG_TIMEOUT_MS = 90_000
-const CC_UPDATE_TIMEOUT_MS = 180_000
+
+const OPS_CONFIRM_TTL_MS = 5 * 60_000
 
 type OpsConfirmKind = "restart" | "update" | "cc-install" | "cc-update" | "svc-stop" | "svc-restart"
 
@@ -473,16 +275,16 @@ export class TelegramBridge {
   readonly #lastPrompts = new Map<string, { text: string; attachments?: AttachmentDescriptor[] }>()
   /** Prompt behind each failure card's 重试 button, keyed by the failed job id. */
   readonly #retryPrompts = new Map<string, { key: string; text: string; attachments?: AttachmentDescriptor[] }>()
+  readonly #ccCommands: CcCommands
   readonly #reminders: ReminderService
+  readonly #aliases: AliasStore
   readonly #schedules: ScheduleService
   readonly #cc: CcSwitchService
   readonly #models: ModelAdmin
   readonly #agentInstaller: AgentCliInstaller
   readonly #ops: OpsService
-  readonly #ccProviders = new Map<number, string[]>()
-  readonly #ccTesting = new Set<string>()
-  readonly #ccPending = new Map<string, PendingCcAction>()
   readonly #opsPending = new Map<string, { chatId: number; kind: OpsConfirmKind; createdAt: number }>()
+  readonly #snoozePending = new Map<string, { chatId: number; userId: number; text: string; createdAt: number }>()
   readonly #agentPending = new Map<
     string,
     { chatId: number; action: AgentAction; engine: string; createdAt: number }
@@ -546,6 +348,7 @@ export class TelegramBridge {
       )
     this.#usage = new UsageStore(resolve(cfg.dataDir, "usage.json"), log, this.#timezone)
     this.#history = new TaskHistoryStore(resolve(cfg.dataDir, "history.json"), log)
+    this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
       (chatId, text) => this.#deliverReminder(chatId, text),
@@ -562,6 +365,76 @@ export class TelegramBridge {
       (userId) => this.#isAllowedUser(userId),
       (chatId, text) => this.#deliverReminder(chatId, text),
     )
+    const ccHost: CcHost = {
+      sendTextMessage: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      editPanel: (ctx, panel) => this.#editPanel(ctx, panel),
+      applyOpenCodeModel: (key, target) => this.#applyOpenCodeModel(key, target as ModelInfo),
+      store: this.#store,
+      cfg: this.#cfg,
+    }
+    this.#ccCommands = new CcCommands(ccHost, this.#cc, this.#models, log)
+  }
+
+  /** Shared services the HTTP API reuses; both surfaces then see the same reminders and stats. */
+  get sharedReminders(): ReminderService {
+    return this.#reminders
+  }
+
+  get sharedSchedules(): ScheduleService {
+    return this.#schedules
+  }
+
+  get usageStore(): UsageStore {
+    return this.#usage
+  }
+
+  get historyStore(): TaskHistoryStore {
+    return this.#history
+  }
+
+  /** Exposed to the HTTP API so the app can show diagnostics and tail logs. */
+  get opsService(): OpsService {
+    return this.#ops
+  }
+
+  /** Exposed to the HTTP API for /agents install/update/uninstall. */
+  get agentInstaller(): AgentCliInstaller {
+    return this.#agentInstaller
+  }
+
+  /** Exposed to the HTTP API so /alias shortcuts are shared with the app. */
+  get aliasStore(): AliasStore {
+    return this.#aliases
+  }
+
+  /** Exposed to the HTTP API for the app's cc-switch console (/cc parity). */
+  get ccSwitch(): CcSwitchService {
+    return this.#cc
+  }
+
+  /** Lets the HTTP API deliver remote media with the same SSRF/proxy guards as Telegram. */
+  fetchRemoteMedia(target: string): Promise<Buffer> {
+    return this.#fetchRemoteMedia(target)
+  }
+
+  get currentTimezone(): string {
+    return this.#timezone
+  }
+
+  /** Timezone switch from the HTTP API: persist to .env and update running services. */
+  setTimezone(zone: string): { ok: boolean; message: string } {
+    const result = this.#ops.envSet("REMINDER_TIMEZONE", zone)
+    if (result.ok) this.#applyLiveEnv("REMINDER_TIMEZONE", zone.trim())
+    return result
+  }
+
+  /** First whitelisted chat: the push target for reminders created outside Telegram. */
+  get ownerChatId(): number | undefined {
+    const first = [...this.#cfg.telegram.allowUsers][0]
+    if (!first) return undefined
+    const parsed = Number(first)
+    return Number.isInteger(parsed) ? parsed : undefined
   }
 
   async start(options: { polling?: boolean; onFatal?: (err: Error) => void } = {}): Promise<void> {
@@ -627,12 +500,12 @@ export class TelegramBridge {
     }
     this.#pending.clear()
     // A restart must not leave live one-shot confirm tokens or cached prompts behind
-    this.#ccPending.clear()
+    this.#ccCommands.clearPending()
     this.#opsPending.clear()
     this.#agentPending.clear()
     this.#lastPrompts.clear()
     this.#retryPrompts.clear()
-    this.#ccProviders.clear()
+    this.#ccCommands.clearProviders()
 
     const running = [...this.#queues.values(), ...aborts]
     if (running.length > 0) {
@@ -720,6 +593,10 @@ export class TelegramBridge {
         await this.#handleUsage(chatId, key)
         return
       }
+      if (command === "/export") {
+        this.#offLoop(chatId, "导出", () => this.#handleExport(chatId, key, arg))
+        return
+      }
       if (command === "/history") {
         const requested = Number(arg)
         const limit = Number.isInteger(requested) && requested > 0 ? Math.min(20, requested) : 10
@@ -731,7 +608,9 @@ export class TelegramBridge {
         return
       }
       if (command === "/proxy") {
-        await this.#handleProxyCommand(chatId, arg)
+        // `add` runs a connectivity test that can take seconds: keep it off the
+        // update loop so /stop stays responsive in every chat
+        this.#offLoop(chatId, "代理命令", () => this.#handleProxyCommand(chatId, arg))
         return
       }
       if (command === "/remind") {
@@ -754,15 +633,15 @@ export class TelegramBridge {
         return
       }
       if (command === "/ops" || command === "/maintenance") {
-        await this.#sendPanel(chatId, await this.#opsPanel())
+        this.#offLoop(chatId, "运维面板", async () => this.#sendPanel(chatId, await this.#opsPanel()))
         return
       }
       if (command === "/diag") {
-        await this.#handleDiagnostics(chatId)
+        this.#offLoop(chatId, "诊断", () => this.#handleDiagnostics(chatId))
         return
       }
       if (command === "/logs") {
-        await this.#handleLogs(chatId, arg)
+        this.#offLoop(chatId, "日志", () => this.#handleLogs(chatId, arg))
         return
       }
       if (command === "/restart") {
@@ -793,6 +672,10 @@ export class TelegramBridge {
         await this.#handleCancelReminder(chatId, arg)
         return
       }
+      if (command === "/alias") {
+        await this.#handleAliasCommand(chatId, arg)
+        return
+      }
       if (!QUEUED_COMMANDS.has(command) && !(await this.#ensureCapacity(chatId, key))) return
 
       this.#enqueue({
@@ -801,6 +684,9 @@ export class TelegramBridge {
         chatId,
         userId,
         generation: this.#generation.get(key) ?? 0,
+        // /retry queues behind a running task: capture the retry target now, or the
+        // task finishing in between would be replayed instead of the one the user meant
+        retryOf: command === "/retry" ? this.#lastPrompts.get(key) : undefined,
       })
     })
 
@@ -845,8 +731,41 @@ export class TelegramBridge {
       if (data.startsWith("show:")) {
         const which = data.slice("show:".length)
         await answer()
+        // cc/ops/service panels spawn subprocesses: build them off the update loop
+        if (which === "cc" || which === "ops" || which === "service") {
+          const message = ctx.callbackQuery?.message
+          const messageId = message && "message_id" in message ? message.message_id : undefined
+          this.#offLoop(chatId, "面板刷新", async () => {
+            const panel = await this.#panelFor(which, chatId, key)
+            if (!panel) return
+            if (messageId !== undefined) await this.#editPanelRef(chatId, messageId, panel)
+            else await this.#sendPanel(chatId, panel)
+          })
+          return
+        }
         const panel = await this.#panelFor(which, chatId, key)
         if (panel) await this.#editPanel(ctx, panel)
+        return
+      }
+
+      if (data.startsWith("aliasdel:")) {
+        const name = data.slice("aliasdel:".length)
+        const removed = this.#aliases.remove(chatId, name)
+        if (!removed) {
+          await answer("该快捷指令已不存在")
+        } else {
+          await answer(`已删除 /${removed.name}`)
+        }
+        const message = ctx.callbackQuery?.message
+        const messageId = message && "message_id" in message ? message.message_id : undefined
+        if (messageId !== undefined) await this.#editPanelRef(chatId, messageId, this.#aliasPanel(chatId))
+        else await this.#sendPanel(chatId, this.#aliasPanel(chatId))
+        return
+      }
+
+      const snoozeMatch = /^snooze:([0-9a-f]+):(\d+)$/.exec(data)
+      if (snoozeMatch) {
+        await this.#handleSnooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
         return
       }
 
@@ -857,7 +776,10 @@ export class TelegramBridge {
       }
 
       if (data.startsWith("cc:")) {
-        await this.#handleCcCallback(ctx, chatId, data.slice("cc:".length), answer)
+        const rest = data.slice("cc:".length)
+        // Every cc action shells out to cc-switch (up to 20s per call): keep the
+        // update loop free so other chats' /stop and buttons stay responsive
+        this.#offLoop(chatId, "cc 操作", () => this.#ccCommands.handleCallback(ctx, chatId, rest, answer))
         return
       }
 
@@ -904,11 +826,14 @@ export class TelegramBridge {
 
         if (action === "test") {
           await answer("正在测试代理…")
-          const result = await this.#proxies.test(id)
-          const text = result.ok
-            ? `✅ 代理 #${id} 连接正常（${result.latencyMs ?? 0}ms）`
-            : `❌ 代理 #${id} 测试失败：${result.message}`
-          await this.#editPanel(ctx, this.#proxyPanel(text))
+          // A test can take up to 10s: it must not hold the update loop
+          this.#offLoop(chatId, "代理测试", async () => {
+            const result = await this.#proxies.test(id)
+            const text = result.ok
+              ? `✅ 代理 #${id} 连接正常（${result.latencyMs ?? 0}ms）`
+              : `❌ 代理 #${id} 测试失败：${result.message}`
+            await this.#sendTextMessage(chatId, escapeMarkdown(text))
+          })
           return
         }
       }
@@ -1076,26 +1001,12 @@ export class TelegramBridge {
           await answer("未知的白名单操作")
           return
         }
-        const current = new Set(this.#cfg.telegram.allowUsers)
-        if (!current.has(id)) {
-          await answer("该用户不在白名单中")
+        const result = this.#mutateAccess(false, [id], ctx.from?.id)
+        if (!result.ok) {
+          await answer(result.message)
           await this.#editPanel(ctx, this.#accessPanel())
           return
         }
-        const next = new Set([...current].filter((item) => item !== id))
-        const rejection = this.#allowListRejection(next, String(ctx.from?.id ?? 0))
-        if (rejection) {
-          await answer(rejection)
-          return
-        }
-        const value = sortUserIds(next).join(",")
-        const result = this.#ops.envSet("TELEGRAM_ALLOW_USERS", value, true)
-        if (!result.ok) {
-          await answer("写入 .env 失败")
-          this.#log.warn(`access whitelist write failed: ${result.message}`)
-          return
-        }
-        this.#applyLiveEnv("TELEGRAM_ALLOW_USERS", value)
         this.#log.info(`access removed ${id} by ${ctx.from?.id ?? "?"}`)
         await answer(`已移除 ${id}`)
         await this.#editPanel(ctx, this.#accessPanel(`🗑 已从白名单移除 ${id}，立即生效。`))
@@ -1263,6 +1174,13 @@ export class TelegramBridge {
       await this.#sendTextMessage(chatId, `🛑 已请求停止当前任务${suffix}。`)
     } else if (queued > 0) {
       await this.#sendTextMessage(chatId, `🛑 已丢弃排队中的 ${queued} 条消息。`)
+    } else if (this.#queues.has(key)) {
+      // A command job (/cc, /agents install, …) occupies the queue without an
+      // abort controller: be honest instead of claiming nothing is running
+      await this.#sendTextMessage(
+        chatId,
+        "⏳ 当前正在执行命令类操作（如 /cc、安装任务），它无法被 /stop 中断；执行结束后队列即恢复。",
+      )
     } else {
       await this.#sendTextMessage(chatId, "🛑 当前没有正在执行的任务。")
     }
@@ -1270,6 +1188,67 @@ export class TelegramBridge {
 
   async #handleQueue(chatId: number, key: string): Promise<void> {
     await this.#sendPanel(chatId, this.#queuePanel(key))
+  }
+
+  /** Pairing info for the companion Android app: endpoint, token and exposure hints. */
+  async #handleApiInfo(chatId: number): Promise<void> {
+    if (!this.#cfg.api.enabled) {
+      await this.#sendTextMessage(
+        chatId,
+        "⚠️ HTTP API 当前未启用。在 .env 中设置 `API_ENABLED=1` 并重启 Bot 后可用。",
+      )
+      return
+    }
+    let token: string
+    try {
+      token = resolveApiToken(this.#cfg)
+    } catch (err) {
+      const detail = redactSecrets(err instanceof Error ? err.message : String(err))
+      await this.#sendTextMessage(
+        chatId,
+        `⚠️ 无法生成或读取 API 令牌（${escapeMarkdown(detail)}）。请检查 data 目录权限，或在 .env 中直接设置 API_TOKEN。`,
+      )
+      return
+    }
+    const { port, bind } = this.#cfg.api
+    const wildcard = bind === "0.0.0.0" || bind === "::"
+    const host = wildcard || bind === "127.0.0.1" || bind === "localhost" || bind === "::1"
+      ? "<你的服务器地址>"
+      : bind
+    let qrBuffer: Buffer | undefined
+    try {
+      qrBuffer = await QRCode.toBuffer(JSON.stringify({ url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token }), {
+        margin: 2,
+        width: 640,
+        color: { dark: "#0b0c0e", light: "#ffffff" },
+      })
+    } catch (err) {
+      this.#log.warn(`pairing QR generation failed: ${(err as Error).message}`)
+    }
+
+    const text =
+      `📱 *安卓 App 配对信息*\n` +
+      `• API 地址: \`http://${host}:${port}/api/v1\`\n` +
+      `• 访问令牌: \`${token}\`\n\n` +
+      (wildcard
+        ? "⚠️ 当前监听所有网卡。请配合反向代理 / SSH 隧道 / VPN 暴露给手机，并保持令牌鉴权。\n\n"
+        : "") +
+      (!wildcard
+        ? "⚠️ 当前仅监听本机回环地址，手机无法直连。可在 .env 设置 `API_BIND=0.0.0.0` 后配合反向代理 / SSH 隧道 / VPN 暴露给手机；令牌鉴权会一直保留。\n\n"
+        : "") +
+      "在 App 的「设置」页也可直接「扫码配对」;令牌持久化在 `data/api-token.json`，设置 `API_TOKEN` 可固定。"
+    if (qrBuffer) {
+      try {
+        await this.#bot.api.sendPhoto(chatId, new InputFile(qrBuffer, "agentbot-pairing.png"), {
+          caption: clip(text, 1000),
+          parse_mode: "Markdown",
+        })
+        return
+      } catch (err) {
+        this.#log.warn(`pairing QR send failed: ${(err as Error).message}`)
+      }
+    }
+    await this.#sendTextMessage(chatId, text)
   }
 
   async #handleProxyCommand(chatId: number, arg: string): Promise<void> {
@@ -1420,6 +1399,34 @@ export class TelegramBridge {
     }
     keyboard.text("🔄 刷新队列", "show:queue").text("⬅️ 主菜单", "show:menu")
     return { text: `📋 *任务队列*\n${head}${body}`, keyboard }
+  }
+
+  /** Sends the chat's task history as a downloadable Markdown or JSON document. */
+  async #handleExport(chatId: number, key: string, arg: string): Promise<void> {
+    const format = (arg.trim().toLowerCase() || "md").replace(/^\./, "")
+    if (!["md", "markdown", "json"].includes(format)) {
+      await this.#sendTextMessage(chatId, "用法：`/export`（Markdown，默认）或 `/export json`")
+      return
+    }
+    const entries = this.#history.list(key, 50)
+    const stamp = new Date()
+    const pad = (value: number): string => String(value).padStart(2, "0")
+    const name = `agentbot-history-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}`
+    if (format === "json") {
+      const payload = JSON.stringify({ exportedAt: stamp.toISOString(), key, entries }, null, 2)
+      await this.#bot.api.sendDocument(chatId, new InputFile(Buffer.from(payload, "utf8"), `${name}.json`), {
+        caption: `🗂 任务历史（JSON，${entries.length} 条）`,
+      })
+      return
+    }
+    if (entries.length === 0) {
+      await this.#sendTextMessage(chatId, "📭 还没有任务记录，先聊点别的吧。")
+      return
+    }
+    const markdown = formatHistoryMarkdown(entries, { source: `Telegram ${chatId}`, timeZone: this.#timezone })
+    await this.#bot.api.sendDocument(chatId, new InputFile(Buffer.from(markdown, "utf8"), `${name}.md`), {
+      caption: `🗂 任务历史（Markdown，${entries.length} 条）`,
+    })
   }
 
   async #handleStatus(chatId: number, key: string): Promise<void> {
@@ -1623,6 +1630,71 @@ export class TelegramBridge {
       return
     }
     await this.#sendTextMessage(chatId, `✅ 已取消提醒 #${removed.id}：${removed.text}`)
+  }
+
+  async #handleAliasCommand(chatId: number, arg: string): Promise<void> {
+    const [action = "", ...rest] = arg.split(/\s+/).filter(Boolean)
+    const norm = action.toLowerCase()
+
+    if (!norm || norm === "list" || norm === "面板") {
+      await this.#sendPanel(chatId, this.#aliasPanel(chatId))
+      return
+    }
+
+    if (norm === "add" || norm === "新增") {
+      const [name = "", ...words] = rest
+      if (!name || words.length === 0) {
+        await this.#sendTextMessage(
+          chatId,
+          "用法：`/alias add 名称 指令内容`\n例如：`/alias add code 审查当前目录的代码并给出改进清单`\n名称限小写字母/数字/下划线。",
+        )
+        return
+      }
+      try {
+        const entry = this.#aliases.add(chatId, name, words.join(" "))
+        await this.#sendTextMessage(
+          chatId,
+          `✅ 已保存快捷指令 \`/${entry.name}\`\n以后发送 \`/${entry.name}\` 即会执行：${escapeMarkdown(clip(entry.expansion, 300) ?? "")}`,
+        )
+      } catch (err) {
+        await this.#sendTextMessage(chatId, `⚠️ ${escapeMarkdown((err as Error).message)}`)
+      }
+      return
+    }
+
+    if (norm === "del" || norm === "rm" || norm === "delete" || norm === "删除") {
+      const name = rest[0] ?? ""
+      const removed = this.#aliases.remove(chatId, name)
+      if (!removed) {
+        await this.#sendTextMessage(chatId, `⚠️ 未找到快捷指令 \`/${escapeMarkdown(name)}\`，发送 \`/alias\` 查看当前列表。`)
+        return
+      }
+      await this.#sendTextMessage(chatId, `✅ 已删除快捷指令 \`/${removed.name}\``)
+      return
+    }
+
+    await this.#sendTextMessage(
+      chatId,
+      "用法：\n• `/alias` 查看快捷指令面板\n• `/alias add 名称 指令内容` 新增\n• `/alias del 名称` 删除",
+    )
+  }
+
+  #aliasPanel(chatId: number): Panel {
+    const aliases = this.#aliases.list(chatId)
+    const keyboard = new InlineKeyboard().text("➕ 用法见 /alias add", "noop:alias").row().text("⬅️ 主菜单", "show:menu")
+    if (aliases.length === 0) {
+      return {
+        text:
+          "⚡ *快捷指令*\n\n还没有自定义指令。用 `/alias add 名称 指令内容` 创建，例如：\n`/alias add code 审查当前目录的代码`\n之后发送 `/code` 即可触发。",
+        keyboard,
+      }
+    }
+    const lines = aliases.map((entry) => `• \`/${entry.name}\` → ${escapeMarkdown(clip(entry.expansion, 120) ?? "")}`)
+    for (const entry of aliases) {
+      keyboard.text(`🗑 /${entry.name}`, `aliasdel:${entry.name}`)
+    }
+    keyboard.row().text("⬅️ 主菜单", "show:menu")
+    return { text: `⚡ *快捷指令*（${aliases.length}）\n\n${lines.join("\n")}\n\n点按钮删除，或发送 /alias add 新增。`, keyboard }
   }
 
   async #handleScheduleCommand(chatId: number, userId: number, key: string, arg: string): Promise<void> {
@@ -1967,6 +2039,11 @@ export class TelegramBridge {
       return
     }
 
+    if (command === "/api") {
+      await this.#handleApiInfo(job.chatId)
+      return
+    }
+
     if (command === "/dir") {
       await this.#handleDirCommand(job, arg || undefined)
       return
@@ -1978,12 +2055,14 @@ export class TelegramBridge {
     }
 
     if (command === "/cc") {
-      await this.#handleCcCommand(job, arg)
+      await this.#ccCommands.handleCommand(job.chatId, job.key, arg)
       return
     }
 
     if (command === "/retry") {
-      const last = this.#lastPrompts.get(job.key)
+      // Prefer the snapshot taken when the /retry was queued: a task that finished
+      // in the meantime must not steal the retry target
+      const last = job.retryOf ?? this.#lastPrompts.get(job.key)
       if (!last) {
         await this.#sendTextMessage(job.chatId, "⚠️ 还没有可重试的任务。")
         return
@@ -2013,6 +2092,20 @@ export class TelegramBridge {
       return
     }
 
+    // User-defined /name shortcuts expand here (after the built-in commands all
+    // missed), so an alias may itself point at a command; scheduled prompts stay verbatim
+    if (!job.scheduled) {
+      for (let depth = 0; depth < 3; depth++) {
+        const first = job.text.split(/\s+/, 1)[0] ?? ""
+        if (!/^\/[a-z][a-z0-9_]*$/i.test(first)) break
+        const expansion = this.#aliases.expand(job.chatId, first.slice(1))
+        if (!expansion) break
+        const rest = job.text.slice(first.length).trim()
+        this.#log.debug(`alias ${first} expanded [${job.key}]`)
+        job = { ...job, text: rest ? `${expansion} ${rest}` : expansion }
+      }
+    }
+
     // A scheduled prompt is not something the user typed, so /retry must not replay it
     if (!job.scheduled) this.#lastPrompts.set(job.key, { text: job.text, attachments: job.attachments })
 
@@ -2039,64 +2132,28 @@ export class TelegramBridge {
     }
     const typingPromise = typingLoop()
     const tracker = new ProgressTracker(this.#bot, job.chatId)
-    let unsubscribeOc: (() => void) | undefined
-
     try {
       const input = job.attachments?.length
-        ? await this.#buildAttachmentInput(job, activeModel)
+        ? await this.#buildAttachmentInput(job, activeModel, controller.signal)
         : { text: job.text, files: [] as PromptFile[] }
       const attachmentInfo = job.attachments?.length ? ` attachments=${job.attachments.length}` : ""
-      let reply: string
+      const promptLabel = isOpencode ? `OpenCode: ${activeModel?.label}` : this.#agents.registry.label(engine)
+      this.#log.info(`prompt [${job.key}] (${promptLabel}) length=${input.text.length}${attachmentInfo}`)
+      this.#log.debug(`prompt content: ${input.text.slice(0, 80).replace(/\n/g, " ")}`)
 
-      if (!isOpencode) {
-        const label = this.#agents.registry.label(engine)
-        this.#log.info(`prompt [${job.key}] (${label}) length=${input.text.length}${attachmentInfo}`)
-        this.#log.debug(`prompt content: ${input.text.slice(0, 80).replace(/\n/g, " ")}`)
-        reply = await this.#agents.prompt(
-          job.key,
-          engine,
-          input.text,
-          cliModel,
-          (status) => tracker.update(status),
-          controller.signal,
-        )
-      } else {
-        const model = activeModel!
-        let sessionID = await this.#ensureSession(job.key)
-        this.#log.info(`prompt [${job.key}] (OpenCode: ${model.label}) length=${input.text.length}${attachmentInfo}`)
-        this.#log.debug(`prompt content: ${input.text.slice(0, 80).replace(/\n/g, " ")}`)
-
-        let watchdogTrigger: (() => void) | undefined
-
-        unsubscribeOc = this.#oc.subscribeSession(sessionID, (status) => {
-          watchdogTrigger?.()
-          tracker.update(status)
-        })
-
-        try {
-          reply = await this.#prompt(sessionID, input.text, model, (touch) => {
-            watchdogTrigger = touch
-          }, controller.signal, input.files)
-        } catch (err) {
-          const missing = err instanceof OpencodeError && err.status === 404
-          if (!missing) throw err
-          this.#log.warn(`session ${sessionID} is gone, creating a new one`)
-          this.#store.clearSession(job.key)
-          sessionID = await this.#ensureSession(job.key)
-          if (unsubscribeOc) unsubscribeOc()
-          unsubscribeOc = this.#oc.subscribeSession(sessionID, (status) => {
-            watchdogTrigger?.()
-            tracker.update(status)
-          })
-          reply = await this.#prompt(sessionID, input.text, model, (touch) => {
-            watchdogTrigger = touch
-          }, controller.signal, input.files)
-        }
-      }
+      const reply = await callEngine(this.#engineDeps, {
+        key: job.key,
+        engine,
+        text: input.text,
+        files: input.files,
+        model: activeModel,
+        cliModel,
+        signal: controller.signal,
+        onProgress: (status) => tracker.update(status),
+      })
 
       typingActive = false
       void typingPromise
-      if (unsubscribeOc) unsubscribeOc()
       await tracker.finish()
 
       await this.#sendReply(job, reply)
@@ -2104,7 +2161,6 @@ export class TelegramBridge {
     } catch (err) {
       typingActive = false
       void typingPromise
-      if (unsubscribeOc) unsubscribeOc()
       await tracker.finish()
       const detail = err instanceof Error ? err.message : String(err)
       if (/已取消当前任务/.test(detail)) {
@@ -2152,18 +2208,20 @@ export class TelegramBridge {
     const removed =
       pruneChatState(this.#generation, active, CHAT_STATE_LIMIT) +
       pruneChatState(this.#lastPrompts, active, CHAT_STATE_LIMIT) +
-      pruneChatState(this.#ccProviders, (chatId) => active(`tg:${chatId}`), CHAT_STATE_LIMIT)
+      this.#ccCommands.pruneProviders((chatId) => active(`tg:${chatId}`), CHAT_STATE_LIMIT)
     if (removed > 0) this.#log.debug(`pruned ${removed} idle chat state entries`)
   }
 
-  async #downloadAttachment(chatId: number, att: AttachmentDescriptor): Promise<SavedAttachment> {
+  async #downloadAttachment(chatId: number, att: AttachmentDescriptor, signal?: AbortSignal): Promise<SavedAttachment> {
     const file = await this.#bot.api.getFile(att.fileId)
     if (!file.file_path) throw new Error("Telegram 未返回文件路径（文件可能超过 20MB）")
 
     const url = `https://api.telegram.org/file/bot${this.#cfg.telegram.token}/${file.file_path}`
     let res: Response
     try {
-      res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
+      // /stop must cut downloads short too, not only the engine call after them
+      const timeout = AbortSignal.timeout(60_000)
+      res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
     } catch (err) {
       // undici can echo the request URL, which carries the bot token
       throw new Error(`下载附件失败：${this.#maskToken(redactSecrets((err as Error).message))}`)
@@ -2192,7 +2250,7 @@ export class TelegramBridge {
     return result
   }
 
-  async #buildAttachmentInput(job: Job, model?: ModelRef): Promise<{ text: string; files: PromptFile[] }> {
+  async #buildAttachmentInput(job: Job, model?: ModelRef, signal?: AbortSignal): Promise<{ text: string; files: PromptFile[] }> {
     const saved: SavedAttachment[] = []
     const failed: string[] = []
     let totalBytes = 0
@@ -2203,7 +2261,7 @@ export class TelegramBridge {
         continue
       }
       try {
-        const item = await this.#downloadAttachment(job.chatId, att)
+        const item = await this.#downloadAttachment(job.chatId, att, signal)
         if (totalBytes + item.bytes > MAX_ATTACH_TOTAL_BYTES) {
           failed.push(`${att.name}: 附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
           // The copy is already on disk; drop it so oversized batches do not fill the inbox
@@ -2225,60 +2283,7 @@ export class TelegramBridge {
     pruneInbox(this.#cfg.inboxDir)
 
     const caps = model ? await this.#oc.inputCapabilities(model) : undefined
-    const notes: string[] = []
-    const blocks: string[] = []
-    const files: PromptFile[] = []
-    let inlineChars = 0
-
-    for (const item of saved) {
-      const rel = relative(process.cwd(), item.path).split(sep).join("/")
-      const label = item.kind === "image" ? "图片" : item.kind === "audio" ? "音频" : "文件"
-      notes.push(`- ${label}: ${rel} (${item.mime}, ${formatBytes(item.bytes)})`)
-
-      if (item.text !== undefined) {
-        if (inlineChars + item.text.length > MAX_INLINE_TEXT_TOTAL) {
-          notes.push("  （文本内容过多，已跳过内联）")
-          continue
-        }
-        inlineChars += item.text.length
-        const suffix = item.truncated ? ' truncated="true"' : ""
-        blocks.push(`<file name="${rel}"${suffix}>\n${item.text}\n</file>`)
-        continue
-      }
-
-      const asFile = (): PromptFile => ({ mime: item.mime, filename: item.name, data: readFileSync(item.path) })
-      // `caps === undefined` means the model is not listed by /provider (a custom model,
-      // or /provider was unreachable), not that it rejects the attachment. Refusing then
-      // would silently discard the user's image, so only a known `false` blocks it.
-      const tooBig = item.bytes > MAX_ATTACH_FILE_BYTES
-      if (item.kind === "image") {
-        if (caps?.image === false) notes.push("  （当前模型不支持图片输入，无法直接查看）")
-        else if (tooBig) notes.push("  （图片过大，未直接附加）")
-        else files.push(asFile())
-      } else if (item.kind === "audio") {
-        if (caps?.audio === false) notes.push("  （当前模型不支持音频输入，无法转写）")
-        else if (tooBig) notes.push("  （音频过大，未直接附加）")
-        else files.push(asFile())
-      } else if (item.mime === "application/pdf") {
-        if (caps?.pdf === false) notes.push("  （当前模型不支持 PDF 输入，无法直接阅读）")
-        else if (tooBig) notes.push("  （PDF 过大，未直接附加）")
-        else files.push(asFile())
-      }
-    }
-
-    const header =
-      job.text ||
-      (saved.some((item) => item.kind === "audio")
-        ? "请转写这段音频并回应相关内容。"
-        : saved.some((item) => item.kind === "image")
-          ? "请查看用户发送的图片并回应。"
-          : "请阅读用户发送的文件并回应。")
-
-    const sections = [header]
-    if (notes.length > 0) sections.push(`[用户附件]\n${notes.join("\n")}`)
-    if (blocks.length > 0) sections.push(blocks.join("\n\n"))
-    if (failed.length > 0) sections.push(`[附件处理失败]\n${failed.join("\n")}`)
-    return { text: sections.join("\n\n"), files }
+    return buildAttachmentSections(job.text, { saved, failed, modelCapabilities: caps })
   }
 
   async #handleAgentCommand(job: Job, target?: string): Promise<void> {
@@ -2627,13 +2632,13 @@ export class TelegramBridge {
   ): Promise<void> {
     if (action === "diag") {
       await answer("正在诊断…")
-      await this.#handleDiagnostics(chatId)
+      this.#offLoop(chatId, "诊断", () => this.#handleDiagnostics(chatId))
       return
     }
     if (action.startsWith("logs:")) {
       const [, source = "bot", rawLines = "80"] = action.split(":")
       await answer()
-      await this.#handleLogs(chatId, `${source} ${rawLines}`)
+      this.#offLoop(chatId, "日志", () => this.#handleLogs(chatId, `${source} ${rawLines}`))
       return
     }
     if (action === "restart") {
@@ -3069,40 +3074,63 @@ export class TelegramBridge {
       return
     }
 
-    const adding = action === "add"
-    const current = new Set(this.#cfg.telegram.allowUsers)
-    const touched = wanted.filter((id) => (adding ? !current.has(id) : current.has(id)))
-    if (touched.length === 0) {
-      await this.#sendTextMessage(chatId, adding ? "这些用户已经在白名单中。" : "这些用户不在白名单中。")
+    const result = this.#mutateAccess(action === "add", wanted, userId)
+    if (!result.ok) {
+      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(result.message)}`)
       return
     }
+    await this.#sendTextMessage(chatId, result.message)
+    await this.#sendPanel(chatId, this.#accessPanel())
+  }
 
+  /** Shared by /access, its remove buttons and the HTTP API so the guards cannot drift. */
+  #mutateAccess(adding: boolean, wanted: string[], self: number | undefined): { ok: boolean; message: string } {
+    const tokens = wanted.map((token) => token.replace(/^@/, ""))
+    if (tokens.length === 0) return { ok: false, message: "请提供用户 ID。" }
+    const invalid = tokens.filter((token) => !USER_ID_RE.test(token))
+    if (invalid.length > 0) {
+      return { ok: false, message: `用户 ID 只能是 20 位以内的数字（收到：${invalid.join("、")}）。` }
+    }
+    const current = new Set(this.#cfg.telegram.allowUsers)
+    const touched = tokens.filter((id) => (adding ? !current.has(id) : current.has(id)))
+    if (touched.length === 0) {
+      return { ok: false, message: adding ? "这些用户已经在白名单中。" : "这些用户不在白名单中。" }
+    }
     const next = new Set(current)
     for (const id of touched) {
       if (adding) next.add(id)
       else next.delete(id)
     }
     if (!adding) {
-      const rejection = this.#allowListRejection(next, String(userId))
-      if (rejection) {
-        await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(rejection)}`)
-        return
-      }
+      const rejection = this.#allowListRejection(next, String(self ?? ""))
+      if (rejection) return { ok: false, message: rejection }
     }
-
     const value = sortUserIds(next).join(",")
     const result = this.#ops.envSet("TELEGRAM_ALLOW_USERS", value, true)
-    if (!result.ok) {
-      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(result.message)}`)
-      return
-    }
+    if (!result.ok) return { ok: false, message: result.message }
     this.#applyLiveEnv("TELEGRAM_ALLOW_USERS", value)
-    const names = escapeMarkdown(touched.join("、"))
-    await this.#sendTextMessage(
-      chatId,
-      `${adding ? `✅ 已加入白名单：${names}` : `🗑 已移出白名单：${names}`}（当前 ${next.size} 个用户，立即生效）。`,
-    )
-    await this.#sendPanel(chatId, this.#accessPanel())
+    const names = touched.join("、")
+    return {
+      ok: true,
+      message: `${adding ? `✅ 已加入白名单：${names}` : `🗑 已移出白名单：${names}`}（当前 ${next.size} 个用户，立即生效）。`,
+    }
+  }
+
+  /** Snapshot for the app's /access panel. */
+  get accessState(): { users: string[]; allowAll: boolean } {
+    return {
+      users: parseAllowUsers([...this.#cfg.telegram.allowUsers].join(",")),
+      allowAll: this.#cfg.telegram.allowAll,
+    }
+  }
+
+  /** HTTP API counterpart of `/access add`; the owner can never remove themselves. */
+  addAccess(ids: string[]): { ok: boolean; message: string } {
+    return this.#mutateAccess(true, ids, this.ownerChatId)
+  }
+
+  removeAccess(ids: string[]): { ok: boolean; message: string } {
+    return this.#mutateAccess(false, ids, this.ownerChatId)
   }
 
   /** Lockout guards shared by the `/access` command and its remove buttons. */
@@ -3680,941 +3708,6 @@ export class TelegramBridge {
     return { text, keyboard }
   }
 
-  async #ccPanel(chatId: number, notice?: string): Promise<Panel> {
-    const keyboard = new InlineKeyboard()
-    const header = notice ? `${notice}\n\n` : ""
-
-    if (!this.#cc.available) {
-      keyboard.text("🧠 模型管理", "cc:model").row().text("🔄 刷新", "cc:refresh").text("⬅️ 主菜单", "show:menu")
-      return {
-        text:
-          `${header}🔌 *cc-switch 集成*\n\n` +
-          `未检测到 \`cc-switch\` 可执行文件。\n\n` +
-          `• 安装：\`npm run cc-switch:install\`\n` +
-          `• 或设置 \`CC_SWITCH_BIN\` 指向已有二进制\n` +
-          `• 自动查找：\`./bin/cc-switch\` → \`PATH\` → 用户级全局 bin 目录（如 \`~/.npm-global/bin\`、\`~/.local/bin\`）\n\n` +
-          `模型管理（\`/cc model\`）不依赖 cc-switch，可直接使用。`,
-        keyboard,
-      }
-    }
-
-    let providers: CcSwitchProvider[] = []
-    let error: string | undefined
-    try {
-      providers = await this.#cc.listProviders()
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err)
-    }
-    this.#ccProviders.set(chatId, providers.map((provider) => provider.id))
-
-    const version = await this.#cc.version()
-    const lines = [
-      `${header}🔌 *cc-switch 集成*`,
-      `应用：\`${this.#cc.app}\`${version ? ` · ${escapeMarkdown(version)}` : ""}`,
-    ]
-
-    if (error) {
-      lines.push(`\n⚠️ 读取 Provider 失败：${escapeMarkdown(clip(error, 300) ?? "")}`)
-    } else if (providers.length === 0) {
-      lines.push("\n暂无 Provider。可在 cc-switch TUI 或 \`cc-switch provider add\` 中添加。")
-    } else {
-      const current = providers.find((provider) => provider.current)
-      lines.push(`当前：*${escapeMarkdown(current?.name || current?.id || "未设置")}*`)
-      lines.push(`\n*Providers（${providers.length}）*`)
-      const shown = providers.slice(0, 20)
-      shown.forEach((provider, index) => {
-        const mark = provider.current ? "✅" : "•"
-        lines.push(`${mark} \`${escapeMarkdown(provider.id)}\` ${escapeMarkdown(provider.name)}`)
-        keyboard
-          .text(clip(`${mark} ${provider.name || provider.id}`, 28) ?? mark, `cc:use:${index}`)
-          .text("⚡", `cc:test:${index}`)
-          .row()
-      })
-      if (providers.length > shown.length) {
-        lines.push(`_另有 ${providers.length - shown.length} 个未显示，可用 \`/cc use <id>\` 切换。_`)
-      }
-    }
-
-    keyboard
-      .text("🔄 刷新", "cc:refresh")
-      .text("⚡ 测速当前", "cc:testcur")
-      .row()
-      .text("📡 MCP 列表", "cc:mcp")
-      .text("📡 MCP 同步", "cc:msync")
-      .row()
-      .text("📝 提示词", "cc:prompts")
-      .text("🧪 环境", "cc:env")
-      .row()
-      .text("🌐 代理", "cc:proxy")
-      .text("⚙️ 配置", "cc:config")
-      .row()
-      .text("👥 会话", "cc:sessions")
-      .text("🔑 认证", "cc:auth")
-      .row()
-      .text("🛠 技能", "cc:skills")
-      .text("🔁 故障转移", "cc:failover")
-      .row()
-      .text("🧠 模型管理", "cc:model")
-      .text("📋 全部命令", "cc:cchelp")
-      .row()
-      .text("⬅️ 主菜单", "show:menu")
-
-    lines.push(
-      "\n*更多*：`/cc help` 查看全部命令；`/cc run <参数>` 可执行任意非交互命令；切换 Provider、删除/导入等操作会先请求确认。",
-    )
-    return { text: lines.join("\n"), keyboard }
-  }
-
-  #ccModelPanel(): Panel {
-    reloadCustomModels()
-    const custom = this.#models.listCustomModels()
-    const keys = Object.keys(custom).sort()
-    const total = Object.keys(AVAILABLE_MODELS).length
-    const agents = this.#models.listAgents()
-
-    const lines = ["🧠 *模型管理*", `内置模型：${total - keys.length} 个 · 自定义：${keys.length} 个`]
-    // Telegram rejects messages over 4096 chars; cap the dynamic sections and leave room for the fixed block below
-    let used = lines.join("\n").length
-    const push = (line: string): boolean => {
-      if (used + line.length + 1 > 3_200) return false
-      lines.push(line)
-      used += line.length + 1
-      return true
-    }
-    if (keys.length === 0) {
-      lines.push("\n暂无自定义模型。")
-    } else {
-      lines.push("")
-      let shownKeys = 0
-      for (const key of keys.slice(0, 30)) {
-        const model = custom[key]!
-        if (!push(`• \`${escapeMarkdown(key)}\` → \`${escapeMarkdown(`${model.providerID}/${model.modelID}`)}\` — ${escapeMarkdown(model.label)}`)) break
-        shownKeys += 1
-      }
-      if (shownKeys < keys.length) lines.push(`_另有 ${keys.length - shownKeys} 个未显示。_`)
-    }
-
-    if (agents.length > 0) {
-      lines.push("\n*Agent 绑定*")
-      let shownAgents = 0
-      for (const agent of agents) {
-        if (!push(`• \`${escapeMarkdown(agent.name)}\` → ${agent.model ? `\`${escapeMarkdown(agent.model)}\`` : "_未设置_"}`)) break
-        shownAgents += 1
-      }
-      if (shownAgents < agents.length) {
-        lines.push(`_另有 ${agents.length - shownAgents} 个 agent 未显示；完整列表见 \`/cc model agents\`。_`)
-      }
-    }
-
-    lines.push(
-      "\n*命令*",
-      "`/cc model add <简称> <provider>/<modelID> [显示名] [--attachment] [--context N] [--output N]`",
-      "`/cc model del <简称> [force]`（需确认）",
-      "`/cc model assign <agent|self> <简称|provider/modelID>`",
-      "`/cc model agents` · `/cc model list`",
-      "\nAI 也可在 bash 中运行 `npm run models -- ...`；改动无需重启。",
-    )
-
-    const keyboard = new InlineKeyboard()
-      .text("👥 Agents", "cc:magents")
-      .text("🔄 刷新", "cc:model")
-      .row()
-      .text("🧠 切换会话模型", "show:model")
-      .text("🔌 cc 面板", "cc:refresh")
-      .row()
-      .text("⬅️ 主菜单", "show:menu")
-    return { text: lines.join("\n"), keyboard }
-  }
-
-  #agentsText(): string {
-    const agents = this.#models.listAgents()
-    if (agents.length === 0) return "👥 *Agent 绑定*\n\n未找到 `.opencode/agent/*.md`。"
-    const lines = ["👥 *Agent 模型绑定*", ""]
-    // Leave headroom under Telegram's 4096-char limit for long descriptions across many agents
-    let used = lines.join("\n").length
-    let shown = 0
-    for (const agent of agents) {
-      const mode = agent.mode ? ` [${escapeMarkdown(agent.mode)}]` : ""
-      const head = `• *${escapeMarkdown(agent.name)}*${mode} → ${agent.model ? `\`${escapeMarkdown(agent.model)}\`` : "_未设置_"}`
-      const description = agent.description
-        ? `\n  _${escapeMarkdown(clip(agent.description, 80) ?? "")}_`
-        : ""
-      if (used + head.length + description.length + 1 > 3_000) break
-      lines.push(head + description)
-      used += head.length + description.length + 1
-      shown += 1
-    }
-    if (shown < agents.length) {
-      lines.push(`\n_另有 ${agents.length - shown} 个 agent 未显示；完整列表见 \`npm run models -- agents\`。_`)
-    }
-    return lines.join("\n")
-  }
-
-  #ccProviderId(chatId: number, index: number): string | undefined {
-    if (!Number.isInteger(index) || index < 0) return undefined
-    return this.#ccProviders.get(chatId)?.[index]
-  }
-
-  /**
-   * Resolves a panel index against a fresh provider list. Provider ids are cached by
-   * position when the panel renders, so a provider added, deleted or reordered since
-   * then would otherwise make `cc:use:<index>` target a different provider than the
-   * one the user just confirmed.
-   */
-  async #ccProviderAt(chatId: number, index: number): Promise<string | undefined> {
-    const cached = this.#ccProviderId(chatId, index)
-    if (cached === undefined) return undefined
-    let fresh: string[]
-    try {
-      fresh = (await this.#cc.listProviders()).map((provider) => provider.id)
-    } catch {
-      // Cannot re-check: act on the cached id rather than blocking the button
-      return cached
-    }
-    this.#ccProviders.set(chatId, fresh)
-    return fresh[index] === cached ? cached : undefined
-  }
-
-  async #currentCcProvider(): Promise<string | undefined> {
-    const providers = await this.#cc.listProviders()
-    return providers.find((provider) => provider.current)?.id ?? providers[0]?.id
-  }
-
-  #speedtestText(id: string, result: CcSwitchSpeedtest): string {
-    const status = result.ok
-      ? `✅ 测速成功${result.latencyMs !== undefined ? `（${result.latencyMs} ms）` : ""}`
-      : "❌ 测速失败"
-    const details: string[] = []
-    if (result.endpoint) details.push(`• 端点：\`${escapeMarkdown(result.endpoint)}\``)
-    if (result.status) details.push(`• 状态：${escapeMarkdown(result.status)}`)
-    return `⚡ *Provider 测速*：\`${escapeMarkdown(id)}\`\n\n${status}${details.length ? `\n${details.join("\n")}` : ""}`
-  }
-
-  async #sendCcOutput(chatId: number, title: string, body: string): Promise<void> {
-    const cleaned = redactSecrets(stripAnsi(body).trim() || "（无输出）")
-    const clipped = cleaned.length > 3200 ? `${clip(cleaned, 3200) ?? ""}\n…（已截断）` : cleaned
-    await this.#sendTextMessage(chatId, `${title}\n\`\`\`\n${clipped.replace(/```/g, "'''")}\n\`\`\``)
-  }
-
-  async #handleCcCallback(
-    ctx: Context,
-    chatId: number,
-    rest: string,
-    answer: (text?: string) => Promise<void>,
-  ): Promise<void> {
-    const [action = "", rawIndex] = rest.split(":", 2)
-    const index = Number(rawIndex)
-
-    try {
-      if (action === "cfm" || action === "cnl") {
-        await answer()
-        const token = rawIndex ?? ""
-        const pending = this.#ccPending.get(token)
-        if (!pending || Date.now() - pending.createdAt > CC_CONFIRM_TTL_MS) {
-          this.#ccPending.delete(token)
-          await this.#sendTextMessage(chatId, "⌛ 操作已过期，请重新发起。")
-          return
-        }
-        if (pending.chatId !== chatId) {
-          await this.#sendTextMessage(chatId, "⌛ 该确认按钮不属于当前会话。")
-          return
-        }
-        this.#ccPending.delete(token)
-        if (action === "cnl") {
-          await this.#sendTextMessage(chatId, "已取消。")
-          return
-        }
-        try {
-          let args = pending.args
-          for (const extra of pending.appendArgs ?? []) {
-            if (!args.includes(extra)) args = [...args, extra]
-          }
-          if (pending.kind === "provider-use") {
-            const id = pending.providerId ?? ""
-            await this.#cc.useProvider(id)
-            this.#log.info(`cc-switch provider switched -> ${id}`)
-            await this.#sendTextMessage(
-              chatId,
-              `✅ 已将 cc-switch 全局配置切换到 Provider \`${escapeMarkdown(id)}\`。\n` +
-                "_注意：项目 opencode.json 的 Provider 配置仍然优先；Bot 的模型通过 `/model` 控制。_",
-            )
-            return
-          }
-          if (pending.kind === "model-delete") {
-            const key = pending.modelKey ?? ""
-            const removed = this.#models.remove(key, pending.modelForce === true)
-            if (!removed) throw new Error(`模型不存在或不是自定义模型：${key}`)
-            await this.#sendTextMessage(
-              chatId,
-              `🗑 *已删除模型* \`${escapeMarkdown(removed.key)}\`（${escapeMarkdown(`${removed.entry.providerID}/${removed.entry.modelID}`)}）` +
-                (removed.providerUpdated ? "\n已从项目 `opencode.json` 中移除。" : "") +
-                (removed.references.length > 0
-                  ? `\n⚠️ 强制删除，以下引用仍存在：${escapeMarkdown(removed.references.join("、"))}`
-                  : "") +
-                (removed.resetAgents.length > 0
-                  ? `\n已清除 ${removed.resetAgents.length} 个 Agent 的模型绑定：${escapeMarkdown(removed.resetAgents.join("、"))}，它们将使用引擎默认模型。`
-                  : "") +
-                (removed.resetChats.length > 0
-                  ? `\n已重置 ${removed.resetChats.length} 个会话的模型选择，它们将使用引擎默认模型。`
-                  : ""),
-            )
-            return
-          }
-          await this.#executeCc(chatId, args, {
-            bare: pending.bare,
-            pty: pending.pty,
-            timeoutMs: pending.timeoutMs,
-            label: pending.label,
-          })
-        } catch (err) {
-          const message = redactSecrets(err instanceof Error ? err.message : String(err))
-          await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(clip(message, 600) ?? "")}`)
-        }
-        return
-      }
-
-      if (action === "refresh") {
-        await answer()
-        await this.#editPanel(ctx, await this.#ccPanel(chatId))
-        return
-      }
-
-      if (action === "use") {
-        const id = await this.#ccProviderAt(chatId, index)
-        if (!id) {
-          await answer("列表已过期，请重新发送 /cc")
-          return
-        }
-        await answer("请确认切换")
-        await this.#requestCcConfirm(chatId, {
-          args: ["use", id],
-          label: `切换 Provider 到 \`${id}\`（修改 cc-switch 全局配置）`,
-          kind: "provider-use",
-          providerId: id,
-        })
-        return
-      }
-
-      if (action === "test" || action === "testcur") {
-        let id = action === "test" ? await this.#ccProviderAt(chatId, index) : undefined
-        if (action === "testcur") id = await this.#currentCcProvider()
-        if (!id) {
-          await answer("未找到 Provider，请重新打开 /cc")
-          return
-        }
-        if (this.#ccTesting.has(id)) {
-          await answer("该 Provider 正在测速中…")
-          return
-        }
-        this.#ccTesting.add(id)
-        void this.#backgroundSpeedtest(chatId, id)
-        await answer("正在测速，结果稍后发送…")
-        return
-      }
-
-      if (action === "mcp") {
-        await answer()
-        await this.#sendCcOutput(chatId, "📡 *MCP 服务器*", await this.#cc.listMcp())
-        return
-      }
-
-      if (action === "msync") {
-        await answer("正在同步 MCP…")
-        await this.#sendCcOutput(chatId, "📡 *MCP 同步*", await this.#cc.syncMcp())
-        return
-      }
-
-      if (action === "prompts") {
-        await answer()
-        await this.#sendCcOutput(chatId, "📝 *提示词预设*", await this.#cc.listPrompts())
-        return
-      }
-
-      if (action === "env") {
-        await answer()
-        await this.#sendCcOutput(chatId, "🧪 *本地 CLI 工具*", await this.#cc.envTools())
-        return
-      }
-
-      if (action === "proxy") {
-        await answer()
-        await this.#sendCcOutput(chatId, "🌐 *cc-switch 本地代理*", await this.#cc.proxyShow())
-        return
-      }
-
-      if (action === "model") {
-        await answer()
-        await this.#editPanel(ctx, this.#ccModelPanel())
-        return
-      }
-
-      if (action === "magents") {
-        await answer()
-        await this.#sendTextMessage(
-          chatId,
-          this.#agentsText(),
-          new InlineKeyboard().text("🔌 cc 面板", "cc:refresh").text("⬅️ 主菜单", "show:menu"),
-        )
-        return
-      }
-
-      if (action === "cchelp") {
-        await answer()
-        await this.#sendTextMessage(
-          chatId,
-          CC_HELP,
-          new InlineKeyboard().text("🔌 cc 面板", "cc:refresh").text("⬅️ 主菜单", "show:menu"),
-        )
-        return
-      }
-
-      const panels: Record<string, { args: string[]; label: string }> = {
-        failover: { args: ["failover", "show"], label: "Failover" },
-        sessions: { args: ["sessions", "list"], label: "Sessions" },
-        auth: { args: ["auth", "status"], label: "Auth" },
-        skills: { args: ["skills", "list"], label: "Skills" },
-        config: { args: ["config", "path"], label: "Config 路径" },
-      }
-      // Own-property lookup: an inherited name such as "constructor" would otherwise
-      // resolve to a prototype value and reach #executeCc with no arguments
-      const panel = Object.hasOwn(panels, action) ? panels[action] : undefined
-      if (panel) {
-        await answer()
-        try {
-          await this.#executeCc(chatId, panel.args, { label: panel.label })
-        } catch (err) {
-          const message = redactSecrets(err instanceof Error ? err.message : String(err))
-          await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(clip(message, 600) ?? "")}`)
-        }
-        return
-      }
-
-      await answer("未知操作")
-    } catch (err) {
-      const message = redactSecrets(err instanceof Error ? err.message : String(err))
-      await answer(clip(message, 180) ?? "")
-      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(clip(message, 600) ?? "")}`)
-    }
-  }
-
-  async #backgroundSpeedtest(chatId: number, id: string): Promise<void> {
-    try {
-      const result = await this.#cc.speedtest(id)
-      await this.#sendTextMessage(chatId, this.#speedtestText(id, result))
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      await this.#sendTextMessage(chatId, `❌ Provider \`${escapeMarkdown(id)}\` 测速失败：${escapeMarkdown(clip(message, 300) ?? "")}`)
-    } finally {
-      this.#ccTesting.delete(id)
-    }
-  }
-
-  async #handleCcCommand(job: Job, arg: string): Promise<void> {
-    const trimmed = arg.trim()
-    const head = /^(\S+)\s*([\s\S]*)$/.exec(trimmed)
-    const action = (head?.[1] ?? "").toLowerCase()
-    const restRaw = head?.[2]?.trim() ?? ""
-    const rest = tokenizeCcArgs(restRaw)
-    const chatId = job.chatId
-
-    if (!action) {
-      await this.#sendPanel(chatId, await this.#ccPanel(chatId))
-      return
-    }
-
-    try {
-      if (action === "help") {
-        await this.#sendTextMessage(chatId, CC_HELP)
-        return
-      }
-
-      if (action === "run" || action === "raw") {
-        await this.#runCcGeneric(chatId, rest)
-        return
-      }
-
-      if (CC_GROUPS.has(action)) {
-        await this.#handleCcGroup(chatId, action, restRaw)
-        return
-      }
-
-      if (action === "use" || action === "switch") {
-        const id = rest[0]
-        if (!id) {
-          await this.#sendTextMessage(chatId, "用法：`/cc use <provider-id>`（ID 见 `/cc` 面板）")
-          return
-        }
-        await this.#requestCcConfirm(chatId, {
-          args: ["use", id],
-          label: `切换 Provider 到 \`${id}\`（修改 cc-switch 全局配置）`,
-          kind: "provider-use",
-          providerId: id,
-        })
-        return
-      }
-
-      if (action === "current") {
-        const result = await this.#cc.run(["provider", "current"])
-        await this.#sendCcOutput(chatId, "🔌 *当前 Provider*", result.stdout || result.stderr)
-        return
-      }
-
-      if (action === "test" || action === "speedtest") {
-        const id = rest[0] ?? (await this.#currentCcProvider())
-        if (!id) throw new Error("未找到 Provider，请先发送 `/cc use <id>` 或指定 ID。")
-        await this.#sendTextMessage(chatId, `⚡ 正在测速 \`${escapeMarkdown(id)}\`，请稍候…`)
-        const result = await this.#cc.speedtest(id)
-        await this.#sendTextMessage(chatId, this.#speedtestText(id, result))
-        return
-      }
-
-      if (action === "stream") {
-        const id = rest[0]
-        if (!id) throw new Error("用法：`/cc stream <provider-id>`")
-        await this.#sendTextMessage(chatId, `📡 正在检查 \`${escapeMarkdown(id)}\` 的流式连通性…`)
-        await this.#sendCcOutput(chatId, "📡 *Stream Check*", await this.#cc.streamCheck(id))
-        return
-      }
-
-      if (action === "models" || action === "fetch-models") {
-        const id = rest[0]
-        if (!id) throw new Error("用法：`/cc models <provider-id>`")
-        await this.#sendCcOutput(chatId, "🧾 *可用模型*", await this.#cc.fetchModels(id))
-        return
-      }
-
-      if (action === "quota") {
-        const id = rest[0]
-        if (!id) throw new Error("用法：`/cc quota <provider-id> [--json]`")
-        await this.#dispatchCc(chatId, ["provider", "quota", ...rest])
-        return
-      }
-
-      if (action === "model") {
-        await this.#handleCcModel(job, rest)
-        return
-      }
-
-      if (action === "version") {
-        const version = (await this.#cc.version()) ?? "未安装"
-        await this.#sendTextMessage(chatId, `🔌 cc-switch：${escapeMarkdown(version)}\n应用：\`${this.#cc.app}\``)
-        return
-      }
-
-      await this.#sendTextMessage(
-        chatId,
-        "未知指令。发送 `/cc help` 查看全部命令，或使用 `/cc run <参数>` 执行任意非交互命令。",
-      )
-    } catch (err) {
-      const message = redactSecrets(err instanceof Error ? err.message : String(err))
-      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(clip(message, 600) ?? "")}`)
-    }
-  }
-
-  async #handleCcGroup(chatId: number, group: string, restRaw: string): Promise<void> {
-    const normalized = group === "prompt" ? "prompts" : group
-    const subMatch = /^(\S+)\s*([\s\S]*)$/.exec(restRaw)
-    const sub = (subMatch?.[1] ?? "").toLowerCase()
-    const tailRaw = subMatch?.[2]?.trim() ?? ""
-    const tail = tokenizeCcArgs(tailRaw)
-
-    if (normalized === "deeplink") {
-      await this.#requestCcDeeplinkImport(chatId, restRaw.trim())
-      return
-    }
-
-    if (normalized === "update") {
-      if (sub === "--check" || sub === "check" || tail.includes("--check")) {
-        const args = ["update", "--check", ...tail.filter((token) => token !== "--check")]
-        await this.#executeCc(chatId, args, { label: "检查 cc-switch 更新", timeoutMs: CC_LONG_TIMEOUT_MS })
-        return
-      }
-      await this.#requestCcConfirm(chatId, {
-        args: ["update", ...(sub ? [sub] : []), ...tail],
-        label: "升级 cc-switch 二进制到最新版本",
-        pty: true,
-        timeoutMs: CC_UPDATE_TIMEOUT_MS,
-      })
-      return
-    }
-
-    if (normalized === "mcp" && sub === "add") {
-      if (!tailRaw) {
-        await this.#sendTextMessage(
-          chatId,
-          "用法：`/cc mcp add {\"mcpServers\":{\"id\":{\"command\":\"npx\",\"args\":[\"-y\",\"pkg\"]}}}`\n" +
-            "可省略外层，直接发送服务器映射 JSON。",
-        )
-        return
-      }
-      await this.#sendTextMessage(chatId, "📡 正在导入 MCP 配置…")
-      await this.#sendCcOutput(chatId, "📡 *MCP 导入*", await this.#cc.importMcp(tailRaw))
-      return
-    }
-
-    if (normalized === "prompts" && (sub === "new" || sub === "create")) {
-      const parsed = /^(\S+)\s*([\s\S]*)$/.exec(tailRaw)
-      const name = parsed?.[1]
-      const content = parsed?.[2]?.trim() ?? ""
-      if (!name || !content) {
-        await this.#sendTextMessage(chatId, "用法：`/cc prompts new <名称> <提示词内容>`")
-        return
-      }
-      await this.#sendTextMessage(chatId, "📝 正在创建提示词预设…")
-      await this.#sendCcOutput(chatId, "📝 *提示词已创建*", await this.#cc.importPrompt(name, content))
-      return
-    }
-
-    const alias = CC_SUB_ALIASES[`${normalized} ${sub}`]
-    const args = alias
-      ? [...alias, ...tail]
-      : sub
-        ? [normalized, sub, ...tail]
-        : [...(CC_DEFAULTS[normalized] ?? [normalized])]
-    await this.#dispatchCc(chatId, args)
-  }
-
-  async #runCcGeneric(chatId: number, args: string[]): Promise<void> {
-    if (args.length === 0) {
-      await this.#sendTextMessage(chatId, "用法：`/cc run provider list`、`/cc run mcp enable foo --apps opencode` 等。")
-      return
-    }
-    if (args.includes("--app") || args.includes("-a")) {
-      throw new Error("不要在 /cc run 中传 --app；应用类型由 CC_SWITCH_APP 固定。")
-    }
-    if (args[0] === "deeplink") {
-      await this.#requestCcDeeplinkImport(chatId, args[1] ?? "")
-      return
-    }
-    await this.#dispatchCc(chatId, args)
-  }
-
-  async #dispatchCc(chatId: number, args: string[]): Promise<void> {
-    // Every cc-switch command accepts -a/--app; letting one through would retarget
-    // another app's config, so the flag is rejected in all its spellings
-    if (args.some((token) => /^(-a|--app)(=|$)/.test(token))) {
-      throw new Error("不要在 /cc 命令中传 --app；应用类型由 CC_SWITCH_APP 固定。")
-    }
-
-    const blocked = this.#ccBlockedReason(args)
-    if (blocked) {
-      await this.#sendTextMessage(chatId, blocked)
-      return
-    }
-
-    const risk = this.#ccConfirmReason(args)
-    if (risk) {
-      await this.#requestCcConfirm(chatId, { args, ...risk })
-      return
-    }
-
-    await this.#executeCc(chatId, args, { label: args.slice(0, 3).join(" ") })
-  }
-
-  #ccBlockedReason(args: string[]): string | undefined {
-    const [group = "", sub = ""] = args
-    const key = `${group} ${sub}`.trim().toLowerCase()
-    const blocked = new Map<string, string>([
-      ["interactive", "交互式 TUI 无法在 Telegram 中使用；请使用 `/cc help` 查看可用命令。"],
-      ["completions", "shell 补全命令与聊天无关，已跳过。"],
-      ["start", "`start` 会启动交互式 CLI，无法在 Telegram 中运行。"],
-      ["proxy serve", "`proxy serve` 是前台常驻进程，无法在 Telegram 中运行；请用 `proxy enable`。"],
-      ["auth login", "OAuth 登录需要在终端完成设备授权，无法在 Telegram 中运行。"],
-      ["sessions resume", "恢复会话会启动交互式 CLI，无法在 Telegram 中运行。"],
-      ["provider edit", "`provider edit` 依赖交互式 TUI；可先用 `provider add` 新建，或在服务器上编辑。"],
-      ["mcp edit", "`mcp edit` 依赖交互式 TUI；可删除后用 `/cc mcp add <JSON>` 重建。"],
-      ["mcp add", "原生 `mcp add` 是交互式的；请用 `/cc mcp add <JSON>` 导入。"],
-      ["prompts edit", "`prompts edit` 依赖外部编辑器；可用 `/cc prompts new` 新建预设。"],
-      ["prompts create", "原生 `prompts create` 依赖外部编辑器；请用 `/cc prompts new <名称> <内容>`。"],
-      ["config restore", "`config restore` 需要在备份列表中交互选择，无法在 Telegram 中运行。"],
-    ])
-    if (blocked.has(key)) return blocked.get(key)
-    if (group === "daemon" && sub === "start" && !args.includes("--detach")) {
-      return "前台 `daemon start` 会阻塞；请使用 `/cc daemon start --detach`。"
-    }
-    return undefined
-  }
-
-  #ccConfirmReason(
-    args: string[],
-  ): Omit<PendingCcAction, "args" | "createdAt" | "label" | "chatId"> & { label: string } | undefined {
-    const [group = "", sub = ""] = args
-    const key = `${group} ${sub}`.trim().toLowerCase()
-    switch (key) {
-      case "provider use":
-        return {
-          label: `切换 Provider 到 \`${args[2] ?? "?"}\``,
-          kind: "provider-use",
-          providerId: args[2] ?? "",
-        }
-      // Canonical spelling of `use`; /cc provider switch and /cc run bypass the
-      // /cc use shortcut, so the same confirmation has to cover it here
-      case "provider switch":
-        return {
-          label: `切换 Provider 到 \`${args[2] ?? "?"}\`（修改 cc-switch 全局配置）`,
-          kind: "provider-use",
-          providerId: args[2] ?? "",
-        }
-      case "use":
-        return {
-          label: `切换 Provider 到 \`${args[1] ?? "?"}\``,
-          kind: "provider-use",
-          providerId: args[1] ?? "",
-        }
-      case "provider delete":
-        return { label: `删除 Provider \`${args[2] ?? "?"}\``, pty: true }
-      case "mcp delete":
-        return { label: `删除 MCP 服务器 \`${args[2] ?? "?"}\``, pty: true }
-      case "prompts delete":
-        return { label: `删除提示词预设 \`${args[2] ?? "?"}\``, pty: true }
-      case "skills uninstall":
-        return { label: `卸载技能 \`${args[2] ?? "?"}\``, pty: true }
-      case "auth remove":
-        return { label: `移除 ChatGPT 账号 \`${args[2] ?? "?"}\``, pty: true }
-      case "auth logout":
-        return { label: "登出并清除所有 ChatGPT OAuth 数据", pty: true }
-      // Without --confirm cc-switch only runs a dry run; with it a banked reset
-      // credit is burned, which deserves the same gate as `provider quota --reset`
-      case "auth reset-quota":
-        return args.includes("--confirm") ? { label: "消耗一次 Codex 配额重置额度" } : undefined
-      case "config import":
-        return { label: `导入配置 \`${args[2] ?? "?"}\`（会覆盖当前数据库）`, pty: true }
-      case "config reset":
-        return { label: "重置 cc-switch 配置为默认值", pty: true }
-      case "sessions delete":
-        return { label: `删除会话 \`${args[2] ?? "?"}\``, appendArgs: ["--yes"] }
-      case "failover clear":
-        return { label: "清空故障转移队列", appendArgs: ["--yes"] }
-      case "failover enable":
-        return { label: "启用自动故障转移（可能同时开启代理路由）", pty: true }
-      case "provider quota":
-        if (args.includes("--reset")) {
-          return { label: "消耗一次配额重置额度", appendArgs: ["--confirm"] }
-        }
-        return undefined
-      default:
-        if (group === "update" && !args.includes("--check")) {
-          return { label: "升级 cc-switch 二进制到最新版本", pty: true, timeoutMs: CC_UPDATE_TIMEOUT_MS }
-        }
-        return undefined
-    }
-  }
-
-  /** cc-switch deep links overwrite provider/MCP/prompt config, so they always confirm. */
-  async #requestCcDeeplinkImport(chatId: number, rawUrl: string): Promise<void> {
-    const url = rawUrl.trim()
-    if (!url) throw new Error("用法：`/cc deeplink <ccswitch://v1/import?...>`")
-    if (!/^ccswitch:\/\/v1\/import\?/i.test(url)) throw new Error("只接受 ccswitch://v1/import?... 形式的链接。")
-    if (url.length > 8192) throw new Error("Deep Link 过长。")
-    // clip: a hard cut between surrogate halves makes Telegram reject the whole
-    // confirmation message, so the import could never be approved
-    const shownUrl = clip(url, 120) ?? ""
-    await this.#requestCcConfirm(chatId, {
-      args: ["deeplink", url],
-      bare: true,
-      label:
-        `导入 Deep Link（会新增或覆盖 Provider、MCP、提示词等配置）\n` +
-        `\`${shownUrl}${url.length > shownUrl.length ? "…" : ""}\``,
-    })
-  }
-
-  async #requestCcConfirm(
-    chatId: number,
-    action: Omit<PendingCcAction, "createdAt" | "chatId">,
-  ): Promise<void> {
-    const now = Date.now()
-    for (const [token, pending] of this.#ccPending) {
-      if (now - pending.createdAt > CC_CONFIRM_TTL_MS) this.#ccPending.delete(token)
-    }
-    const token = randomBytes(6).toString("hex")
-    this.#ccPending.set(token, { ...action, chatId, createdAt: now })
-    const keyboard = new InlineKeyboard()
-      .text("✅ 确认执行", `cc:cfm:${token}`)
-      .text("❌ 取消", `cc:cnl:${token}`)
-    await this.#sendTextMessage(
-      chatId,
-      `⚠️ *需要确认*\n\n即将执行：${escapeMarkdown(action.label)}\n\n_5 分钟内有效，点击下方按钮继续。_`,
-      keyboard,
-    )
-  }
-
-  #isLongCcCommand(args: string[]): boolean {
-    const [group = "", sub = ""] = args
-    if (group === "update" || group === "deeplink") return true
-    if (group === "provider" && ["speedtest", "stream-check", "fetch-models", "quota"].includes(sub)) return true
-    if (group === "sessions" && sub === "search") return true
-    if (group === "config" && ["import", "export", "backup"].includes(sub)) return true
-    if (group === "skills" && ["install", "market", "update", "check-updates", "discover", "sync"].includes(sub)) return true
-    if (group === "daemon" && sub === "start") return true
-    return false
-  }
-
-  async #executeCc(
-    chatId: number,
-    args: string[],
-    options: { bare?: boolean; pty?: boolean; timeoutMs?: number; label?: string } = {},
-  ): Promise<void> {
-    const timeoutMs = options.timeoutMs ?? (this.#isLongCcCommand(args) ? CC_LONG_TIMEOUT_MS : undefined)
-    // The echoed preview can quote a token typed into the command (an API URL, a
-    // password flag value), so it gets the same redaction as command output; long
-    // tokens are clipped so escaping cannot push the line past the message limit
-    const preview = args
-      .slice(0, 3)
-      .map((token) => escapeMarkdown(clip(redactSecrets(token), 80) ?? ""))
-      .join(" ")
-    await this.#sendTextMessage(chatId, `⏳ 正在执行 \`${preview || "cc-switch"}\`…`)
-
-    const result = options.bare
-      ? await this.#cc.runBare(args, timeoutMs)
-      : options.pty
-        ? await this.#cc.runWithConfirm(args, timeoutMs)
-        : await this.#cc.run(args, timeoutMs)
-
-    this.#log.info(`cc-switch ${args[0] ?? ""} ${args[1] ?? ""} [ok]`)
-    const title = options.label ? `🔌 *${escapeMarkdown(options.label)}*` : "🔌 *cc-switch*"
-    await this.#sendCcOutput(chatId, title, result.stdout || result.stderr)
-  }
-
-  async #handleCcModel(job: Job, rest: string[]): Promise<void> {
-    const chatId = job.chatId
-    const sub = (rest[0] ?? "list").toLowerCase()
-    const args = rest.slice(1)
-
-    if (sub === "list" || sub === "panel") {
-      await this.#sendPanel(chatId, this.#ccModelPanel())
-      return
-    }
-
-    if (sub === "agents" || sub === "agent") {
-      await this.#sendTextMessage(chatId, this.#agentsText())
-      return
-    }
-
-    if (sub === "add") {
-      const key = args[0]
-      const ref = args[1]
-      if (!key || !ref) {
-        await this.#sendTextMessage(
-          chatId,
-          "用法：`/cc model add <简称> <provider>/<modelID> [显示名称] [参数]`\n" +
-            "例如：`/cc model add argon2 custom/gemini-4-argon-high Gemini 4 Argon`\n" +
-            "参数：`--attachment` 声明支持图片，`--context 200000` 上下文窗口，`--output 64000` 输出上限。",
-        )
-        return
-      }
-      const slash = ref.indexOf("/")
-      if (slash <= 0 || slash === ref.length - 1) {
-        throw new Error(`模型请使用 provider/modelID 形式（收到：${ref}）`)
-      }
-
-      const labelParts: string[] = []
-      let attachment: boolean | undefined
-      let contextWindow: number | undefined
-      let outputLimit: number | undefined
-      const readLimit = (flag: string, raw: string | undefined): number => {
-        const value = Number(raw)
-        if (!raw || !Number.isInteger(value) || value <= 0) {
-          throw new Error(`${flag} 需要一个正整数，例如 \`${flag} 200000\`。`)
-        }
-        return value
-      }
-      for (let i = 2; i < args.length; i += 1) {
-        const token = args[i]!
-        const eq = token.indexOf("=")
-        const name = eq > 0 ? token.slice(0, eq) : token
-        const inline = eq > 0 ? token.slice(eq + 1) : undefined
-        if (name === "--attachment" || name === "--vision" || name === "-a") {
-          attachment = true
-        } else if (name === "--context" || name === "--ctx") {
-          contextWindow = readLimit(name, inline ?? args[++i])
-        } else if (name === "--output" || name === "--max-output") {
-          outputLimit = readLimit(name, inline ?? args[++i])
-        } else if (name.startsWith("-")) {
-          throw new Error(`未知参数：${token}`)
-        } else {
-          labelParts.push(token)
-        }
-      }
-
-      const label = labelParts.join(" ")
-      const result = this.#models.add({
-        key,
-        providerID: ref.slice(0, slash),
-        modelID: ref.slice(slash + 1),
-        label: label || undefined,
-        desc: "由 Telegram 添加的自定义模型",
-        attachment,
-        contextWindow,
-        outputLimit,
-      })
-      const capabilities = [
-        attachment ? "支持图片输入" : "",
-        contextWindow ? `上下文 ${contextWindow}` : "",
-        outputLimit ? `输出上限 ${outputLimit}` : "",
-      ].filter(Boolean)
-      const capabilityNote =
-        capabilities.length === 0
-          ? ""
-          : result.providerUpdated
-            ? `\n已写入模型能力：${capabilities.join("、")}。`
-            : `\n⚠️ 模型能力参数（${capabilities.join("、")}）未写入：Provider 不在项目 \`opencode.json\` 中。`
-      await this.#sendTextMessage(
-        chatId,
-        `✅ *已添加模型* \`${escapeMarkdown(result.key)}\` → \`${escapeMarkdown(`${result.entry.providerID}/${result.entry.modelID}`)}\`（${escapeMarkdown(result.entry.label)}）\n` +
-          (result.providerUpdated
-            ? "已同步到项目 `opencode.json`，现在可用 `/model` 选择。"
-            : "Provider 不在项目 `opencode.json` 中，仅登记到 `data/models.json`。") +
-          capabilityNote,
-      )
-      return
-    }
-
-    if (sub === "del" || sub === "delete" || sub === "rm") {
-      const key = args[0]
-      if (!key) {
-        await this.#sendTextMessage(chatId, "用法：`/cc model del <简称> [force]`")
-        return
-      }
-      const force = args.slice(1).some((token) => token.toLowerCase() === "force" || token === "--force")
-      await this.#requestCcConfirm(chatId, {
-        args: ["model", "delete", key],
-        kind: "model-delete",
-        modelKey: key,
-        modelForce: force || undefined,
-        label: force
-          ? `强制删除模型 \`${key}\`（会删除项目配置中的条目，并清除引用它的 Agent 与会话绑定）`
-          : `删除模型 \`${key}\``,
-      })
-      return
-    }
-
-    if (sub === "assign") {
-      const agent = args[0]
-      const selection = args.slice(1).join(" ")
-      if (!agent || !selection) {
-        await this.#sendTextMessage(
-          chatId,
-          "用法：`/cc model assign <agent|self> <简称|provider/modelID>`\n例如：`/cc model assign assistant argon`",
-        )
-        return
-      }
-      const result = this.#models.assignAgent(agent, selection)
-      let extra = ""
-      const selfAgent = this.#cfg.opencode.agent ?? "assistant"
-      if (result.agent === selfAgent && this.#store.getEngine(job.key) === "opencode") {
-        const target = this.#models.resolveModel(selection)
-        await this.#applyOpenCodeModel(job.key, target)
-        extra = "\n当前会话也已切换到该模型（上下文已重置）。"
-      }
-      await this.#sendTextMessage(
-        chatId,
-        `✅ 已将 Agent *${escapeMarkdown(result.agent)}* 的模型设置为 \`${escapeMarkdown(result.model)}\`（${escapeMarkdown(result.label)}）。${extra}`,
-      )
-      return
-    }
-
-    throw new Error("用法：`/cc model list|agents|add|del|assign`")
-  }
 
   #remindersPanel(chatId: number): Panel {
     const items = this.#reminders.list(chatId)
@@ -4672,7 +3765,7 @@ export class TelegramBridge {
       case "proxy": return this.#proxyPanel()
       case "usage": return this.#usagePanel(key)
       case "history": return this.#historyPanel(key)
-      case "cc": return await this.#ccPanel(chatId)
+      case "cc": return await this.#ccCommands.panel(chatId)
       case "ops": return await this.#opsPanel()
       case "service": return await this.#servicePanel()
       case "status": return { text: this.#statusText(chatId, key), keyboard: this.#statusKeyboard() }
@@ -4682,6 +3775,20 @@ export class TelegramBridge {
 
   async #sendPanel(chatId: number, panel: Panel): Promise<void> {
     await this.#sendTextMessage(chatId, panel.text, panel.keyboard)
+  }
+
+  /**
+   * Runs a panel builder or handler off the grammY update loop. grammY processes
+   * updates sequentially, so any subprocess-spanning call awaited inline (ops
+   * panels, cc panels, proxy tests, log tails) would park every other chat's
+   * /stop and buttons behind it for the whole duration.
+   */
+  #offLoop(chatId: number, label: string, run: () => Promise<void>): void {
+    void run().catch((err: unknown) => {
+      const detail = redactSecrets(err instanceof Error ? err.message : String(err))
+      this.#log.error(`${label} failed:`, this.#maskToken(detail))
+      void this.#sendTextMessage(chatId, `⚠️ ${escapeMarkdown(label)}失败：${escapeMarkdown(this.#maskToken(detail))}`)
+    })
   }
 
   async #editPanel(ctx: Context, panel: Panel): Promise<void> {
@@ -4702,24 +3809,29 @@ export class TelegramBridge {
     if (chatId) await this.#sendPanel(chatId, { text, keyboard: panel.keyboard })
   }
 
+  /** Same edit fallback chain as #editPanel, addressed by explicit message id (used off-loop). */
+  async #editPanelRef(chatId: number, messageId: number, panel: Panel): Promise<void> {
+    const text = this.#maskToken(panel.text)
+    try {
+      await this.#bot.api.editMessageText(chatId, messageId, text, {
+        parse_mode: "Markdown",
+        reply_markup: panel.keyboard,
+      })
+      return
+    } catch (err) {
+      if (isMessageNotModified(err)) return
+    }
+    try {
+      await this.#bot.api.editMessageText(chatId, messageId, text, { reply_markup: panel.keyboard })
+      return
+    } catch (err) {
+      if (isMessageNotModified(err)) return
+    }
+    await this.#sendPanel(chatId, { text, keyboard: panel.keyboard })
+  }
+
   #getCurrentModel(key: string): { providerID: string; modelID: string; label: string } {
-    const saved = this.#store.getModel(key)
-    if (saved) return saved
-
-    if (this.#cfg.opencode.model) {
-      return {
-        providerID: this.#cfg.opencode.model.providerID,
-        modelID: this.#cfg.opencode.model.modelID,
-        label: this.#cfg.opencode.model.modelID,
-      }
-    }
-
-    // Default to Gemini 3.8 Flash
-    return {
-      providerID: AVAILABLE_MODELS.gemini!.providerID,
-      modelID: AVAILABLE_MODELS.gemini!.modelID,
-      label: AVAILABLE_MODELS.gemini!.label,
-    }
+    return resolveOpencodeModel(this.#store, this.#cfg.opencode.model, key)
   }
 
   #isAllowedUser(userId: number): boolean {
@@ -4727,11 +3839,52 @@ export class TelegramBridge {
     return this.#cfg.telegram.allowUsers.has(String(userId))
   }
 
-  async #deliverReminder(chatId: number, text: string): Promise<void> {
+  async #deliverReminder(chatId: number, text: string, reminder?: Reminder): Promise<void> {
     // Reminder bodies are user text: an unescaped * _ ` [ would fail the Markdown parse
     // and lose the formatting of the whole message
-    const ok = await this.#sendTextMessage(chatId, escapeMarkdown(text))
+    let keyboard: InlineKeyboard | undefined
+    if (reminder && !reminder.repeat && reminder.text.length <= 500) {
+      // One-shot reminders can be re-armed from the delivery message; repeating ones
+      // already have a next occurrence, and long texts would bloat the token cache
+      const token = randomBytes(6).toString("hex")
+      this.#snoozePending.set(token, { chatId, userId: reminder.userId, text: reminder.text, createdAt: Date.now() })
+      this.#pruneSnoozeTokens()
+      keyboard = new InlineKeyboard()
+        .text("⏰ 10分钟", `snooze:${token}:10`)
+        .text("⏰ 1小时", `snooze:${token}:60`)
+        .row()
+        .text("⏰ 明天这个时候", `snooze:${token}:1440`)
+    }
+    const ok = await this.#sendTextMessage(chatId, escapeMarkdown(text), keyboard)
     if (!ok) throw new Error("Telegram 发送失败")
+  }
+
+  /** Keeps the snooze token cache bounded: 500 entries or 24h, whichever first. */
+  #pruneSnoozeTokens(): void {
+    const cutoff = Date.now() - 24 * 3_600_000
+    for (const [token, pending] of this.#snoozePending) {
+      if (pending.createdAt < cutoff || this.#snoozePending.size > 500) this.#snoozePending.delete(token)
+    }
+  }
+
+  async #handleSnooze(chatId: number, token: string, minutes: number, answer: (text?: string) => Promise<void>): Promise<void> {
+    const pending = this.#snoozePending.get(token)
+    if (!pending || pending.chatId !== chatId) {
+      await answer("该按钮已过期")
+      return
+    }
+    this.#snoozePending.delete(token)
+    try {
+      const reminder = this.#reminders.snooze(chatId, pending.userId, pending.text, minutes)
+      this.#snoozePending.delete(token)
+      await answer("已安排稍后提醒")
+      await this.#sendTextMessage(
+        chatId,
+        `⏰ 好的，${escapeMarkdown(describeRemainingLabel(minutes))}后再提醒你：${escapeMarkdown(clip(reminder.text, 120) ?? "")}`,
+      )
+    } catch (err) {
+      await answer(err instanceof Error ? err.message : "稍后提醒失败")
+    }
   }
 
   async #executeScheduled(task: ScheduledTask): Promise<UsageOutcome> {
@@ -4981,31 +4134,17 @@ export class TelegramBridge {
     return Buffer.concat(chunks, total)
   }
 
-  #prompt(
-    sessionID: string,
-    text: string,
-    modelOverride?: { providerID: string; modelID: string },
-    onActivityHook?: (touch: () => void) => void,
-    signal?: AbortSignal,
-    files?: PromptFile[],
-  ): Promise<string> {
-    return this.#oc.prompt(sessionID, text, {
-      agent: this.#cfg.opencode.agent,
-      model: modelOverride ?? this.#cfg.opencode.model,
-      idleTimeoutMs: this.#cfg.taskTimeoutMs,
-      maxTimeoutMs: this.#cfg.taskMaxTimeoutMs,
-      onActivityHook,
-      signal,
-      files,
-    })
-  }
-
-  async #ensureSession(key: string): Promise<string> {
-    const existing = this.#store.get(key)
-    if (existing) return existing
-
-    const sessionID = await this.#oc.createSession(`Telegram ${key}`)
-    this.#store.set(key, sessionID)
-    return sessionID
+  /** The engine-call context handed to the shared callEngine() helper. */
+  get #engineDeps(): EngineCallDeps {
+    return {
+      oc: this.#oc,
+      agents: this.#agents,
+      store: this.#store,
+      log: this.#log,
+      opencodeAgent: this.#cfg.opencode.agent ?? "assistant",
+      opencodeModel: this.#cfg.opencode.model,
+      taskTimeoutMs: this.#cfg.taskTimeoutMs,
+      taskMaxTimeoutMs: this.#cfg.taskMaxTimeoutMs,
+    }
   }
 }

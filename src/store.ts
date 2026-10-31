@@ -225,8 +225,9 @@ export class SessionStore {
 
         const cliSessions = sanitizeMap(value.cliSessions) ?? emptyMap<string>()
         const cliModels = sanitizeMap(value.cliModels) ?? emptyMap<string>()
-        if (value.qoderSessionID) cliSessions.qoder ??= value.qoderSessionID
-        if (value.qoderModel) cliModels.qoder ??= value.qoderModel
+        // Legacy flat qoder fields: only strings may enter maps that later feed CLI argv
+        if (typeof value.qoderSessionID === "string") cliSessions.qoder ??= value.qoderSessionID
+        if (typeof value.qoderModel === "string") cliModels.qoder ??= value.qoderModel
 
         this.#data[key] = {
           sessionID: value.sessionID,

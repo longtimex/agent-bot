@@ -3,13 +3,16 @@
 把 Telegram 官方 Bot 接到本地 `opencode serve` 与市面上主流的 Agent CLI 上的私人 AI 助手。
 
 ```
-Telegram Client ⇄ Telegram Bot API ⇄ 本项目 ⇄ opencode serve ⇄ 模型 + 工具
-                                        └── Agent CLI（Claude Code / Codex / Gemini / Qwen / Qoder …）
+Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ ⇄ opencode serve ⇄ 模型 + 工具
+                                     │  本项目   │ └─ Agent CLI（Claude Code / Codex / Gemini / Qwen / Qoder …）
+安卓 App        ⇄ HTTP API(/api/v1) ⇄ └──────────┘
 ```
 
 ## 功能
 
 - **Telegram 官方 Bot**：长轮询，无需公网地址，无需扫码。
+- **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/文件附件、语音消息、单条消息临时换引擎、图片/文件回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
+- **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 聊天里发 `/api` 查看配对信息。
 - **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等 14 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在 Telegram 中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
 - **多模型切换**：Claude Sonnet/Opus、Gemini 3.8/4、Grok 4.7、GPT OSS、DeepSeek、GLM、MiMo、Nemotron 等。
@@ -25,6 +28,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ 本项目 ⇄ opencode serve ⇄ 模型
 - **原生附件**：模型通过 `[[image:...]]` 等指令发送图片、视频、语音、文档。
 - **白名单**：默认只允许 `.env` 中配置的 Telegram 用户；未配置时拒绝启动。日常增删用 `/access`，立即生效且不会把自己移出。
 - **仅私聊**：只响应私聊消息，群组/频道消息直接忽略，避免误触发。
+- **提醒稍后提醒**：一次性提醒触发时附带「10分钟 / 1小时 / 明天」按钮，一键延后
 - **定时提醒**：`/remind 30m 喝水` 即可设置；支持重复提醒（`every 30m`、`每5分钟`、`每天 08:30`）与中文口语时间（`5分钟后`、`下午3点`、`今晚8点半`、`后天 09:00`）；保存在 `data/reminders.json`，重启后仍然有效。
 - **时区可在线切换**：`/timezone` 或 `/timezone Asia/Tokyo` 立即改变提醒、定时任务与每日统计所用的时区，并写入 `.env`（`REMINDER_TIMEZONE`），无需重启。
 - **定时 AI 任务**：`/schedule add 每天 09:00 检查服务器` 到点自动调用 AI 执行提示词并回传结果；支持一次性与重复任务、指定引擎/模型、暂停/恢复/删除、立即运行一次，保存在 `data/schedules.json`。
@@ -83,9 +87,61 @@ Telegram Client ⇄ Telegram Bot API ⇄ 本项目 ⇄ opencode serve ⇄ 模型
 | `/env` / `/env set KEY VALUE` / `/env unset KEY` | 查看或修改非密钥配置，重启后生效 |
 | `/access` | 查看 Telegram 访问白名单（含每个 ID 的移除按钮）与「放行所有用户」的状态 |
 | `/access add <用户 ID>` / `/access del <用户 ID>` | 增删白名单：写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
+| `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
+| `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留） |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。
+
+## HTTP API（/api/v1）
+
+默认启用，监听 `127.0.0.1:3080`（`API_ENABLED/API_PORT/API_BIND/API_TOKEN` 可调）。
+所有请求需携带 `Authorization: Bearer <token>`；令牌在 Telegram 发 `/api` 查看。
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /health` | 存活检查：版本、当前引擎、时区 |
+| `GET /info` | 会话与配对信息（同 `/id` + `/api`）：引擎/模型、会话 ID、工作目录、推送聊天 ID、API 监听地址；令牌不会回传 |
+| `GET /help` | 与 Telegram 共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记，供 App 直接展示） |
+| `GET /session` | 当前引擎/模型/工作目录；`POST /agent {engine}` 切换、`POST /model {model}` 切模型（`default` 恢复默认）、`POST /new` 重置会话 |
+| `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；附件为 `{name, mime, data(base64)}` 数组，最多 4 个共 15MB，文本内联、图片/音频/PDF 直连模型；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；返回 202 与 taskId |
+| `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`POST /stop` 停止全部 |
+| `POST /task/:id/stop` · `GET /queue` · `POST /queue/clear` | 停止单个任务（排队中直接丢弃、执行中中止）；查看当前排队/执行中的任务；一键清空排队（仅取消 queued，不影响执行中的任务） |
+| `GET /task/:id/events` | SSE 事件流：实时推送任务进度行与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
+| `GET /task/:id/media/:index` | 下载回复中的第 `index` 个媒体（任务视图 `media[]` 给出 kind/label/name/size/remote）；本地文件限 `data/outbox`，远程链接沿用与 Telegram 相同的 SSRF/代理防护 |
+| `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话 |
+| `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
+| `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
+| `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：与 Telegram `/alias` 共享同一份列表；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
+| `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
+| `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID`）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
+| `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |
+| `GET /cc` | cc-switch 状态：是否安装、版本、应用、Provider 列表与当前项（与 `/cc` 面板一致） |
+| `POST /cc/use` · `POST /cc/test` | 切换 Provider（body `{id}`）与测速（省略 `id` 时测当前项）；同一时间只允许一个 cc-switch 变更操作 |
+| `GET /cc/providers` · `POST /cc/providers` | 对应 `/cc provider add`：`GET` 下发 cc-switch 允许的模板/API 格式与字段上限，`POST` body `{name, id?, template?, baseUrl?, apiKey?, model?, apiFormat?, config?}` 逐项校验后拼固定参数（非法字段 400）。`apiKey` 只在服务层抹除，任何响应都不会回显；`GET` 还返回 `app`/`fieldMode`——cc-switch 只对 Claude/Codex/Gemini 接受 base/key/model 字段模式，其余应用必须提交 `config` JSON（App 表单据此切换） |
+| `GET /cc/proxy` · `GET /cc/mcp` · `POST /cc/mcp/sync` | cc-switch 代理状态、MCP 列表与同步 |
+| `GET /cc/prompts` · `POST /cc/prompts/activate` · `POST /cc/prompts/deactivate` | 提示词列表、启用（body `{id}`）与停用 |
+| `GET /cc/env?mode=tools\|check` | cc-switch 环境工具与检查输出 |
+| `GET /cc/view?name=config\|sessions\|auth\|skills\|failover\|daemon\|settings` | cc-switch 只读视图（配置、会话、认证、技能、故障转移、守护进程、设置），输出脱敏 |
+| `GET /cc/stream?id=` · `GET /cc/models?id=` · `GET /cc/quota?id=` | 对应 `/cc stream`、`/cc models`、`/cc quota`：流式连通性、Provider 模型列表与配额（只读，不含烧额度的 `--reset`） |
+| `POST /cc/mcp/import` · `POST /cc/prompts/create` | 对应 `/cc mcp import`（body `{json}`）与 `/cc prompt new`（body `{name, content}`），上限 20000 字 |
+| `GET /cc/exec` · `POST /cc/exec` | cc-switch 危险命令白名单：`GET` 下发可执行项（名称/说明/是否需要目标 ID/是否需确认），`POST` body `{name, arg?, confirm?}` 只跑表内固定参数；未知名称、缺 `confirm`、非法目标 ID 一律 400。表内含 `skill-install`（`owner/name`，90 秒长超时）、`mcp-enable|disable`、`provider-duplicate|set-default|import-live|remove-from-config`、`proxy-enable|disable`、`failover-add|remove`、`config-validate`、`sessions-sync-usage`、`skills-sync|update|update-all` |
+| `GET /cc/sessions?q=` · `POST /cc/deeplink` | 对应 `/cc sessions search`（关键词上限 128 字、不得以 `-` 开头或含控制字符，90 秒超时）与 `/cc deeplink`：仅接受 `ccswitch://v1/import?...`（上限 8192 字）、需 `confirm: true`，响应不回显链接本身 |
+| `GET /config` · `PUT /config/:key` · `DELETE /config/:key` | `.env` 配置项：查看（密钥值不下发）、修改、删除；仅允许规则内的键，`TELEGRAM_ALLOW_USERS` 仍须走 `/access`，`REMINDER_TIMEZONE` 立即生效 |
+| `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性）与模型列表；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400 |
+| `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
+| `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
+| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` | 运行检查（npm run check）、更新项目（git pull + 依赖 + 构建）、重启 Bot；同一时间只允许一个运维操作，输出自动脱敏 |
+| `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
+| `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
+| `GET /history?limit=` · `DELETE /history` | 任务历史：`limit`（1–50）取最近 N 条，响应同时返回服务端保留的 `total`（最多 50 条），供 App 显示「已显示 N / 共 M 条」 |
+| `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
+| `GET /usage` | 用量统计与近 7 天趋势 |
+| `GET/POST /reminders` · `DELETE /reminders/:id` | 提醒管理（触发时经 Telegram 推送） |
+| `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间） |
+| `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性 |
+
+App 的会话是独立上下文（`api:app`），与各 Telegram 聊天互不干扰。
 
 ## Agent CLI 适配
 
@@ -349,6 +405,7 @@ Telegram Token、API Key、密码、账号凭据等永远不会在 `/env`、`/lo
 - 单条回复最多 5 个附件；默认单文件上限 20MB（`MAX_MEDIA_MB`）。
 - 远程链接默认拒绝回环/私网/链路本地地址（含重定向后的每一跳），并把已通过校验的域名钉死在解析到的地址上（防止 DNS 重绑定），同时限制下载体积；调试内网地址需显式设置 `MEDIA_ALLOW_PRIVATE_URLS=1`（此时不做地址校验，也不钉死解析）。走 `/proxy` 代理下载时由代理服务器负责解析。
 - 下载失败时只回显链接的 `协议://主机/路径`，不带查询参数（签名、令牌常放在 query 里），并做密钥脱敏；关闭或删除代理会立即断开已建立的代理隧道。
+- Android 端同样消费这些指令：图片直接显示在气泡里，其余类型显示为可点击卡片，通过 `GET /task/:id/media/:index` 下载，防护规则与 Telegram 完全一致。
 
 ## 接收图片 / 文件 / 语音
 

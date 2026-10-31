@@ -15,7 +15,7 @@ import { Opencode, OpencodeError } from "../src/opencode.js"
 import { OpsService } from "../src/ops.js"
 import { ProxyService } from "../src/proxy.js"
 import { SessionStore } from "../src/store.js"
-import { BOT_MENU_COMMANDS, HELP_FULL, pruneChatState, TelegramBridge } from "../src/telegram.js"
+import { BOT_MENU_COMMANDS, HELP_FULL, parseProviderAdd, pruneChatState, TelegramBridge } from "../src/telegram.js"
 
 interface ApiCall {
   method: string
@@ -1882,4 +1882,37 @@ test("the Telegram autocomplete menu stays in sync with /help full", () => {
   assert.deepEqual(missing, [], `missing from the Telegram menu: ${missing.join(", ")}`)
   const phantom = names.filter((name) => !documented.has(name) && !shortcuts.has(name))
   assert.deepEqual(phantom, [], `absent from /help full: ${phantom.join(", ")}`)
+})
+
+test("parseProviderAdd reads the friendly key=value form", () => {
+  const parsed = parseProviderAdd([
+    "我的 Claude",
+    "template=claudeapi",
+    "base=https://apiproxy.example.com",
+    "key=sk-abcdef",
+    "model=claude-sonnet-4",
+    "fmt=anthropic",
+    'config={"env":{"A":"B C"}}',
+  ])
+  assert.deepEqual(parsed, {
+    name: "我的 Claude",
+    template: "claudeapi",
+    baseUrl: "https://apiproxy.example.com",
+    apiKey: "sk-abcdef",
+    model: "claude-sonnet-4",
+    apiFormat: "anthropic",
+    config: '{"env":{"A":"B C"}}',
+  })
+
+  // the aliases advertised in /cc help resolve to the same draft
+  assert.deepEqual(parseProviderAdd(["p", "api-key=sk-1", "url=https://x.test", "tpl=deepseek"]), {
+    name: "p",
+    template: "deepseek",
+    baseUrl: "https://x.test",
+    apiKey: "sk-1",
+  })
+
+  assert.match(parseProviderAdd([]) as string, /用法：`\/cc provider add/)
+  assert.match(parseProviderAdd(["p", "note=hello"]) as string, /未知参数 `note`/)
+  assert.match(parseProviderAdd(["p", "id="]) as string, /无法解析参数 `id=`/)
 })

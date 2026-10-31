@@ -445,6 +445,32 @@ test("parseReminder accepts Chinese durations, day parts and relative days", () 
     repeat: { type: "daily", hour: 8, minute: 30 },
   })
 
+  // 晚上12点 is midnight, not noon; 中午 stays literal
+  // 晚上12点 is midnight, not noon (Beijing 00:00 Jan 2 = 16:00 Jan 1 UTC)
+  assert.deepEqual(parseReminder("晚上12点 吃药", now, tz), { dueAt: Date.UTC(2026, 0, 1, 16, 0), text: "吃药" })
+  assert.deepEqual(parseReminder("今晚12点半 吃药", now, tz), { dueAt: Date.UTC(2026, 0, 1, 16, 30), text: "吃药" })
+  assert.deepEqual(parseReminder("中午11点 吃饭", now, tz), { dueAt: Date.UTC(2026, 0, 1, 3, 0), text: "吃饭" })
+  assert.deepEqual(parseReminder("中午12点 休息", now, tz), { dueAt: Date.UTC(2026, 0, 1, 4, 0), text: "休息" })
+
+  // 每/每隔 + 钟点 = 每天循环，而不是静默退化为一次性提醒
+  assert.deepEqual(parseReminder("每 8点 喝水", now, tz), {
+    dueAt: Date.UTC(2026, 0, 2, 0, 0),
+    text: "喝水",
+    repeat: { type: "daily", hour: 8, minute: 0 },
+  })
+  assert.deepEqual(parseReminder("every 18:30 站会", now, tz), {
+    dueAt: Date.UTC(2026, 0, 1, 10, 30),
+    text: "站会",
+    repeat: { type: "daily", hour: 18, minute: 30 },
+  })
+
+  // A daily slot later today is kept for the first occurrence (no 1s skip window)
+  assert.deepEqual(parseReminder("每天 11:00 打卡", now, tz), {
+    dueAt: Date.UTC(2026, 0, 1, 3, 0),
+    text: "打卡",
+    repeat: { type: "daily", hour: 11, minute: 0 },
+  })
+
   // 20:00 local: 18:00 today is already gone rather than silently moved to tomorrow
   assert.throws(() => parseReminder("今天晚上6点 开会", Date.UTC(2026, 0, 1, 12, 0), tz), /已过/)
   assert.throws(() => parseReminder("前天 08:30 复盘", now, tz), /过去/)
@@ -521,6 +547,47 @@ test("a reminder that expired during downtime is reported instead of vanishing",
     broken.add(42, 7, "30m 喝水", eightDaysLate)
     await broken.tick(now)
     assert.equal(broken.list(42).length, 0, "an undeliverable notice must not wedge the tick")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ReminderService.snooze re-arms a one-shot reminder with the same text", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-snooze-"))
+  try {
+    const service = new ReminderService(join(dir, "reminders.json"), async () => {}, log)
+    const now = Date.now()
+    const reminder = service.snooze(42, 7, "给花浇水", 10, now)
+    assert.equal(reminder.text, "给花浇水")
+    assert.equal(reminder.dueAt, now + 10 * 60_000)
+    assert.equal(reminder.repeat, undefined)
+    assert.equal(service.list(42).length, 1)
+
+    assert.throws(() => service.snooze(42, 7, "太久了", 60 * 24 * 8), /1 分钟到 7 天/)
+    assert.throws(() => service.snooze(42, 7, "零分钟", 0), /1 分钟到 7 天/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("reminder delivery passes the reminder so the bridge can offer snooze buttons", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-snooze-delivery-"))
+  try {
+    const delivered: Array<{ text: string; reminder?: { id: number; repeat?: unknown } }> = []
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async (_chatId, _text, reminder) => {
+        delivered.push({ text: _text, reminder })
+      },
+      log,
+    )
+    const now = Date.now()
+    service.add(42, 7, "30s 测试投递", now)
+    await service.tick(now + 31_000)
+    assert.equal(delivered.length, 1)
+    // One-shot: the bridge gets the reminder (for snooze buttons); repeating ones too,
+    // and the bridge decides via repeat whether to attach the keyboard
+    assert.ok(delivered[0]?.reminder, "one-shot delivery should carry the reminder")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

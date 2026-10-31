@@ -37,6 +37,14 @@ export interface BotConfig {
     /** Optional data/agents.json with custom profiles / built-in overrides. */
     configPath: string
   }
+  /** HTTP API used by the companion Android app; Telegram keeps working regardless. */
+  api: {
+    enabled: boolean
+    port: number
+    bind: string
+    /** When empty, a token is generated on first start and stored in data/api-token.json. */
+    token?: string
+  }
   dataDir: string
   outboxDir: string
   inboxDir: string
@@ -157,6 +165,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     },
     agentCli: {
       configPath: agentCliConfig ? resolve(agentCliConfig) : resolve(dataDir, "agents.json"),
+    },
+    api: {
+      enabled: bool(env.API_ENABLED, true),
+      port: int(env.API_PORT, 3080, 1, 65535),
+      bind: pick(env.API_BIND) ?? "127.0.0.1",
+      token: pick(env.API_TOKEN),
     },
     maxReplyLength: int(env.MAX_REPLY_LENGTH, 1500, 100, 4000),
     maxMediaBytes: int(env.MAX_MEDIA_MB, 20, 1, 100) * 1024 * 1024,

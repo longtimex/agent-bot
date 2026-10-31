@@ -240,8 +240,15 @@ function isPrivateIPv6(ip: string): boolean {
     return isPrivateIPv4(embeddedIPv4(groups[6]!, groups[7]!))
   }
 
-  // NAT64 (64:ff9b::/96) can map straight onto internal IPv4 hosts
-  if (groups[0] === 0x64 && groups[1] === 0xff9b && zero(2, 6)) {
+  // NAT64 embeds the target IPv4 in the last two groups: the well-known
+  // 64:ff9b::/96 and RFC 6052's local-use 64:ff9b:1::/48 both resolve onto
+  // plain IPv4 hosts, so a private address behind either prefix is internal
+  if (
+    groups[0] === 0x64 &&
+    groups[1] === 0xff9b &&
+    (groups[2] === 0 || groups[2] === 1) &&
+    zero(3, 6)
+  ) {
     return isPrivateIPv4(embeddedIPv4(groups[6]!, groups[7]!))
   }
 

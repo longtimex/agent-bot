@@ -148,6 +148,7 @@ test("isPrivateAddress flags loopback, private and link-local ranges", () => {
     "::7f00:1",
     "0:0:0:0:0:0:0:1",
     "64:ff9b::7f00:1",
+    "64:ff9b:1::10.0.0.1",
     "ff02::1",
     "2002:7f00:1::",
     "2001:0:4136:e378::1",

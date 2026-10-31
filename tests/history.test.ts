@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { formatHistoryMarkdown } from "../src/history.js"
 import { MAX_HISTORY_PER_CHAT, TaskHistoryStore } from "../src/history.js"
 import type { Logger } from "../src/logger.js"
 
@@ -204,4 +205,24 @@ test("TaskHistoryStore keeps a recent entry in a chat that also has stale ones",
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("formatHistoryMarkdown renders a standalone document with quoted prompts", () => {
+  const entries = [
+    { at: Date.UTC(2026, 0, 2, 3, 30), prompt: "第一行\n第二行", engine: "opencode", model: "Gemini 3.8", ms: 12_345, outcome: "ok" },
+    { at: Date.UTC(2026, 0, 1, 9, 0), prompt: "```json\n{}\n```", engine: "claude", ms: 500, outcome: "failed", scheduled: true },
+  ]
+  const doc = formatHistoryMarkdown(entries, { source: "App (api:app)", timeZone: "Asia/Shanghai" })
+  assert.match(doc, /# Agent Bot 任务历史/)
+  assert.match(doc, /来源：App \(api:app\)/)
+  assert.match(doc, /共 2 条（成功 1 · 失败 1 · 取消 0）/)
+  assert.match(doc, /✅ 01-02 11:30/)
+  assert.match(doc, /❌ 01-01 17:00/)
+  assert.match(doc, /定时/)
+  // multi-line prompts are blockquoted line by line, and fences cannot break layout
+  assert.match(doc, /^> 第一行$/m)
+  assert.match(doc, /^> 第二行$/m)
+  assert.match(doc, /^> ```json$/m)
+
+  assert.match(formatHistoryMarkdown([], {}), /暂无任务记录/)
 })

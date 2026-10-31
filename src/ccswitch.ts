@@ -92,18 +92,27 @@ export interface CcSwitchOptions {
 export class CcSwitchError extends Error {}
 
 const DEFAULT_TIMEOUT_MS = 20_000
-const SPEEDTEST_TIMEOUT_MS = 90_000
+/** Commands that shell out to a provider or the skill market need more than the 20s default. */
+export const CC_LONG_TIMEOUT_MS = 90_000
+const SPEEDTEST_TIMEOUT_MS = CC_LONG_TIMEOUT_MS
 const KILL_ESCALATION_MS = 5_000
 const MAX_ID_LENGTH = 128
 const MAX_OUTPUT = 8 * 1024 * 1024
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g
+// eslint-disable-next-line no-control-regex
+const OSC_RE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g
+// eslint-disable-next-line no-control-regex
+const OSC_UNTERMINATED_RE = /\u001b\][^\u0007\u001b]*$/g
 
 export function stripAnsi(text: string): string {
   return text
     .replace(ANSI_RE, "")
-    .replace(/\u001b\][^\u0007]*\u0007?/g, "")
+    // OSC may end with BEL or ST (ESC \): hyperlink sequences use ST, and a
+    // BEL-only scan would swallow every character after them
+    .replace(OSC_RE, "")
+    .replace(OSC_UNTERMINATED_RE, "")
     .replace(/\r\n?/g, "\n")
 }
 
@@ -180,6 +189,75 @@ export function buildMcpDeeplink(app: string, input: string, apps?: string[]): s
 export function buildSkillDeeplink(repo: string): string {
   const params = new URLSearchParams({ resource: "skill", repo })
   return `ccswitch://v1/import?${params.toString()}`
+}
+
+export interface CcSwitchProviderDraft {
+  name: string
+  id?: string
+  template?: string
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  apiFormat?: string
+  config?: string
+}
+
+/** `provider add --template` values, kept in sync with the cc-switch CLI. */
+export const CC_PROVIDER_TEMPLATES = [
+  "custom",
+  "claude-official",
+  "codex-oauth",
+  "openai-official",
+  "google-oauth",
+  "88api",
+  "apimart",
+  "patewayai",
+  "cubence",
+  "openmodel",
+  "packycode",
+  "dds",
+  "runapi",
+  "aicodemirror",
+  "claudeapi",
+  "qiniu",
+  "fenno",
+  "deepseek",
+] as const
+
+/** `provider add --api-format` values (Claude and Codex spellings combined). */
+/**
+ * cc-switch only builds a provider from `--base-url/--api-key/--model/--api-format`
+ * for these apps; every other app must be given raw `settings_config` JSON.
+ */
+const CC_PROVIDER_FIELD_APPS: ReadonlySet<string> = new Set(["claude", "codex", "gemini"])
+
+export const CC_PROVIDER_API_FORMATS = [
+  "anthropic",
+  "openai_chat",
+  "openai_responses",
+  "gemini_native",
+  "responses",
+  "chat",
+] as const
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
+function assertPlainText(value: string, label: string, max: number): string {
+  const trimmed = value.trim()
+  if (!trimmed) throw new CcSwitchError(`${label} 不能为空。`)
+  if (trimmed.length > max) throw new CcSwitchError(`${label} 过长（上限 ${max} 字）。`)
+  if (CONTROL_CHARS.test(trimmed)) throw new CcSwitchError(`${label} 不能包含控制字符。`)
+  return trimmed
+}
+
+function assertProviderUrl(value: string): string {
+  const trimmed = value.trim()
+  if (!/^https?:\/\/\S+$/.test(trimmed)) throw new CcSwitchError(`Base URL 需是 http(s) 地址：${trimmed}`)
+  if (trimmed.length > 500) throw new CcSwitchError("Base URL 过长（上限 500 字）。")
+  // `@` would turn the URL into credential-carrying form, which cc-switch does not expect here
+  if (trimmed.includes("@")) throw new CcSwitchError("Base URL 不能包含用户名密码。")
+  return trimmed
 }
 
 export function assertSafeId(value: string, label = "ID"): string {
@@ -470,6 +548,11 @@ export class CcSwitchService {
     return this.#app
   }
 
+  /** Whether `provider add` accepts the field mode for this app (otherwise raw JSON only). */
+  get supportsProviderFields(): boolean {
+    return CC_PROVIDER_FIELD_APPS.has(this.#app)
+  }
+
   get deeplinkApp(): string {
     return toDeeplinkApp(this.#app)
   }
@@ -615,6 +698,63 @@ export class CcSwitchService {
     }
     const result = await this.runBare(["deeplink", buildSkillDeeplink(value)], this.#speedtestTimeoutMs)
     return stripAnsi(result.stdout).trim()
+  }
+
+  /**
+   * Non-interactive `provider add`. The argv is built only from validated
+   * fields, so a caller can never pass arbitrary flags.
+   */
+  async addProvider(draft: CcSwitchProviderDraft): Promise<CcSwitchRunResult> {
+    const rawConfig = draft.config?.trim() ?? ""
+    const usesFields = Boolean(draft.baseUrl?.trim() || draft.apiKey?.trim() || draft.model?.trim() || draft.apiFormat?.trim())
+    // cc-switch rejects the two modes together, so say so before shelling out
+    if (rawConfig && usesFields) {
+      throw new CcSwitchError("`config` 与 base/API Key/模型/格式 是两种模式，不能同时提交。")
+    }
+    if (!rawConfig && !this.supportsProviderFields) {
+      throw new CcSwitchError(
+        `当前应用（${this.#app}）新建 Provider 需要原始 settings JSON，请填写 config 字段；或用 Claude/Codex/Gemini 应用重试。`,
+      )
+    }
+    const args = ["provider", "add", "--name", assertPlainText(draft.name, "Provider 名称", 80)]
+    if (draft.id) args.push("--id", assertSafeId(draft.id, "Provider ID"))
+    if (draft.template) {
+      const template = draft.template.trim()
+      if (!CC_PROVIDER_TEMPLATES.includes(template as (typeof CC_PROVIDER_TEMPLATES)[number])) {
+        throw new CcSwitchError(`未知的 Provider 模板，可用：${CC_PROVIDER_TEMPLATES.join("、")}。`)
+      }
+      args.push("--template", template)
+    }
+    if (draft.baseUrl) args.push("--base-url", assertProviderUrl(draft.baseUrl))
+    if (draft.apiKey) args.push("--api-key", assertPlainText(draft.apiKey, "API Key", 300))
+    if (draft.model) args.push("--model", assertSafeId(draft.model, "模型 ID"))
+    if (draft.apiFormat) {
+      const format = draft.apiFormat.trim()
+      if (!CC_PROVIDER_API_FORMATS.includes(format as (typeof CC_PROVIDER_API_FORMATS)[number])) {
+        throw new CcSwitchError(`未知的 API 格式，可用：${CC_PROVIDER_API_FORMATS.join("、")}。`)
+      }
+      args.push("--api-format", format)
+    }
+    if (draft.config) {
+      const raw = draft.config.trim()
+      if (raw.length > 20_000) throw new CcSwitchError("Provider 配置过长（上限 20000 字）。")
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        throw new CcSwitchError("Provider 配置不是合法 JSON。")
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new CcSwitchError("Provider 配置必须是 JSON 对象。")
+      }
+      args.push("--config", raw)
+    }
+    const result = await this.run(args, this.#speedtestTimeoutMs)
+    const key = draft.apiKey?.trim()
+    if (!key) return result
+    // cc-switch echoes the created settings on failure, so the key must not escape
+    const mask = (text: string) => text.split(key).join("***")
+    return { code: result.code, stdout: mask(result.stdout), stderr: mask(result.stderr) }
   }
 
   async version(): Promise<string | undefined> {

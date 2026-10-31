@@ -127,6 +127,87 @@ test("CcSwitchService passes the app flag and validates ids", async () => {
   assert.equal(calls.length, 2)
 })
 
+test("CcSwitchService builds provider add argv from validated fields and masks the key", async () => {
+  const calls: string[][] = []
+  const service = new CcSwitchService({
+    app: "claude",
+    runner: async (args) => {
+      calls.push(args)
+      return { code: 0, stdout: "created with key sk-abcdef0123456789", stderr: "" }
+    },
+  })
+
+  const result = await service.addProvider({
+    name: "我的 Claude",
+    id: "team-1",
+    template: "claudeapi",
+    baseUrl: "https://apiproxy.example.com",
+    apiKey: "sk-abcdef0123456789",
+    model: "claude-sonnet-4",
+    apiFormat: "anthropic",
+  })
+  assert.deepEqual(calls[0], [
+    "--app", "claude",
+    "provider", "add",
+    "--name", "我的 Claude",
+    "--id", "team-1",
+    "--template", "claudeapi",
+    "--base-url", "https://apiproxy.example.com",
+    "--api-key", "sk-abcdef0123456789",
+    "--model", "claude-sonnet-4",
+    "--api-format", "anthropic",
+  ])
+  assert.ok(!result.stdout.includes("sk-abcdef0123456789"), "the submitted key must not come back")
+
+  // cc-switch rejects --config together with the field mode, so the service must too
+  await assert.rejects(
+    () => service.addProvider({ name: "x", baseUrl: "https://x.test", config: '{"env":{}}' }),
+    /两种模式/,
+  )
+  await service.addProvider({ name: "raw", template: "custom", config: '{"env":{}}' })
+  assert.deepEqual(calls[1], [
+    "--app", "claude",
+    "provider", "add",
+    "--name", "raw",
+    "--template", "custom",
+    "--config", '{"env":{}}',
+  ])
+
+  await assert.rejects(() => service.addProvider({ name: "x", template: "--help" }), /未知的 Provider 模板/)
+  await assert.rejects(() => service.addProvider({ name: "x", apiFormat: "soap" }), /未知的 API 格式/)
+  await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "http://x y" }), /Base URL/)
+  await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "https://u:p@example.com" }), /用户名密码/)
+  await assert.rejects(() => service.addProvider({ name: "x", config: "[1,2]" }), /JSON 对象/)
+  await assert.rejects(() => service.addProvider({ name: "x", config: "not json" }), /合法 JSON/)
+  await assert.rejects(() => service.addProvider({ name: "" }), /不能为空/)
+  await assert.rejects(() => service.addProvider({ name: "a\nb" }), /控制字符/)
+  assert.equal(calls.length, 2)
+})
+
+test("CcSwitchService requires raw config for apps without provider field mode", async () => {
+  const calls: string[][] = []
+  const service = new CcSwitchService({
+    app: "opencode",
+    runner: async (args) => {
+      calls.push(args)
+      return { code: 0, stdout: "ok", stderr: "" }
+    },
+  })
+  assert.equal(service.supportsProviderFields, false)
+
+  await service.addProvider({ name: "OpenCode 直连", config: '{"providers":{"x":{"baseUrl":"https://x.test"}}}' })
+  assert.deepEqual(calls[0], [
+    "--app", "open-code",
+    "provider", "add",
+    "--name", "OpenCode 直连",
+    "--config", '{"providers":{"x":{"baseUrl":"https://x.test"}}}',
+  ])
+
+  await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "https://x.test" }), /原始 settings JSON/)
+  await assert.rejects(() => service.addProvider({ name: "x" }), /原始 settings JSON/)
+  assert.equal(calls.length, 1)
+})
+
 test("CcSwitchService surfaces stderr when the CLI exits non-zero", async () => {
   const service = new CcSwitchService({
     runner: async () => ({ code: 2, stdout: "", stderr: "\u001b[31mProvider 'nope' not found\u001b[0m\n" }),

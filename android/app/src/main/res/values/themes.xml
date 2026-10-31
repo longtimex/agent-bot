@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-first like Grok: the Compose theme draws everything, this only avoids a white flash -->
+    <style name="Theme.AgentBot" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0B0C0E</item>
+        <item name="android:statusBarColor">#0B0C0E</item>
+        <item name="android:navigationBarColor">#0B0C0E</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

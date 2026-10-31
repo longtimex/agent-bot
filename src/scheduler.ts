@@ -17,6 +17,8 @@ export const MAX_SCHEDULES_PER_CHAT = 20
 export const MAX_SCHEDULE_PROMPT = 2_000
 
 const TICK_MS = 15_000
+/** Matches the reminder delivery timeout: past this, the notice is dropped, not awaited. */
+const NOTICE_TIMEOUT_MS = 20_000
 const MAX_OVERDUE_MS = 7 * 24 * 60 * 60 * 1000
 const OUTCOMES: UsageOutcome[] = ["ok", "failed", "cancelled"]
 const ENGINE_ID_RE = /^[a-z0-9][a-z0-9._-]*$/
@@ -407,7 +409,19 @@ export class ScheduleService {
   async #notify(task: ScheduledTask, text: string): Promise<void> {
     if (!this.#notice) return
     try {
-      await this.#notice(task.chatId, text)
+      // A hung Telegram send would otherwise freeze the whole tick loop (and every
+      // task it already marked as due), so give up on the notice after a timeout
+      let timer: NodeJS.Timeout | undefined
+      try {
+        await Promise.race([
+          this.#notice(task.chatId, text),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Telegram 发送超时")), NOTICE_TIMEOUT_MS)
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
     } catch (err) {
       this.#log.warn(`failed to deliver schedule notice #${task.id}:`, (err as Error).message)
     }

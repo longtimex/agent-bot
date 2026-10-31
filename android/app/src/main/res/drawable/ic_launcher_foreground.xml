@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A minimal spark glyph: works at every adaptive-icon density -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E8EAED"
+        android:pathData="M54,30 L60,48 L78,54 L60,60 L54,78 L48,60 L30,54 L48,48 Z" />
+    <path
+        android:fillColor="#8AB4F8"
+        android:pathData="M72,64 L74.5,70.5 L81,73 L74.5,75.5 L72,82 L69.5,75.5 L63,73 L69.5,70.5 Z" />
+</vector>

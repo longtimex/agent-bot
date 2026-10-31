@@ -116,10 +116,11 @@ function socksDispatcher(url: URL): Agent {
   const type = url.protocol.startsWith("socks4") ? 4 : 5
   const { userId, password } = socksCredentials(url)
   return new Agent({
-    connectTimeout: TEST_TIMEOUT_MS,
     headersTimeout: 30_000,
     bodyTimeout: 30_000,
     connect: (options, callback) => {
+      // A custom connect bypasses undici's buildConnector, so connectTimeout above
+      // would be ignored: the SOCKS handshake carries its own timeout instead
       const port = Number(options.port) || (options.protocol === "https:" ? 443 : 80)
       SocksClient.createConnection({
         proxy: {
@@ -131,6 +132,7 @@ function socksDispatcher(url: URL): Agent {
         },
         command: "connect",
         destination: { host: options.hostname, port },
+        timeout: TEST_TIMEOUT_MS,
       })
         .then(({ socket }) => {
           if (options.protocol !== "https:") {
@@ -138,8 +140,17 @@ function socksDispatcher(url: URL): Agent {
             return
           }
           const secure = tls.connect({ socket, servername: options.servername ?? options.hostname })
-          secure.once("secureConnect", () => callback(null, secure))
-          secure.once("error", (err) => callback(err, null))
+          // undici connectors must invoke the callback exactly once: a late TLS
+          // error after secureConnect would otherwise fire it a second time
+          let done = false
+          const finish = (err: Error | null, value: tls.TLSSocket | null): void => {
+            if (done) return
+            done = true
+            if (err) callback(err, null)
+            else if (value) callback(null, value)
+          }
+          secure.once("secureConnect", () => finish(null, secure))
+          secure.once("error", (err) => finish(err instanceof Error ? err : new Error(String(err)), null))
         })
         .catch((err: unknown) => callback(err instanceof Error ? err : new Error(String(err)), null))
     },
@@ -219,6 +230,12 @@ export class ProxyService {
     }
 
     await this.#tester(parsed.url, parsed.protocol)
+
+    // The duplicate check ran before the tester await: a concurrent add of the
+    // same URL would have slipped past it, so recheck before committing
+    if (this.#proxies.some((proxy) => proxy.url === parsed.url)) {
+      throw new Error("这个代理已经添加过了。")
+    }
 
     const host = new URL(parsed.url).host
     const proxy: ProxyRecord = {

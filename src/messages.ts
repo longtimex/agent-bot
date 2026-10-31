@@ -122,3 +122,37 @@ export function splitMessage(text: string, max: number): string[] {
   if (rest) chunks.push(rest)
   return chunks
 }
+
+import type { InlineKeyboard } from "grammy"
+
+export interface Panel {
+  text: string
+  keyboard: InlineKeyboard
+}
+
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[_*`[\]\\]/g, "\\$&")
+}
+
+/**
+ * Drops the oldest entries that are no longer in use until the map fits `limit`.
+ * Insertion order is first-seen order, not recency (re-`set` on an existing key
+ * keeps its position), so the longest-standing chats leave first. That is fine
+ * here: the survivors only lose a retry prompt and a generation counter, and a
+ * chat with work in flight is protected by `isActive`.
+ */
+export function pruneChatState<K>(
+  map: Map<K, unknown>,
+  isActive: (key: K) => boolean,
+  limit: number,
+): number {
+  if (map.size <= limit) return 0
+  let removed = 0
+  for (const key of map.keys()) {
+    if (map.size <= limit) break
+    if (isActive(key)) continue
+    map.delete(key)
+    removed++
+  }
+  return removed
+}

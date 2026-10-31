@@ -406,6 +406,10 @@ export class Opencode {
           `执行超时：长任务超过时限未产生响应。已执行步骤请稍后重试或简化任务。`,
         )
       }
+      // A mid-flight network failure leaves the server generating: stop it the
+      // same way the timeout and cancel paths do, or the next prompt hits a busy
+      // session while tokens keep burning
+      void this.abortSession(sessionID).catch(() => {})
       throw err
     } finally {
       settled = true

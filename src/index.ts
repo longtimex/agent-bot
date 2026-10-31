@@ -1,5 +1,6 @@
-import { mkdirSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { ApiServer, resolveApiToken } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
@@ -151,6 +152,45 @@ async function main(): Promise<void> {
 
   const tgBridge = new TelegramBridge(cfg, oc, agents, store, log, proxies, undefined, ccswitch, models)
 
+  let apiServer: ApiServer | undefined
+  if (cfg.api.enabled) {
+    try {
+      apiServer = new ApiServer(
+        {
+          cfg,
+          oc,
+          agents,
+          store,
+          log,
+          usage: tgBridge.usageStore,
+          history: tgBridge.historyStore,
+          reminders: tgBridge.sharedReminders,
+          schedules: tgBridge.sharedSchedules,
+          models,
+          timezone: () => tgBridge.currentTimezone,
+          setTimezone: (zone) => tgBridge.setTimezone(zone),
+          ops: tgBridge.opsService,
+          installer: tgBridge.agentInstaller,
+          proxies,
+          aliases: tgBridge.aliasStore,
+          ccswitch: tgBridge.ccSwitch,
+          fetchMedia: (target) => tgBridge.fetchRemoteMedia(target),
+          access: {
+            list: () => tgBridge.accessState,
+            add: (ids) => tgBridge.addAccess(ids),
+            remove: (ids) => tgBridge.removeAccess(ids),
+          },
+          ownerChatId: tgBridge.ownerChatId,
+        },
+        resolveApiToken(cfg),
+      )
+      await apiServer.start()
+    } catch (err) {
+      apiServer = undefined
+      log.error(`failed to start the HTTP API: ${(err as Error).message} (Telegram 继续正常运行)`)
+    }
+  }
+
   const shutdown = async (signal: string, code = 0): Promise<void> => {
     log.info(`received ${signal}, shutting down`)
     process.exitCode = code
@@ -158,6 +198,7 @@ async function main(): Promise<void> {
     if (logTimer) clearInterval(logTimer)
     agents.dispose()
     proxies.dispose()
+    if (apiServer) await apiServer.stop().catch(() => {})
     await tgBridge.stop().catch(() => {})
     releaseLock()
     setTimeout(() => process.exit(code), 100).unref()

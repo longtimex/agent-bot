@@ -1256,13 +1256,18 @@ export class AgentCliService {
         }
       }
 
+      // Trimming to the cap on every chunk past it would rebuild an 8 MB string
+      // per data event (O(n²) over a long run): grow up to 2× the cap, then cut
+      // back once, which keeps the retained tail within [cap, 2·cap)
+      const trimOutput = (text: string): string =>
+        text.length > MAX_OUTPUT_CHARS * 2 ? capTail(text, MAX_OUTPUT_CHARS) : text
       const appendStdout = (text: string): void => {
         stdout += text
-        if (stdout.length > MAX_OUTPUT_CHARS) stdout = capTail(stdout, MAX_OUTPUT_CHARS)
+        stdout = trimOutput(stdout)
       }
       const appendStderr = (text: string): void => {
         stderr += text
-        if (stderr.length > MAX_OUTPUT_CHARS) stderr = capTail(stderr, MAX_OUTPUT_CHARS)
+        stderr = trimOutput(stderr)
       }
 
       child.stdout?.on("data", (chunk: Buffer) => {

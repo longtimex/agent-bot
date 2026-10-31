@@ -87,10 +87,19 @@ function zonedToUtc(year: number, month: number, day: number, hour: number, minu
   return guess - offsetMs(guess - offset, timeZone)
 }
 
-function absoluteDue(hour: number, minute: number, now: number, timeZone: string, dayOffset = 0): number {
+function absoluteDue(
+  hour: number,
+  minute: number,
+  now: number,
+  timeZone: string,
+  dayOffset = 0,
+  skipToday = true,
+): number {
   const parts = zonedParts(now, timeZone)
   let dueAt = zonedToUtc(parts.year, parts.month, parts.day + dayOffset, hour, minute, timeZone)
-  if (dayOffset === 0 && dueAt <= now + 1_000) {
+  // Repeat rescheduling calls this right after a trigger, so "today" must mean
+  // tomorrow then; fresh reminders instead keep a same-day slot that is still ahead
+  if (dayOffset === 0 && dueAt <= now + (skipToday ? 1_000 : 0)) {
     dueAt = zonedToUtc(parts.year, parts.month, parts.day + 1, hour, minute, timeZone)
   }
   return dueAt
@@ -206,7 +215,7 @@ function pad2(value: number): string {
 // 每天 / 明天 / 后天 / 今晚 / 下午 既可以独立成词，也可以和时间粘在同一个词里
 const TIME_PREFIX_RE =
   /^(每隔|每天|每日|每|everyday|daily|every|each|前天|明天|后天|今天|今晚|明晚|凌晨|清晨|早上|上午|中午|下午|傍晚|晚上)(.*)$/i
-const DAY_PARTS_PM = new Set(["中午", "下午", "傍晚", "晚上"])
+const DAY_PARTS_PM = new Set(["下午", "傍晚", "晚上"])
 const HORIZON: Record<string, number> = {
   前天: -1,
   今天: 0,
@@ -321,12 +330,18 @@ export function parseReminder(
 
   const clock = parseClockToken(timeToken)
   if (clock) {
-    const hour = dayPart && DAY_PARTS_PM.has(dayPart) && clock.hour < 12 ? clock.hour + 12 : clock.hour
+    let hour = clock.hour
+    if (dayPart && DAY_PARTS_PM.has(dayPart)) {
+      if (dayPart === "晚上" && hour === 12) hour = 0
+      // 中午 stays literal (中午11点 = 11:00, 中午12点 = 12:00); other PM parts shift
+      else if (hour < 12) hour += 12
+    }
     const minute = clock.minute
     validateClock(hour, minute)
-    if (daily) {
+    if (daily || every) {
+      // 每 8点 / every 18:30 mean a daily recurrence, not a one-shot
       return {
-        dueAt: absoluteDue(hour, minute, now, timeZone),
+        dueAt: absoluteDue(hour, minute, now, timeZone, 0, false),
         text: takeText(),
         repeat: { type: "daily", hour, minute },
       }
@@ -335,6 +350,11 @@ export function parseReminder(
       throw new Error(`${label}时间不能是过去。`)
     }
     if (horizon === 0) {
+      // 今晚12点半 means the midnight that ENDS tonight, i.e. the next 00:30,
+      // so an already-past wall clock rolls to tomorrow instead of erroring
+      if (hour === 0 && dayPart === "晚上") {
+        return { dueAt: absoluteDue(hour, minute, now, timeZone), text: takeText() }
+      }
       const parts = zonedParts(now, timeZone)
       const dueAt = zonedToUtc(parts.year, parts.month, parts.day, hour, minute, timeZone)
       if (dueAt <= now) {
@@ -429,14 +449,18 @@ export class ReminderStore {
       }
       this.#nextId = Number.isInteger(parsed.nextId) && (parsed.nextId ?? 0) > 0 ? parsed.nextId! : 1
       const items = Array.isArray(parsed.reminders) ? parsed.reminders : []
+      const seenIds = new Set<number>()
       for (const item of items) {
         if (
           item &&
           Number.isInteger(item.id) &&
+          !seenIds.has(item.id) &&
           Number.isFinite(item.chatId) &&
           Number.isFinite(item.dueAt) &&
           typeof item.text === "string"
         ) {
+          // A duplicated id (hand-edited file) would otherwise become an uncancellable ghost
+          seenIds.add(item.id)
           this.#reminders.push({
             id: item.id,
             chatId: item.chatId,
@@ -484,7 +508,7 @@ export class ReminderStore {
   }
 }
 
-export type ReminderSender = (chatId: number, text: string) => Promise<void>
+export type ReminderSender = (chatId: number, text: string, reminder?: Reminder) => Promise<void>
 
 export class ReminderService {
   readonly #store: ReminderStore
@@ -530,6 +554,21 @@ export class ReminderService {
     return this.#store.cancel(chatId, id)
   }
 
+  /**
+   * Re-arms a delivered one-shot reminder after `minutes` — the 稍后提醒 button
+   * on the delivery message. Keeps the original text verbatim (no time parsing),
+   * so a snoozed reminder always rings exactly that much later.
+   */
+  snooze(chatId: number, userId: number, text: string, minutes: number, now = Date.now()): Reminder {
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60 * 24 * 7) {
+      throw new Error("稍后提醒的时长需在 1 分钟到 7 天之间。")
+    }
+    if (this.#store.count(chatId) >= MAX_PER_CHAT) {
+      throw new Error(`每个会话最多设置 ${MAX_PER_CHAT} 条提醒，请先取消部分提醒。`)
+    }
+    return this.#store.add(chatId, userId, text, now + minutes * 60_000)
+  }
+
   start(): void {
     if (this.#timer) return
     void this.tick()
@@ -549,6 +588,9 @@ export class ReminderService {
     try {
       const due = this.#store.takeDue(now)
       for (const reminder of due) {
+        // The next due is computed from the tick's entry timestamp: under a simulated
+        // clock (tests) that is the only meaningful base, and in production a slow
+        // delivery merely advances the next occurrence, never replays a stale one
         if (now - reminder.dueAt > MAX_OVERDUE_MS) {
           if (reminder.repeat) {
             // Keep the recurrence alive after a long outage but skip the stale occurrence
@@ -561,7 +603,7 @@ export class ReminderService {
             this.#store.settle(reminder.id)
             this.#log.warn(`dropped reminder #${reminder.id}; it was overdue by over 7 days`)
             // Deleting it in silence looks exactly like the bot lost the reminder, so say so
-            await this.#send(
+            await this.#sendWithTimeout(
               reminder.chatId,
               `⏰ 提醒 #${reminder.id} 已过期未发送：Bot 停机期间它超过 7 天没有触发，已自动删除。`,
             ).catch(() => {})
@@ -576,7 +618,11 @@ export class ReminderService {
           // A chat whose owner was taken off the access list must not keep receiving
           // bot output; the failure path keeps the recurrence and drops it on backoff
           if (!this.#access(reminder.userId)) throw new Error("用户已不在访问白名单中")
-          await this.#sendWithTimeout(reminder.chatId, `${prefix} #${reminder.id}：${reminder.text}`)
+          await this.#sendWithTimeout(
+            reminder.chatId,
+            `${prefix} #${reminder.id}：${reminder.text}`,
+            reminder,
+          )
           if (reminder.repeat) {
             const next = nextReminderDue(reminder, now, this.#timeZone)
             if (next) this.#store.settle(reminder.id, { dueAt: next })
@@ -619,11 +665,11 @@ export class ReminderService {
     }
   }
 
-  async #sendWithTimeout(chatId: number, text: string): Promise<void> {
+  async #sendWithTimeout(chatId: number, text: string, reminder?: Reminder): Promise<void> {
     let timer: NodeJS.Timeout | undefined
     try {
       await Promise.race([
-        this.#send(chatId, text),
+        this.#send(chatId, text, reminder),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("Telegram 发送超时")), SEND_TIMEOUT_MS)
         }),
