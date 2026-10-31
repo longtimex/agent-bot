@@ -49,6 +49,14 @@ export interface BotConfig {
   outboxDir: string
   inboxDir: string
   logLevel: LogLevel
+  /** "Bot 已上线" ping to the owner chat after a successful start; false turns it off. */
+  startupNotice?: boolean
+  /** Scheduled daily usage summary pushed to the owner chat. */
+  usageReport?: {
+    enabled: boolean
+    /** Push time "HH:MM" (24 h), resolved in REMINDER_TIMEZONE. */
+    time: string
+  }
 }
 
 /** A startup configuration problem: the message is the guidance, so no stack is printed. */
@@ -181,5 +189,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     outboxDir: resolve(dataDir, "outbox"),
     inboxDir: resolve(dataDir, "inbox"),
     logLevel: logLevel(env.LOG_LEVEL),
+    startupNotice: bool(env.STARTUP_NOTICE, true),
+    usageReport: {
+      enabled: bool(env.USAGE_DAILY_REPORT, false),
+      time: validateReportTime(pick(env.USAGE_DAILY_REPORT_TIME) ?? "21:00"),
+    },
   }
+}
+
+/** "HH:MM" 24-hour clock; an invalid value must fail at startup, not silently never fire. */
+function validateReportTime(value: string): string {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    throw new StartupConfigError(`拒绝启动：USAGE_DAILY_REPORT_TIME 无效（${value}）。请使用 24 小时制 HH:MM，例如 21:00。`)
+  }
+  return value
 }

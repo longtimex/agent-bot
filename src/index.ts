@@ -14,6 +14,7 @@ import { ProxyService } from "./proxy.js"
 import { canRunSetup, setupFromCli } from "./setup.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
+import { appVersion } from "./version.js"
 
 function setupHint(detail: string): string {
   return (
@@ -181,6 +182,7 @@ async function main(): Promise<void> {
             remove: (ids) => tgBridge.removeAccess(ids),
           },
           ownerChatId: tgBridge.ownerChatId,
+          version: appVersion(),
         },
         resolveApiToken(cfg),
       )

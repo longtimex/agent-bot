@@ -202,6 +202,12 @@ const ENV_RULES: Record<string, EnvRule> = {
   MAX_INPUT_MB: intRule(1, 20),
   REMINDER_TIMEZONE: { hint: "IANA 时区", validate: timezoneRule },
   LOG_LEVEL: enumRule(["debug", "info", "warn", "error"]),
+  STARTUP_NOTICE: boolRule,
+  USAGE_DAILY_REPORT: boolRule,
+  USAGE_DAILY_REPORT_TIME: {
+    hint: "HH:MM（24 小时制，按 REMINDER_TIMEZONE）",
+    validate: (value) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? undefined : "时间格式无效，应为 HH:MM"),
+  },
   MEDIA_ALLOW_PRIVATE_URLS: boolRule,
   TELEGRAM_ALLOW_ALL_USERS: boolRule,
   TELEGRAM_ALLOW_USERS: { hint: "逗号分隔的 Telegram 用户 ID（请用 /access 修改）", validate: allowUsersRule },
@@ -356,6 +362,46 @@ export class OpsService {
       opencodeLog: { path: this.#opencodeLogPath, bytes: this.#fileSize(this.#opencodeLogPath) },
       disk,
       memory: { freeBytes: freemem(), totalBytes: totalmem() },
+    }
+  }
+
+  /** Dry-run update check: fetch upstream and count new commits; changes nothing locally. */
+  async checkUpdate(): Promise<OpsResult> {
+    if (!this.#which("git")) return { ok: false, message: "未找到 git，无法检查更新。", steps: [] }
+    const steps: OpsStep[] = []
+
+    const upstream = await this.#runCommand(
+      "git",
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      15_000,
+    )
+    steps.push(this.#step("读取上游分支", upstream))
+    if (upstream.code !== 0) {
+      return { ok: false, message: "当前分支没有配置上游分支，无法在线比较，可手动执行 git pull。", steps }
+    }
+    const target = stripAnsi(upstream.stdout).trim() || "上游分支"
+
+    const fetch = await this.#runCommand("git", ["fetch", "--quiet", "origin"], 60_000)
+    steps.push(this.#step("git fetch origin", fetch))
+    if (fetch.code !== 0) {
+      return { ok: false, message: "无法连接远端仓库（网络问题或仓库不可达），请稍后再试。", steps }
+    }
+
+    const behind = await this.#runCommand("git", ["rev-list", "--count", `HEAD..${target}`], 15_000)
+    steps.push(this.#step("比较提交数", behind))
+    const count = Number.parseInt(stripAnsi(behind.stdout).trim(), 10)
+    if (!Number.isFinite(count)) {
+      return { ok: false, message: "无法读取远端提交数，请稍后再试。", steps }
+    }
+    if (count === 0) {
+      return { ok: true, message: `✅ 已是最新：本地与 ${target} 一致。`, steps }
+    }
+    const log = await this.#runCommand("git", ["log", "--oneline", "-5", `HEAD..${target}`], 15_000)
+    const sample = stripAnsi(log.stdout || log.stderr).trim()
+    return {
+      ok: true,
+      message: `⬇️ 落后 ${count} 个提交（${target}）${sample ? `：\n${sample}` : ""}。\n点击「⬆️ 更新项目」或发送 /update 拉取。`,
+      steps,
     }
   }
 

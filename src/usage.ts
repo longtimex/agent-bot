@@ -202,6 +202,43 @@ export class UsageStore {
     return days
   }
 
+  /** Per-chat totals for one calendar day (0 = today); chats idle that day are omitted. */
+  dayTotalsByChat(offsetDays = 0, now = Date.now()): Array<{ key: string; usage: UsageDay }> {
+    let day = dateKey(now, this.#timeZone)
+    for (let index = 0; index < offsetDays; index++) day = previousDay(day)
+    const rows: Array<{ key: string; usage: UsageDay }> = []
+    for (const [key, chat] of Object.entries(this.#chats)) {
+      const usage = chat.days[day]
+      if (usage && usage.tasks > 0) rows.push({ key, usage: { ...usage } })
+    }
+    return rows
+  }
+
+  /** Day-by-day totals summed across every chat, chronological and zero-filled. */
+  aggregateRecentDays(count = 7, now = Date.now()): UsageTrendDay[] {
+    const size = Math.max(1, Math.min(KEEP_DAYS, Math.floor(count)))
+    let day = dateKey(now, this.#timeZone)
+    const ordered: string[] = []
+    for (let offset = 0; offset < size; offset++) {
+      ordered.unshift(day)
+      day = previousDay(day)
+    }
+    const totals = new Map<string, UsageDay>(ordered.map((key) => [key, emptyDay()]))
+    for (const chat of Object.values(this.#chats)) {
+      for (const key of ordered) {
+        const entry = chat.days[key]
+        if (!entry) continue
+        const total = totals.get(key)!
+        total.tasks += entry.tasks
+        total.ok += entry.ok
+        total.failed += entry.failed
+        total.cancelled += entry.cancelled
+        total.totalMs += entry.totalMs
+      }
+    }
+    return ordered.map((key) => ({ day: key, ...totals.get(key)! }))
+  }
+
   #load(): void {
     const parsed = readJsonObject(this.#path, (message) => this.#log.warn(message)) as Partial<UsageFile> | undefined
     if (!parsed) return

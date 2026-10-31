@@ -823,6 +823,13 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
+    if (resource === "ops" && method === "GET" && id === "check-update") {
+      const ops = this.#opts.ops
+      if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
+      this.#json(ctx.res, 200, { result: await ops.checkUpdate() })
+      return
+    }
+
     if (resource === "ops" && method === "POST" && id) {
       await this.#routeOpsAction(ctx, id, action)
       return

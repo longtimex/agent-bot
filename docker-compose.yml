@@ -1,0 +1,22 @@
+services:
+  agent-bot:
+    build: .
+    image: agent-bot:latest
+    container_name: agent-bot
+    restart: unless-stopped
+    # 用独立 init 进程回收 Agent CLI 子进程，避免僵尸进程
+    init: true
+    ports:
+      # 安卓 App 的 HTTP API。保持 127.0.0.1 前缀则只有本机/隧道可访问；
+      # 想让局域网设备直连改成 "3080:3080"，公网 exposure 建议挂反向代理 + HTTPS
+      - "127.0.0.1:3080:3080"
+    environment:
+      # 端口发布要求容器内监听 0.0.0.0（外部可达性由 ports 决定，不等于对公网开放）
+      API_BIND: 0.0.0.0
+    volumes:
+      # 容器启动前必须先准备好 .env（非交互环境不会进入连接向导，缺配置会直接退出）
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+      # /cc model add 等会写 opencode.json；想跨镜像重建保留就解开注释
+      # （前提：宿主机项目根目录已存在该文件，否则 Docker 会创建同名目录）
+      # - ./opencode.json:/app/opencode.json

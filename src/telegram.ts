@@ -33,6 +33,7 @@ import { ModelAdmin } from "./modelAdmin.js"
 import { AgentCliService, normalizeWorkDirInput, type AgentCliProfile } from "./agentCli.js"
 import { buildAttachmentSections } from "./attachmentInput.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
+import { appVersion } from "./version.js"
 import {
   AVAILABLE_MODELS,
   reloadCustomModels,
@@ -49,6 +50,7 @@ import { describeRepeat, formatRemaining, formatReminderTime, MAX_PER_CHAT, Remi
 import { scheduleTargetLabel, ScheduleService, type ScheduleDefaults, type ScheduledTask } from "./scheduler.js"
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
+import { DailyReportService } from "./usageReport.js"
 const MAX_INPUT_LENGTH = 12_000
 const MAX_PENDING = 4
 const MAX_ATTACHMENTS = 4
@@ -159,6 +161,24 @@ export const BOT_MENU_COMMANDS = [
   { command: "id", description: "查看会话与配置信息" },
 ]
 
+/** Text of the one-shot "Bot 已上线" ping sent to the owner chat after polling connects. */
+export function startupNoticeText(opts: {
+  username?: string
+  version: string
+  opencodeOk: boolean
+  timezone: string
+}): string {
+  const who = opts.username ? ` @${opts.username}` : ""
+  const opencode = opts.opencodeOk
+    ? "OpenCode 服务：✅ 可达"
+    : "OpenCode 服务：❌ 不可达（运行 npm run serve，或在 Telegram 里发送 /service opencode start）"
+  return [
+    `✅ Bot 已上线${who} · v${opts.version}`,
+    opencode,
+    `时区 ${opts.timezone} · 发送 /menu 打开功能菜单`,
+  ].join("\n")
+}
+
 /** Buttons for /timezone; anything else can still be typed as /timezone <IANA 名称>. */
 const TIMEZONE_PRESETS = [
   "Asia/Shanghai",
@@ -266,6 +286,7 @@ export class TelegramBridge {
   readonly #log: Logger
   readonly #proxies: ProxyService
   readonly #usage: UsageStore
+  readonly #usageReport: DailyReportService
   readonly #history: TaskHistoryStore
   readonly #queues = new Map<string, Promise<void>>()
   readonly #pending = new Map<string, Job[]>()
@@ -365,6 +386,20 @@ export class TelegramBridge {
       (userId) => this.#isAllowedUser(userId),
       (chatId, text) => this.#deliverReminder(chatId, text),
     )
+    // Always built so /usage can preview the report; the push timer only runs
+    // when USAGE_DAILY_REPORT is enabled and there is an owner chat to receive it.
+    this.#usageReport = new DailyReportService({
+      store: this.#usage,
+      path: resolve(cfg.dataDir, "usage-report.json"),
+      timeZone: () => this.#timezone,
+      time: cfg.usageReport?.time ?? "21:00",
+      log,
+      send: async (text) => {
+        const owner = this.ownerChatId
+        if (owner === undefined) throw new Error("白名单为空，没有可推送的聊天")
+        await this.#sendTextMessage(owner, text)
+      },
+    })
     const ccHost: CcHost = {
       sendTextMessage: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
@@ -471,6 +506,8 @@ export class TelegramBridge {
             .catch((err: unknown) => this.#log.warn("failed to register Telegram command menu:", (err as Error).message))
           this.#reminders.start()
           this.#schedules.start()
+          if (this.ownerChatId !== undefined) this.#usageReport.start()
+          void this.#sendStartupNotice(botInfo.username)
         },
       })
       .catch((err: Error) => {
@@ -482,10 +519,28 @@ export class TelegramBridge {
       })
   }
 
+  /**
+   * One-line "I'm back" ping after a successful boot, so /restart, /update or a
+   * server reboot is visible in chat without tailing logs. Goes to the first
+   * whitelisted user (the owner chat); STARTUP_NOTICE=0 turns it off.
+   */
+  async #sendStartupNotice(username?: string): Promise<void> {
+    if (this.#cfg.startupNotice === false) return
+    const owner = this.ownerChatId
+    if (owner === undefined) return
+    const opencodeOk = await this.#oc.health().catch(() => false)
+    try {
+      await this.#sendTextMessage(owner, startupNoticeText({ username, version: appVersion(), opencodeOk, timezone: this.#timezone }))
+    } catch (err) {
+      this.#log.warn("failed to send the startup notice:", (err as Error).message)
+    }
+  }
+
   async stop(): Promise<void> {
     this.#running = false
     this.#reminders.dispose()
     this.#schedules.dispose()
+    this.#usageReport.dispose()
 
     const aborts: Promise<void>[] = []
     for (const [key, controller] of this.#cancels) {
@@ -1151,6 +1206,14 @@ export class TelegramBridge {
         return
       }
 
+      if (data === "usage:report") {
+        await answer()
+        this.#offLoop(chatId, "每日报告", async () => {
+          await this.#sendTextMessage(chatId, escapeMarkdown(this.#usageReport.preview()), this.#reportKeyboard())
+        })
+        return
+      }
+
       if (data === "history:clear") {
         const cleared = this.#history.clear(key)
         await answer(cleared > 0 ? `已清空 ${cleared} 条任务历史` : "历史已经是空的")
@@ -1437,9 +1500,14 @@ export class TelegramBridge {
     await this.#sendPanel(chatId, this.#usagePanel(key))
   }
 
+  #reportKeyboard(): InlineKeyboard {
+    return new InlineKeyboard().text("📈 使用统计", "show:usage").row().text("⬅️ 主菜单", "show:menu")
+  }
+
   #usagePanel(key: string): Panel {
     const usage = this.#usage.summary(key)
     const keyboard = new InlineKeyboard().text("🔄 刷新统计", "show:usage").text("📊 运行状态", "show:status")
+    keyboard.row().text("📩 每日报告", "usage:report")
     keyboard.row().text("⬅️ 主菜单", "show:menu")
 
     if (usage.tasks === 0) {
@@ -2576,9 +2644,11 @@ export class TelegramBridge {
       .text("⚙️ 配置项", "ops:env")
       .row()
       .text("🔐 访问白名单", "show:access")
-      .text("⬆️ 更新项目", "ops:update")
+      .text("🔍 检查更新", "ops:checkup")
       .row()
+      .text("⬆️ 更新项目", "ops:update")
       .text("🔄 重启 Bot", "ops:restart")
+      .row()
       .text("🔄 刷新", "show:ops")
       .row()
       .text("⬅️ 主菜单", "show:menu")
@@ -2689,6 +2759,11 @@ export class TelegramBridge {
     if (action === "check") {
       await answer("开始检查…")
       void this.#runOpsAction(chatId, "运行检查", () => this.#ops.runCheck())
+      return
+    }
+    if (action === "checkup") {
+      await answer("正在检查更新…")
+      void this.#runOpsAction(chatId, "检查更新", () => this.#ops.checkUpdate())
       return
     }
     if (action === "cc") {

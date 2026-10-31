@@ -8,6 +8,8 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 安卓 App        ⇄ HTTP API(/api/v1) ⇄ └──────────┘
 ```
 
+> 📖 新用户请从下方「[使用说明](#使用说明)」开始，5 步跑通；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。
+
 ## 功能
 
 - **Telegram 官方 Bot**：长轮询，无需公网地址，无需扫码。
@@ -18,7 +20,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 - **多模型切换**：Claude Sonnet/Opus、Gemini 3.8/4、Grok 4.7、GPT OSS、DeepSeek、GLM、MiMo、Nemotron 等。
 - **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
 - **模型管理**：`/cc model` 或 `npm run models` 为 Bot 与其他 agent 添加/删除模型、同步 `opencode.json`、指定 agent 模型，改动无需重启。
-- **Telegram 运维中心**：`/ops` 提供系统诊断、日志查看、项目更新、Bot 重启、OpenCode 服务启停、cc-switch 安装/更新与非密钥配置修改；首次部署之外几乎无需再登录服务器。
+- **Telegram 运维中心**：`/ops` 提供系统诊断、日志查看、项目更新、Bot 重启、OpenCode 服务启停、cc-switch 安装/更新与非密钥配置修改；首次部署之外几乎无需再登录服务器。面板上的「🔍 检查更新」会拉取远端并列出落后提交（干跑，不改动本地代码），确认无误再点「⬆️ 更新项目」。
 - **交互面板**：`/start`、`/agent`、`/model`、`/dir`、`/access`、`/reminders`、`/schedule`、`/proxy`、`/usage`、`/ops` 均带内联按钮，可直接点选切换引擎/模型、设置工作目录、增删访问白名单、暂停任务、取消提醒或操作代理。
 - **实时进度**：处理时间超过 2 秒后显示进度卡片（带「停止任务」按钮），并持续发送 typing 状态。卡片被限流时会自动退避而不是每 2 秒重试，状态没有变化时也最多每 30 秒刷新一次，避免长任务把 Telegram 的编辑额度耗尽。
 - **重试与队列**：失败消息附带的「重试」按钮只重发**它那一条**任务（不会被之后的新消息顶掉）；`/retry` 重发上一条任务，但若中途发过 `/stop`，排队的 `/retry` 会一起作废，不会把已取消的活儿再跑一遍；`/queue` 可逐条取消或一键清空排队消息。
@@ -32,11 +34,71 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 - **定时提醒**：`/remind 30m 喝水` 即可设置；支持重复提醒（`every 30m`、`每5分钟`、`每天 08:30`）与中文口语时间（`5分钟后`、`下午3点`、`今晚8点半`、`后天 09:00`）；保存在 `data/reminders.json`，重启后仍然有效。
 - **时区可在线切换**：`/timezone` 或 `/timezone Asia/Tokyo` 立即改变提醒、定时任务与每日统计所用的时区，并写入 `.env`（`REMINDER_TIMEZONE`），无需重启。
 - **定时 AI 任务**：`/schedule add 每天 09:00 检查服务器` 到点自动调用 AI 执行提示词并回传结果；支持一次性与重复任务、指定引擎/模型、暂停/恢复/删除、立即运行一次，保存在 `data/schedules.json`。
-- **使用统计**：`/usage` 查看任务量、成功率、平均耗时、今日任务、近 7 天趋势与引擎分布，持久化到 `data/usage.json`。
+- **使用统计**：`/usage` 查看任务量、成功率、平均耗时、今日任务、近 7 天趋势与引擎分布，持久化到 `data/usage.json`；面板上的「📩 每日报告」可随时生成汇总，开启 `USAGE_DAILY_REPORT` 后每天到点自动向白名单第一位用户推送一份。
 - **任务历史**：`/history` 查看最近任务（提示词摘要、引擎/模型、耗时、结果、是否定时），每聊天保留 50 条，可一键清空，持久化到 `data/history.json`。
 - **任务取消**：`/stop` 可立即终止正在执行的 OpenCode / Agent CLI 任务，并清空排队中的提示。
 - **单实例**：`data/bot.lock` 防止重复启动；异常退出后残留的锁会被自动回收。
 - **会话持久化**：`data/sessions.json` 保存会话 ID、引擎与模型偏好，重启后自动恢复。
+- **启动通知**：每次成功上线（含 `/restart`、服务器重启后）自动向白名单第一位用户发送一条「✅ Bot 已上线」通知，附版本号与 OpenCode 服务可达性，`STARTUP_NOTICE=0` 关闭。
+- **Docker 部署**：提供 Dockerfile 与 docker-compose.yml，一条 `docker compose up -d` 即可同时拉起 opencode 服务与 Bot，`data/` 与 `.env` 挂载持久化。
+
+## 命令
+
+新用户按以下 5 步即可从零跑通；各步骤细节见后文对应章节。
+
+### 第 1 步：准备
+
+- 一台 Linux / macOS 机器（本机或云服务器均可），已安装 **Node.js ≥ 20.12**（`node -v` 查看）。
+- 安装 OpenCode CLI：`npm install -g opencode-ai`；其余 Agent CLI 之后可在 Telegram 里一键安装。
+- 在 Telegram 向 [@BotFather](https://t.me/BotFather) 发送 `/newbot` 创建 Bot，拿到 **HTTP API Token**。
+- 可选：准备好模型 API Key（如 `GROK_API_KEY`），稍后填入 `.env`。
+
+### 第 2 步：安装与启动
+
+```bash
+npm install
+npm run serve      # 终端 1：启动 opencode 无头服务（127.0.0.1:4096）
+npm run build      # 终端 2：构建
+npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
+```
+
+首次启动且 `.env` 缺少配置时会自动进入连接向导：粘贴 Bot Token → 给 Bot 随便发一条消息让向导识别你的用户 ID → 确认后自动写入 `.env` 并继续启动。也可以手动复制 `.env.example` 为 `.env` 填写；重新配置随时运行 `npm run setup`。详见「运行」与「首次连接引导」。
+
+> 更喜欢容器部署？见「运行 → Docker 部署（可选）」，`docker compose up -d --build` 一条命令拉起全部服务。
+
+### 第 3 步：在 Telegram 里开始使用
+
+打开 Telegram 找到你的 Bot（向导会显示用户名），发送 `/start` 即可看到当前引擎 / 模型与功能菜单。日常最常用的操作：
+
+| 想做什么 | 怎么做 |
+| --- | --- |
+| 和 AI 对话、派任务 | 直接发文字；超过 2 秒的任务会出现进度卡片，可点「停止任务」 |
+| 发图片 / 文件 / 语音 | 直接作为附件发送，可附一句说明当作提示词 |
+| 让 AI 产出图片 / 文件 | 直接提要求，结果以原生消息回传（图片直接显示、文件可下载） |
+| 切换引擎 / 模型 | `/agent`、`/model`，都有按钮面板 |
+| 换个项目目录 | `/dir /path/to/project` |
+| 定时提醒 | `/remind 30m 喝水`、`/remind 每天 08:30 打卡` |
+| 定时让 AI 干活 | `/schedule add 每天 09:00 生成日报` |
+| 新开会话 / 停止任务 | `/new`、`/stop` |
+| 忘了命令 | 输入 `/` 看自动补全菜单，或 `/help` 分类速览 |
+
+完整命令表见下一节。
+
+### 第 4 步：安卓 App（可选）
+
+要求 JDK 17 与 Android Studio（或 Gradle 8.9+）：
+
+```bash
+cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/app-debug.apk
+```
+
+> 仓库未提交 `gradlew` 包装器：用 Android Studio 打开会自动生成，或先执行 `gradle wrapper --gradle-version 8.9`。
+
+在 Telegram 向 Bot 发送 `/api`，在 App「设置」页扫码（或手动填地址与令牌）即可配对，手机与 Telegram 可同时使用。API 默认只监听 `127.0.0.1:3080`，手机访问需按 [`android/README.md`](android/README.md) 配置反向代理 / SSH 隧道 / VPN。
+
+### 第 5 步：日常维护
+
+基本不用再登服务器：`/ops` 诊断与快捷操作、`/logs` 看日志、`/update` 更新项目、`/restart` 重启、`/env` 改非密钥配置、`/access` 管白名单、`/proxy` 管代理。长期运行建议用 systemd 常驻，见「systemd 常驻（可选）」。
 
 ## 命令
 
@@ -62,6 +124,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 | `/status` | 查看引擎、模型、运行时长、今日任务、代理、队列与提醒数 |
 | `/usage` | 查看任务量、成功率、平均耗时、今日与引擎统计 |
 | `/history [条数]` | 查看最近任务历史（提示词摘要、引擎/模型、耗时与结果），可一键清空 |
+| `/export [json]` | 把最近任务历史导出为 Markdown（默认）或 JSON 文档发到聊天里，方便存档迁移 |
 | `/schedule` | 定时 AI 任务面板：查看、暂停、恢复、删除 |
 | `/schedule add 30m 检查服务器` | 到点自动执行 AI 任务；时间写法与 `/remind` 完全一致（见「定时提醒」） |
 | `/schedule add --engine qoder --model deepseek 2h 汇总日志` | 指定执行引擎与模型（任意 Agent CLI 均可） |
@@ -131,6 +194,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 | `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性）与模型列表；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400 |
 | `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
+| `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
 | `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` | 运行检查（npm run check）、更新项目（git pull + 依赖 + 构建）、重启 Bot；同一时间只允许一个运维操作，输出自动脱敏 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
 | `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
@@ -292,6 +356,8 @@ MY_API_KEY=...
 - `MAX_MEDIA_MB` / `MAX_INPUT_MB`：出站单文件与入站附件上限，默认均为 20MB。
 - `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接访问本机/内网地址；仅在本地调试时设为 `1`。
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
+- `USAGE_DAILY_REPORT` / `USAGE_DAILY_REPORT_TIME`：每日用量报告开关（默认 `0`）与推送时间（默认 `21:00`，24 小时制，按 `REMINDER_TIMEZONE` 解析）；到点向白名单第一位用户推送一次，重启当天会补发、不会重复发。也可用 `/env` 修改。
+- `STARTUP_NOTICE`：默认 `1`，每次 Bot 上线后向白名单第一位用户推送一条「Bot 已上线」通知；设为 `0` 关闭。也可用 `/env set STARTUP_NOTICE 0` 修改。
 - `OPENCODE_AGENT`：默认 `assistant`，对应 `.opencode/agent/assistant.md`。
 - `AGENT_CLI_CONFIG`：自定义 Agent CLI 档案路径，默认 `data/agents.json`；文件不存在时只使用内置档案。
 - `CC_SWITCH_APP` / `CC_SWITCH_BIN`：cc-switch 集成的应用类型（默认 `opencode`，会自动映射为 CLI 的 `open-code`；也接受 `openclaw` → `open-claw`）与二进制路径；留空时依次查找 `./bin/cc-switch` 和 `PATH`。
@@ -307,6 +373,21 @@ npm run serve      # 启动 opencode 无头服务（127.0.0.1:4096）
 npm run build
 npm run restart    # 按 data/bot.pid 优雅停止旧进程并后台启动
 ```
+
+### Docker 部署（可选）
+
+仓库提供 Dockerfile 与 docker-compose.yml：容器内同时运行 opencode serve 与 Bot，`data/` 与 `.env` 挂载到宿主机持久化。
+
+```bash
+cp .env.example .env && vim .env   # 先填好 Token 与白名单（容器内为非交互环境，不会进入连接向导）
+docker compose up -d --build
+docker compose logs -f
+```
+
+- 镜像内置 opencode CLI 与 git；入口脚本按 `OPENCODE_URL` 的端口自动拉起 `opencode serve`（设 `OPENCODE_AUTO_START=0` 关闭，适合把 `OPENCODE_URL` 指向宿主机或其他容器）。
+- 安卓 App 访问需容器内监听 `0.0.0.0`，compose 已默认注入 `API_BIND=0.0.0.0`（优先于 `.env`），发布端口仍绑定宿主机 `127.0.0.1:3080`。
+- 挂载的 `./data` 属主需与容器内 `node` 用户（uid 1000）一致：`chown -R 1000:1000 data`。
+- 容器内没有 `.git`，`/update` 不可用；更新方式为 `git pull && docker compose up -d --build`。
 
 ### 首次连接引导
 
@@ -574,6 +655,7 @@ npm run models -- assign self argon2
 - 超过 31 天没有任何任务的会话会在下一次任务记录时被清理（每小时最多扫描一次），`data/usage.json` 与 `data/history.json` 不会随开放白名单的使用无限增长；代价是长期沉默的会话统计与历史会从头开始。
 - 只记录任务结果与耗时，不保存提示词或回复内容。
 - `/status` 也会显示今日任务数；面板与状态页均可点击「刷新」查看最新数据。
+- 面板上的「📩 每日报告」随时生成全局汇总（跨所有聊天聚合）；`USAGE_DAILY_REPORT=1` 后每天 `USAGE_DAILY_REPORT_TIME`（默认 21:00）自动向白名单第一位用户推送一份，当天只发一次（状态存于 `data/usage-report.json`，重启补发、不重复）。
 
 ## 超时与错误
 

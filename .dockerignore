@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+bin
+.env
+.git
+.gitignore
+android
+deploy
+tests
+.zcode
+*.log
+*.md
+Dockerfile
+docker-compose.yml
