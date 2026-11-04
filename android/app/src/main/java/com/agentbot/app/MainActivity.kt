@@ -28,12 +28,21 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.agentbot.app.data.SettingsRepository
 import com.agentbot.app.data.TaskNotifier
+import com.agentbot.app.ui.AccessScreen
+import com.agentbot.app.ui.AgentsScreen
+import com.agentbot.app.ui.AliasesScreen
 import com.agentbot.app.ui.AppDrawer
 import com.agentbot.app.ui.AppViewModel
 import com.agentbot.app.ui.AppVisibility
+import com.agentbot.app.ui.CcScreen
 import com.agentbot.app.ui.ChatScreen
+import com.agentbot.app.ui.ConfigScreen
+import com.agentbot.app.ui.HelpScreen
 import com.agentbot.app.ui.HistoryScreen
 import com.agentbot.app.ui.HermesScreen
+import com.agentbot.app.ui.ModelsScreen
+import com.agentbot.app.ui.OpsScreen
+import com.agentbot.app.ui.ProxyScreen
 import com.agentbot.app.ui.QueueScreen
 import com.agentbot.app.ui.RemindersScreen
 import com.agentbot.app.ui.Screen
@@ -141,7 +150,7 @@ class MainActivity : ComponentActivity() {
                             AppDrawer(
                                 current = screen,
                                 onNavigate = {
-                                    drawerState.close()
+                                    scope.launch { drawerState.close() }
                                     vm.navigate(it)
                                 },
                                 onNewChat = { vm.newChat() },
@@ -162,7 +171,7 @@ class MainActivity : ComponentActivity() {
                         ) { padding ->
                             Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                                 when (screen) {
-                                    Screen.Chat -> ChatScreen(vm = vm, onOpenDrawer = { drawerState.open() })
+                                    Screen.Chat -> ChatScreen(vm = vm, onOpenDrawer = { scope.launch { drawerState.open() } })
                                     Screen.History -> HistoryScreen(vm)
                                     Screen.Reminders -> RemindersScreen(vm)
                                     Screen.Schedules -> SchedulesScreen(vm)

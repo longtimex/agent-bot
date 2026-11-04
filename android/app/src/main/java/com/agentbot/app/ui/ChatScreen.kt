@@ -20,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -99,6 +100,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.LocalStore
@@ -126,7 +128,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
     }
     LaunchedEffect(vm.sharedDraft) {
         vm.sharedDraft?.let { shared ->
-            vm.setDraft(if (draft.isBlank()) shared else draft.trimEnd() + "\n" + shared)
+            vm.updateDraft(if (draft.isBlank()) shared else draft.trimEnd() + "\n" + shared)
             vm.consumeSharedDraft()
         }
     }
@@ -208,7 +210,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
     fun submit(text: String) {
         if (vm.send(text)) {
             stickToBottom = true
-            vm.setDraft("")
+            vm.updateDraft("")
         }
     }
 
@@ -299,7 +301,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
             ChatInputBar(
                 vm = vm,
                 draft = draft,
-                onDraftChange = vm::setDraft,
+                onDraftChange = vm::updateDraft,
                 onSend = { submit(draft) },
                 onSendText = ::submit,
                 running = running,
@@ -552,6 +554,7 @@ private fun Modifier.copyOnLongPress(
         },
     )
 
+@Composable
 private fun ChatBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> Unit)? = null, highlight: Boolean = false) {
     val isUser = message.role == ChatMessage.Role.USER
     val context = LocalContext.current
@@ -1247,7 +1250,7 @@ private fun ChatInputBar(
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.weight(1f, fill = false).padding(start = 6.dp),
                     )
-                    IconButton(onClick = { vm.setOneOffEngine(null) }, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = { vm.updateOneOffEngine(null) }, modifier = Modifier.size(28.dp)) {
                         Icon(
                             Icons.Filled.Close,
                             contentDescription = "取消本条引擎指定",
@@ -1397,7 +1400,7 @@ private fun ChatInputBar(
                                 detail = "会话当前设置",
                                 selected = vm.oneOffEngine == null,
                             ) {
-                                vm.setOneOffEngine(null)
+                                vm.updateOneOffEngine(null)
                                 enginePicker = false
                             }
                             if (vm.agents.isEmpty()) {
@@ -1414,7 +1417,7 @@ private fun ChatInputBar(
                                     detail = if (agent.id == defaultEngine) "会话默认" else agent.defaultModel ?: agent.desc,
                                     selected = vm.oneOffEngine != null && vm.oneOffEngine == agent.id,
                                 ) {
-                                    vm.setOneOffEngine(agent.id)
+                                    vm.updateOneOffEngine(agent.id)
                                 }
                             }
                             if (vm.oneOffEngine != null) {
@@ -1428,7 +1431,7 @@ private fun ChatInputBar(
                                     detail = vm.agents.firstOrNull { it.id == vm.oneOffEngine }?.defaultModel,
                                     selected = vm.oneOffModel == null,
                                 ) {
-                                    vm.setOneOffModel(null)
+                                    vm.updateOneOffModel(null)
                                 }
                                 if (vm.oneOffModels.isEmpty()) {
                                     Text(
@@ -1446,7 +1449,7 @@ private fun ChatInputBar(
                                         detail = option.desc ?: option.detail,
                                         selected = vm.oneOffModel == option.value,
                                     ) {
-                                        vm.setOneOffModel(option.value)
+                                        vm.updateOneOffModel(option.value)
                                     }
                                 }
                             }

@@ -136,7 +136,7 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
             arg.toIntOrNull()?.let { count ->
                 val limit = count.coerceIn(1, 50)
                 if (limit != count) vm.showToast("历史窗口最多 50 条，已按 $limit 条显示")
-                vm.setHistoryLimit(limit)
+                vm.updateHistoryLimit(limit)
             }
             vm.navigate(Screen.History)
         }
@@ -350,7 +350,7 @@ internal fun applyOneOffSlashCommand(vm: AppViewModel, name: String, arg: String
             true
         }
         name == "engine" && arg.lowercase() in CLEAR_WORDS -> {
-            vm.setOneOffEngine(null)
+            vm.updateOneOffEngine(null)
             true
         }
         else -> {
@@ -365,7 +365,7 @@ internal fun applyOneOffSlashCommand(vm: AppViewModel, name: String, arg: String
             true
         }
         isResetWord(arg) && vm.oneOffModels.matchModel(arg.trim().lowercase()) == null -> {
-            vm.setOneOffModel(null)
+            vm.updateOneOffModel(null)
             true
         }
         else -> {

@@ -270,7 +270,7 @@ private fun DiagnosticsCard(diag: Diagnostics) {
             diag.disk?.let { disk ->
                 InfoRow("磁盘", "${formatBytes(disk.freeBytes)} 可用 / ${formatBytes(disk.totalBytes)}")
             }
-            diag.memory.let { mem ->
+            diag.memory?.let { mem ->
                 InfoRow("内存", "${formatBytes(mem.freeBytes)} 可用 / ${formatBytes(mem.totalBytes)}")
             }
             if (diag.lastBackupAt > 0) {

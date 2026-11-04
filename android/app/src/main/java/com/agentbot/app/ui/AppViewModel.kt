@@ -22,6 +22,7 @@ import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.LogTail
 import com.agentbot.app.data.MediaCache
 import com.agentbot.app.data.PendingAttachment
+import com.agentbot.app.data.Peer
 import com.agentbot.app.data.ProxyInfo
 import com.agentbot.app.data.ApiException
 import com.agentbot.app.data.BotCommand
@@ -144,8 +145,11 @@ class AppViewModel(
     var botAliases by mutableStateOf<Map<String, String>>(emptyMap())
         private set
 
+    /**
+     * The banner both ends share: the ViewModel fills it from failed calls, and screens write
+     * local failures into it (microphone, camera, export), so the setter stays open.
+     */
     var connectionError by mutableStateOf<String?>(null)
-        private set
 
     var session by mutableStateOf<Session?>(null)
         private set
@@ -395,7 +399,7 @@ class AppViewModel(
     val oneOffEngineLabel: String?
         get() = oneOffEngine?.let { id -> agents.firstOrNull { it.id == id }?.label ?: id }
 
-    fun setOneOffEngine(engine: String?) {
+    fun updateOneOffEngine(engine: String?) {
         oneOffEngine = engine?.takeIf { it.isNotBlank() }
         oneOffModel = null
         oneOffChoices = ModelChoices()
@@ -404,7 +408,7 @@ class AppViewModel(
         silent { oneOffChoices = api.models(conn(), pinned) }
     }
 
-    fun setOneOffModel(model: String?) {
+    fun updateOneOffModel(model: String?) {
         oneOffModel = model?.takeIf { it.isNotBlank() }
     }
 
@@ -420,7 +424,7 @@ class AppViewModel(
     var draft by mutableStateOf("")
         private set
 
-    fun setDraft(text: String) {
+    fun updateDraft(text: String) {
         draft = text
         LocalStore.saveDraft(appContext, text)
     }
@@ -546,7 +550,7 @@ class AppViewModel(
         try {
             block()
         } catch (err: Exception) {
-            connectionError = if (err is NotConfiguredException) err.message else "$label失败：${err.message}"
+            connectionError = if (err is NotConfiguredException) err.message else "${label}失败：${err.message}"
         }
     }
 
@@ -823,7 +827,7 @@ class AppViewModel(
                         config = optional(draft.config),
                     ),
                 )
-                toast = result.message.ifBlank { if (result.ok) "已创建 Provider「$name」" : "创建 Provider 失败" }
+                toast = result.message.ifBlank { if (result.ok) "已创建 Provider「$name」" else "创建 Provider 失败" }
                 ccPanelTitle = "🧩 新建 Provider · $name"
                 ccPanelText = result.text
                 // A new provider changes the list and the danger zone in one go
@@ -1090,7 +1094,7 @@ class AppViewModel(
             ccBusy = true
             try {
                 val result = api.ccDeeplink(conn(), trimmed)
-                toast = result.message.ifBlank { if (result.ok) "已导入 Deep Link" : "Deep Link 导入失败" }
+                toast = result.message.ifBlank { if (result.ok) "已导入 Deep Link" else "Deep Link 导入失败" }
                 ccPanelTitle = "🔗 Deep Link 导入"
                 ccPanelText = result.text
                 // A link can add providers, so the console should show the new state at once
@@ -1182,7 +1186,7 @@ class AppViewModel(
             ccBusy = true
             try {
                 val result = api.ccExec(conn(), name, arg, confirm)
-                toast = result.message.ifBlank { if (result.ok) "已完成：${command.label}" : "执行失败：${command.label}" }
+                toast = result.message.ifBlank { if (result.ok) "已完成：${command.label}" else "执行失败：${command.label}" }
                 ccPanelTitle = "🛠 ${command.label}"
                 ccPanelText = result.text
                 if (name == "provider-delete") ccStatus = api.ccStatus(conn())
@@ -1306,7 +1310,7 @@ class AppViewModel(
         guarded("加载历史") { loadHistory() }
     }
 
-    fun setHistoryLimit(limit: Int) {
+    fun updateHistoryLimit(limit: Int) {
         if (limit == historyLimit) return
         historyLimit = limit
         guarded("加载历史") { loadHistory() }
@@ -1776,12 +1780,12 @@ class AppViewModel(
             try {
                 val result = api.runOps(conn(), path)
                 opsResult = result
-                toast = result.message ?: "$label完成"
+                toast = result.message ?: "${label}完成"
                 if (path.startsWith("service")) refreshOpsService()
             } catch (err: Exception) {
                 // A restart may kill the process that is answering this request
                 if (path == "restart") toast = "已发送重启指令（连接可能短暂中断，稍后刷新）"
-                else connectionError = "$label失败：${err.message}"
+                else connectionError = "${label}失败：${err.message}"
             } finally {
                 opsActionBusy = null
             }
@@ -1916,7 +1920,7 @@ class AppViewModel(
         if (wanted == "opencode") {
             // The built-in engine is listed now, but a pin only means "use something else",
             // so asking for OpenCode clears it rather than pinning its id
-            setOneOffEngine(null)
+            updateOneOffEngine(null)
             toast = "下一条消息交给 OpenCode"
             return
         }
@@ -1926,7 +1930,7 @@ class AppViewModel(
             if (hit == null) {
                 connectionError = "未识别的 Agent 引擎：$query"
             } else {
-                setOneOffEngine(hit.id)
+                updateOneOffEngine(hit.id)
                 toast = "下一条消息交给 ${hit.label}"
             }
         }
@@ -1937,7 +1941,7 @@ class AppViewModel(
         val wanted = query.trim().lowercase()
         val local = if (oneOffEngine != null) oneOffChoices else modelChoices
         local.models.matchModel(wanted)?.let {
-            setOneOffModel(it.value)
+            updateOneOffModel(it.value)
             toast = "下一条消息的模型：${it.label}"
             return
         }
@@ -1949,15 +1953,13 @@ class AppViewModel(
                 modelChoices = choices
             }
             val hit = choices.models.matchModel(wanted)
-            if (hit != null) {
-                setOneOffModel(hit.value)
-                toast = "下一条消息的模型：${hit.label}"
-                return
-            }
             // A CLI that lists nothing but names a format takes the word as typed, like Telegram
             val raw = query.trim()
-            if (choices.models.isEmpty() && choices.modelHint != null) {
-                setOneOffModel(raw)
+            if (hit != null) {
+                updateOneOffModel(hit.value)
+                toast = "下一条消息的模型：${hit.label}"
+            } else if (choices.models.isEmpty() && choices.modelHint != null) {
+                updateOneOffModel(raw)
                 toast = "下一条消息的模型：$raw"
             } else {
                 connectionError = modelMissMessage(choices, query)
@@ -2044,7 +2046,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 connectionError = "发送失败：${err.message}"
                 // Give the text back so a dropped connection never eats the prompt.
-                if (draft.isBlank()) setDraft(raw)
+                if (draft.isBlank()) updateDraft(raw)
                 // ...and keep the one-off pins so a plain retry repeats the same request.
                 oneOffEngine = engine
                 oneOffModel = model

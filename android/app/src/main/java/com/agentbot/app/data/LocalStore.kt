@@ -15,7 +15,7 @@ data class PendingAttachment(
     val mime: String,
     val base64: String,
 ) {
-    val sizeBytes: Int get() = base64.size * 3 / 4
+    val sizeBytes: Int get() = base64.length * 3 / 4
 }
 
 object AttachmentLimits {

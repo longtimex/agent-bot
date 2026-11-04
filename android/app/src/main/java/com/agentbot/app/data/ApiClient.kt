@@ -674,7 +674,7 @@ class ApiClient {
      */
     suspend fun ccRun(connection: Connection, args: List<String>, confirm: Boolean): CcRunResult {
         val body = buildJsonObject {
-            putJsonArray("args") { args.forEach { put(it) } }
+            put("args", buildJsonArray { args.forEach { add(it) } })
             if (confirm) put("confirm", true)
         }
         val text = execute(request(connection, "POST", "/cc/run", body), longHttp)

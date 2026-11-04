@@ -170,7 +170,7 @@ fun HistoryScreen(vm: AppViewModel) {
                 HISTORY_LIMIT_CHOICES.forEach { count ->
                     FilterChip(
                         selected = vm.historyLimit == count,
-                        onClick = { vm.setHistoryLimit(count) },
+                        onClick = { vm.updateHistoryLimit(count) },
                         label = { Text("$count 条") },
                     )
                 }
@@ -250,7 +250,7 @@ fun HistoryScreen(vm: AppViewModel) {
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        vm.setDraft(if (vm.draft.isBlank()) entry.prompt else vm.draft.trimEnd() + "\n" + entry.prompt)
+                        vm.updateDraft(if (vm.draft.isBlank()) entry.prompt else vm.draft.trimEnd() + "\n" + entry.prompt)
                         vm.navigate(Screen.Chat)
                         selected = null
                     }) { Text("填入输入框") }
