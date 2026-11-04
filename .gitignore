@@ -1,7 +1,9 @@
 node_modules/
 dist/
 .env
-data/
+# Runtime state only. An unanchored `data/` also swallowed the Android
+# source package com.agentbot.app.data, which must stay in the repo.
+/data/
 *.log
 .DS_Store
 bin/

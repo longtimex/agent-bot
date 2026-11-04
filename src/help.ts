@@ -9,7 +9,7 @@ export const HELP = `🤖 *AI 私人助手 · 功能菜单*
 • \`/agent\` 切换 Agent 引擎（推荐 OpenCode）
 • \`/model\` 切换模型（\`/model default\` 恢复默认） · \`/agents\` 安装/卸载 CLI
 • \`/dir\` 设置本会话 CLI 工作目录 · \`/status\` 运行状态
-• \`/usage\` 使用统计 · \`/history\` 任务历史 · \`/export\` 导出历史
+• \`/usage\` 使用统计 · \`/report\` 每日报告 · \`/history\` 任务历史 · \`/export\` 导出历史
 
 *任务与提醒*
 • \`/schedule\` 定时 AI 任务 · \`/reminders\` 待触发提醒
@@ -48,6 +48,7 @@ export const HELP_FULL = `🤖 *AI 私人助手 (Telegram 版)*
 • \`/queue\` - 查看或清空排队中的消息
 • \`/status\` - 查看引擎、模型、运行时长与排队数
 • \`/usage\` - 查看任务量、成功率与耗时统计
+• \`/report\` - 生成跨聊天的每日用量报告
 • \`/history [条数]\` - 查看最近的任务执行历史（引擎、模型、耗时与结果）
 • \`/export\` / \`/export json\` - 把任务历史导出为 Markdown / JSON 文件
 • \`/schedule\` - 查看/管理定时 AI 任务
@@ -148,6 +149,84 @@ export interface HelpSection {
   title: string
   text: string
 }
+
+/** Extra words the bot answers for a menu command, mapped to the command they run. */
+export const BOT_COMMAND_ALIASES: Record<string, string> = {
+  reset: "new",
+  maintenance: "ops",
+  svc: "service",
+  tz: "timezone",
+}
+
+/**
+ * Two-word `/cc` shorthands and the cc-switch argv they stand for, so the chat
+ * accepts English synonyms (`provider rm`) the CLI itself does not. Telegram's `/cc`
+ * routing and the HTTP API's word list for the App both read this one table.
+ */
+export const CC_SUB_ALIASES: Readonly<Record<string, readonly [string, string]>> = {
+  "provider del": ["provider", "delete"],
+  "provider rm": ["provider", "delete"],
+  "mcp del": ["mcp", "delete"],
+  "mcp rm": ["mcp", "delete"],
+  "prompts use": ["prompts", "activate"],
+  "prompts off": ["prompts", "deactivate"],
+  "prompts stop": ["prompts", "deactivate"],
+  "prompts del": ["prompts", "delete"],
+  "prompts rm": ["prompts", "delete"],
+  "skills del": ["skills", "uninstall"],
+  "skills repo": ["skills", "repos"],
+  "sessions del": ["sessions", "delete"],
+  "auth del": ["auth", "remove"],
+}
+
+/** True when [word] — with or without its leading 「/」 — runs the [name] command or one of its aliases. */
+export function isBotCommand(word: string | undefined, name: string): boolean {
+  if (!word) return false
+  const bare = word.startsWith("/") ? word.slice(1) : word
+  return bare === name || BOT_COMMAND_ALIASES[bare] === name
+}
+
+/**
+ * The command words the bot accepts, in Telegram's autocomplete-menu order.
+ * Lives here rather than in telegram.ts so the HTTP API can hand the same list
+ * to the Android app; the menu test keeps it aligned with the help text.
+ */
+export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
+  { command: "start", description: "欢迎页与功能菜单入口" },
+  { command: "menu", description: "打开功能菜单" },
+  { command: "help", description: "分类帮助（/help full 查看全部）" },
+  { command: "status", description: "查看运行状态" },
+  { command: "new", description: "开启新会话（清空上下文）" },
+  { command: "agent", description: "查看或切换 Agent 引擎（推荐 OpenCode）" },
+  { command: "model", description: "查看或切换大模型" },
+  { command: "dir", description: "查看或切换本会话 CLI 工作目录" },
+  { command: "agents", description: "检测、安装或卸载 Agent CLI" },
+  { command: "schedule", description: "定时执行 AI 任务（查看/添加/暂停）" },
+  { command: "reminders", description: "查看待触发的提醒" },
+  { command: "remind", description: "设定定时提醒，如 /remind 30m 喝水" },
+  { command: "cancel", description: "取消指定编号的提醒" },
+  { command: "queue", description: "查看或清空排队消息" },
+  { command: "stop", description: "停止当前任务" },
+  { command: "retry", description: "重新发送上一条任务" },
+  { command: "usage", description: "查看任务量、成功率与耗时统计" },
+  { command: "report", description: "生成跨聊天的每日用量报告" },
+  { command: "history", description: "查看最近的任务执行历史" },
+  { command: "export", description: "导出任务历史为 Markdown/JSON 文件" },
+  { command: "proxy", description: "管理网络代理（添加/测试/启用/删除）" },
+  { command: "cc", description: "cc-switch：Provider、MCP、提示词与环境诊断" },
+  { command: "ops", description: "运维中心：诊断、日志、更新与服务管理" },
+  { command: "logs", description: "查看 Bot 或 OpenCode 日志" },
+  { command: "diag", description: "查看系统诊断信息" },
+  { command: "update", description: "更新项目代码并构建（需确认）" },
+  { command: "restart", description: "重启 Bot（需确认）" },
+  { command: "service", description: "管理 OpenCode 服务" },
+  { command: "env", description: "查看或修改非密钥配置" },
+  { command: "access", description: "管理 Telegram 访问白名单（立即生效）" },
+  { command: "api", description: "安卓 App 配对信息（HTTP API 地址与令牌）" },
+  { command: "alias", description: "自定义快捷指令（/alias add 名称 指令内容）" },
+  { command: "timezone", description: "查看或切换时区（立即生效）" },
+  { command: "id", description: "查看会话与配置信息" },
+]
 
 /** Telegram's Markdown markers would render literally in the app, so strip them for plain display. */
 export function plainHelp(text: string): string {

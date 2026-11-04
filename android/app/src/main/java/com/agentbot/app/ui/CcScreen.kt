@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -27,6 +28,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,12 +43,14 @@ import com.agentbot.app.data.CcProvider
 import com.agentbot.app.data.CcProviderDraft
 import com.agentbot.app.data.CcProviderMeta
 import com.agentbot.app.data.CcStatus
+import com.agentbot.app.data.CcViewSpec
 import com.agentbot.app.ui.theme.TextSecondary
 
 /**
  * Telegram's `/cc` console. Read views plus typed write routes; the mutating
  * commands are listed by the server (`GET /cc/exec`), and free-form `/cc run`
- * arguments stay Telegram-only on purpose.
+ * arguments stay Telegram-only on purpose. Words typed in the chat box are
+ * resolved here, against the same server list.
  */
 @Composable
 fun CcScreen(vm: AppViewModel) {
@@ -56,10 +60,39 @@ fun CcScreen(vm: AppViewModel) {
     var creatingPrompt by remember { mutableStateOf(false) }
     var creatingProvider by remember { mutableStateOf(false) }
     var awaitingTarget by remember { mutableStateOf<CcExecCommand?>(null) }
+    var awaitingView by remember { mutableStateOf<CcViewSpec?>(null) }
     var confirmExec by remember { mutableStateOf<Pair<CcExecCommand, String?>?>(null) }
     var searchingSessions by remember { mutableStateOf(false) }
     var importingLink by remember { mutableStateOf(false) }
     var pendingLink by remember { mutableStateOf<String?>(null) }
+
+    // `/cc provider del foo` typed in the chat box resolves here, once the server tables load
+    LaunchedEffect(vm.ccRunRequested, vm.ccViews.size, vm.ccCommands.size) {
+        val query = vm.ccRunRequested ?: return@LaunchedEffect
+        val status = vm.ccStatus
+        if (status != null && !status.available) {
+            vm.clearCcRunRequest()
+            vm.showToast("cc-switch 当前不可用，无法执行「$query」")
+            return@LaunchedEffect
+        }
+        if (vm.ccViews.isEmpty() || vm.ccCommands.isEmpty()) return@LaunchedEffect
+        vm.clearCcRunRequest()
+        when (val match = matchCcQuery(query, vm.ccViews, vm.ccCommands)) {
+            null -> vm.showToast("未识别的 cc-switch 指令：「$query」，可在面板中选择")
+            is CcQuery.View -> {
+                if (match.view.needsTarget && match.target == null) awaitingView = match.view
+                else vm.ccShowView(match.view, match.target)
+            }
+            is CcQuery.Exec -> {
+                val command = match.command
+                when {
+                    command.needsTarget && match.target == null -> awaitingTarget = command
+                    command.confirm -> confirmExec = command to match.target
+                    else -> vm.runCcExec(command.name, match.target, false)
+                }
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Row(
@@ -141,6 +174,14 @@ fun CcScreen(vm: AppViewModel) {
                         onCreatePrompt = { creatingPrompt = true },
                         onSearchSessions = { searchingSessions = true },
                         onImportDeeplink = { importingLink = true },
+                    )
+                }
+                item {
+                    ViewsCard(
+                        vm = vm,
+                        onOpen = { view ->
+                            if (view.needsTarget) awaitingView = view else vm.ccShowView(view)
+                        },
                     )
                 }
                 vm.ccTestMessage?.let { message -> item { OutputCard("测速结果", message) } }
@@ -246,6 +287,21 @@ fun CcScreen(vm: AppViewModel) {
             onConfirm = { value ->
                 vm.ccSessionsSearch(value)
                 searchingSessions = false
+            },
+        )
+    }
+
+    awaitingView?.let { view ->
+        TextPromptDialog(
+            title = view.label,
+            hint = "输入${view.targetLabel}；不确定的话可先打开对应的列表视图。",
+            confirmLabel = "查看",
+            placeholder = view.targetLabel,
+            maxLines = 2,
+            onDismiss = { awaitingView = null },
+            onConfirm = { value ->
+                vm.ccShowView(view, value.trim())
+                awaitingView = null
             },
         )
     }
@@ -614,26 +670,53 @@ private fun ActionsCard(
                 TextButton(onClick = { vm.ccShowPanel("proxy") }, enabled = !vm.ccBusy) { Text("代理") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("config") }, enabled = !vm.ccBusy) { Text("配置") }
-                TextButton(onClick = { vm.ccShowPanel("sessions") }, enabled = !vm.ccBusy) { Text("会话") }
                 TextButton(onClick = onSearchSessions, enabled = !vm.ccBusy) { Text("搜索会话") }
-                TextButton(onClick = { vm.ccShowPanel("auth") }, enabled = !vm.ccBusy) { Text("认证") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onImportDeeplink, enabled = !vm.ccBusy) { Text("🔗 Deep Link 导入") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("skills") }, enabled = !vm.ccBusy) { Text("技能") }
-                TextButton(onClick = { vm.ccShowPanel("failover") }, enabled = !vm.ccBusy) { Text("故障转移") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("daemon") }, enabled = !vm.ccBusy) { Text("守护进程") }
-                TextButton(onClick = { vm.ccShowPanel("settings") }, enabled = !vm.ccBusy) { Text("设置") }
                 // Same jump Telegram's「全部命令」makes: the shared cc-switch command reference
                 TextButton(onClick = {
                     vm.selectHelpSection("cc")
                     vm.navigate(Screen.Help)
                 }) { Text("全部命令") }
+            }
+        }
+    }
+}
+
+/**
+ * The read-only `/cc` views. The server sends this list (`GET /cc/views`), so a view
+ * added on the bot side shows up here without an app release; views that need an
+ * argument open a one-field dialog first.
+ */
+@Composable
+private fun ViewsCard(vm: AppViewModel, onOpen: (CcViewSpec) -> Unit) {
+    if (vm.ccViews.isEmpty()) return
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Text("只读视图", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "对应 Telegram 的 /cc 查看命令，输出在上方面板显示。",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            // Two per row so a long Chinese label still fits on a phone
+            vm.ccViews.chunked(2).forEach { row ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    row.forEach { view ->
+                        TextButton(
+                            onClick = { onOpen(view) },
+                            enabled = !vm.ccBusy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                view.label + if (view.needsTarget) " …" else "",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                    repeat(2 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
+                }
             }
         }
     }

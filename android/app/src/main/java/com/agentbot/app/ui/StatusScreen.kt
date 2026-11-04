@@ -40,8 +40,21 @@ fun StatusScreen(vm: AppViewModel) {
                     StatusLine("OpenCode 服务端", if (status.opencodeReachable == true) "✅ 可达" else "⚠️ 不可达")
                     StatusLine("运行时长", "${status.uptimeMs / 3_600_000}h ${(status.uptimeMs / 60_000) % 60}m")
                     StatusLine("时区", status.timezone ?: vm.session?.timezone ?: "-")
+                    // Telegram's /status names the live task, not only the counters
+                    status.activeTask?.let { task ->
+                        StatusLine(
+                            if (task.status == "running") "正在执行" else "排队中",
+                            task.text.take(40) + if (task.text.length > 40) "…" else "",
+                        )
+                        task.progress?.takeIf { it.isNotBlank() }?.let { StatusLine("最新进展", it.take(60)) }
+                    }
+                    val retryable = status.tasksTotal - status.tasksActive
+                    StatusLine(
+                        "进行中任务",
+                        "${status.tasksActive} 个" + if (retryable > 0) "（另有 $retryable 条可重试）" else "",
+                    )
                     status.usageToday?.let {
-                        StatusLine("今日任务", "${it.total} 次（成功 ${it.ok} · 失败 ${it.failed}）")
+                        StatusLine("今日任务", "${it.tasks} 次（成功 ${it.ok} · 失败 ${it.failed}）")
                     }
                 }
             }
@@ -69,10 +82,18 @@ fun StatusScreen(vm: AppViewModel) {
             Text("使用统计", style = MaterialTheme.typography.titleMedium)
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusLine("累计任务", "${usage.total} 次")
-                    val rate = if (usage.total > 0) usage.ok * 100 / usage.total else 0
+                    StatusLine("累计任务", "${usage.tasks} 次")
+                    val rate = if (usage.tasks > 0) usage.ok * 100 / usage.tasks else 0
                     StatusLine("成功率", "$rate%")
                     StatusLine("平均耗时", AppViewModel.formatDuration(usage.avgMs))
+                    if (usage.lastAt > 0) {
+                        val last = listOfNotNull(
+                            "${AppViewModel.formatDuration((System.currentTimeMillis() - usage.lastAt).coerceAtLeast(0))}前",
+                            usage.lastEngine,
+                            usage.lastModel,
+                        ).joinToString(" · ")
+                        StatusLine("最近活动", last)
+                    }
                     if (usage.engines.isNotEmpty()) {
                         val engines = usage.engines.entries
                             .sortedByDescending { it.value }
@@ -86,7 +107,7 @@ fun StatusScreen(vm: AppViewModel) {
                 Text("近 7 天", style = MaterialTheme.typography.titleMedium)
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                     Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val max = vm.trend.maxOfOrNull { it.total }?.coerceAtLeast(1) ?: 1
+                        val max = vm.trend.maxOfOrNull { it.tasks }?.coerceAtLeast(1) ?: 1
                         vm.trend.forEach { day ->
                             Column {
                                 Row(
@@ -94,16 +115,47 @@ fun StatusScreen(vm: AppViewModel) {
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
                                     Text(day.day, style = MaterialTheme.typography.labelMedium, color = TextSecondary)
-                                    Text("${day.total} 次", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                                    Text("${day.tasks} 次", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
                                 }
                                 androidx.compose.material3.LinearProgressIndicator(
-                                    progress = { day.total.toFloat() / max },
+                                    progress = { day.tasks.toFloat() / max },
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                     color = OkGreen,
                                 )
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Cross-chat aggregate: the same numbers the scheduled daily report pushes to Telegram
+        val report = vm.dailyReport
+        if (report != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Text("每日报告", style = MaterialTheme.typography.titleMedium)
+                androidx.compose.material3.TextButton(onClick = { vm.shareReport() }) { Text("📤 分享") }
+            }
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StatusLine("日期", report.day)
+                    val totals = report.totals
+                    StatusLine("今日任务", "${totals.tasks} 次（成功 ${totals.ok} · 失败 ${totals.failed} · 取消 ${totals.cancelled}）")
+                    if (totals.tasks > 0) StatusLine("平均耗时", AppViewModel.formatDuration(totals.avgMs))
+                    if (report.byChat.isNotEmpty()) {
+                        StatusLine("来源", report.byChat.joinToString(" · ") { "${it.source} ${it.usage.tasks}" })
+                    }
+                    // 迷你趋势条：与 Telegram 报告同款的 ▁▂▃ 字符图
+                    val max = report.trend.maxOfOrNull { it.tasks }?.coerceAtLeast(1) ?: 1
+                    val blocks = "▁▂▃▄▅▆▇█"
+                    val spark = report.trend.joinToString("") { day ->
+                        if (day.tasks == 0) "·" else blocks[minOf(blocks.length - 1, day.tasks * (blocks.length - 1) / max)].toString()
+                    }
+                    StatusLine("近 7 天", "$spark 共 ${report.trendTasks} 次")
                 }
             }
         }

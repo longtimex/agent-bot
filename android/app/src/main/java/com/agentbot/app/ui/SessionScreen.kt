@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.agentbot.app.data.Peer
 import com.agentbot.app.data.Task
 import com.agentbot.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
@@ -60,9 +61,13 @@ private val TIMEZONE_PRESETS = listOf(
 fun SessionScreen(vm: AppViewModel) {
     var editDir by remember { mutableStateOf(false) }
     var editTz by remember { mutableStateOf(false) }
+    var followTarget by remember { mutableStateOf<Peer?>(null) }
     val session = vm.session
     val dir = vm.dirInfo
     val currentTz = vm.timezone ?: session?.timezone
+    val others = vm.peers.filter { !it.current }
+    // Peer ages are drawn once per reload (navigation, 刷新, foreground) — no ticking clock here.
+    val now = System.currentTimeMillis()
 
     Column(
         modifier = Modifier
@@ -79,7 +84,7 @@ fun SessionScreen(vm: AppViewModel) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 InfoRow("引擎", session?.engineLabel ?: session?.engine ?: "-")
-                InfoRow("模型", session?.model ?: "-")
+                InfoRow("模型", session?.modelLine ?: "-")
                 InfoRow("时区", currentTz ?: "-")
                 InfoRow("工作目录", dir?.workDir ?: session?.workDir ?: "-")
                 InfoRow("上下文", if (session?.hasSession == true) "已有连续会话" else "新会话")
@@ -95,6 +100,48 @@ fun SessionScreen(vm: AppViewModel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = vm::resetModel) { Text("恢复默认模型") }
                     OutlinedButton(onClick = vm::newChat) { Text("新建会话") }
+                }
+            }
+        }
+
+        if (others.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("另一端会话", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = vm::refreshPeers) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            }
+            others.forEach { peer ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(peer.label, style = MaterialTheme.typography.titleSmall)
+                        InfoRow("引擎", peer.session?.engineLabel ?: peer.session?.engine ?: "-")
+                        InfoRow("模型", peer.session?.modelLine ?: "-")
+                        InfoRow("工作目录", peer.session?.workDir ?: "-")
+                        InfoRow("上下文", if (peer.session?.hasSession == true) "已有连续会话" else "新会话")
+                        InfoRow(
+                            "最近活动",
+                            peer.activity?.let { activity ->
+                                if (activity.lastAt <= 0) "尚无记录"
+                                else "${AppViewModel.formatDuration((now - activity.lastAt).coerceAtLeast(0))}前 · ${activity.lastEngine ?: "-"}"
+                            } ?: "-",
+                        )
+                        InfoRow(
+                            "任务统计",
+                            peer.activity?.let { activity ->
+                                "今日 ${activity.todayOk}/${activity.todayTasks} · 累计 ${activity.totalTasks}"
+                            } ?: "-",
+                        )
+                        OutlinedButton(onClick = { followTarget = peer }) { Text("跟随该会话") }
+                    }
                 }
             }
         }
@@ -163,6 +210,28 @@ fun SessionScreen(vm: AppViewModel) {
             onConfirm = { zone ->
                 vm.changeTimezone(zone.trim())
                 editTz = false
+            },
+        )
+    }
+    followTarget?.let { peer ->
+        AlertDialog(
+            onDismissRequest = { followTarget = null },
+            title = { Text("跟随${peer.label}？") },
+            text = {
+                Text(
+                    "会把本机 App 改成「${peer.session?.engineLabel ?: peer.session?.engine ?: "-"} · " +
+                        "${peer.session?.model ?: "-"} · ${peer.session?.workDir ?: "-"}」，" +
+                        "并重置 App 侧的 CLI 上下文。另一端不会有任何改动。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.followPeer(peer.scope)
+                    followTarget = null
+                }) { Text("跟随") }
+            },
+            dismissButton = {
+                TextButton(onClick = { followTarget = null }) { Text("取消") }
             },
         )
     }

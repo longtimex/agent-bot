@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { ApiServer, resolveApiToken } from "./api.js"
+import { ApiServer, resolveApiToken, resolveEncKey } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
@@ -185,6 +185,7 @@ async function main(): Promise<void> {
           version: appVersion(),
         },
         resolveApiToken(cfg),
+        resolveEncKey(cfg),
       )
       await apiServer.start()
     } catch (err) {

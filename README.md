@@ -8,7 +8,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 安卓 App        ⇄ HTTP API(/api/v1) ⇄ └──────────┘
 ```
 
-> 📖 新用户请从下方「[使用说明](#使用说明)」开始，5 步跑通；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。
+> 📖 新用户请从下方「[使用说明](#使用说明)」开始，5 步跑通；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)。
 
 ## 功能
 
@@ -24,7 +24,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 - **交互面板**：`/start`、`/agent`、`/model`、`/dir`、`/access`、`/reminders`、`/schedule`、`/proxy`、`/usage`、`/ops` 均带内联按钮，可直接点选切换引擎/模型、设置工作目录、增删访问白名单、暂停任务、取消提醒或操作代理。
 - **实时进度**：处理时间超过 2 秒后显示进度卡片（带「停止任务」按钮），并持续发送 typing 状态。卡片被限流时会自动退避而不是每 2 秒重试，状态没有变化时也最多每 30 秒刷新一次，避免长任务把 Telegram 的编辑额度耗尽。
 - **重试与队列**：失败消息附带的「重试」按钮只重发**它那一条**任务（不会被之后的新消息顶掉）；`/retry` 重发上一条任务，但若中途发过 `/stop`，排队的 `/retry` 会一起作废，不会把已取消的活儿再跑一遍；`/queue` 可逐条取消或一键清空排队消息。
-- **命令自动补全**：启动时注册 Telegram 的 `/` 菜单（`BOT_MENU_COMMANDS`），输入 `/` 即可看到全部命令与说明；测试会校验菜单与 `/help full` 保持一致。
+- **命令自动补全**：启动时注册 Telegram 的 `/` 菜单（`src/help.ts` 的 `BOT_MENU_COMMANDS`，与等价写法 `BOT_COMMAND_ALIASES` 一起通过 `GET /help` 下发给安卓 App），输入 `/` 即可看到全部命令与说明；测试会校验菜单与 `/help full` 保持一致，并校验 App 的命令表覆盖同样的命令。
 - **网络代理**：Telegram 内添加 HTTP/HTTPS/SOCKS4/SOCKS5 代理，自动测试连通性，可启用、停用、删除；远程媒体、Agent CLI 子进程与 Agent 网络命令自动使用。
 - **附件接收**：可直接发送图片、文件、语音；文本/代码文件会读取内容，图片/PDF/音频按当前模型能力附加。
 - **原生附件**：模型通过 `[[image:...]]` 等指令发送图片、视频、语音、文档。
@@ -79,6 +79,7 @@ npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
 | 换个项目目录 | `/dir /path/to/project` |
 | 定时提醒 | `/remind 30m 喝水`、`/remind 每天 08:30 打卡` |
 | 定时让 AI 干活 | `/schedule add 每天 09:00 生成日报` |
+| 看用量 / 生成报告 | `/usage`、`/report` |
 | 新开会话 / 停止任务 | `/new`、`/stop` |
 | 忘了命令 | 输入 `/` 看自动补全菜单，或 `/help` 分类速览 |
 
@@ -123,6 +124,7 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `/queue` | 查看排队消息，可逐条取消或一键清空；当前任务不受影响 |
 | `/status` | 查看引擎、模型、运行时长、今日任务、代理、队列与提醒数 |
 | `/usage` | 查看任务量、成功率、平均耗时、今日与引擎统计 |
+| `/report` | 生成跨聊天的每日用量报告（等价 `/usage` 面板的「📩 每日报告」按钮） |
 | `/history [条数]` | 查看最近任务历史（提示词摘要、引擎/模型、耗时与结果），可一键清空 |
 | `/export [json]` | 把最近任务历史导出为 Markdown（默认）或 JSON 文档发到聊天里，方便存档迁移 |
 | `/schedule` | 定时 AI 任务面板：查看、暂停、恢复、删除 |
@@ -160,17 +162,20 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 
 默认启用，监听 `127.0.0.1:3080`（`API_ENABLED/API_PORT/API_BIND/API_TOKEN` 可调）。
 所有请求需携带 `Authorization: Bearer <token>`；令牌在 Telegram 发 `/api` 查看。
+`API_ENCRYPTION=1` 后支持**消息级加密**：请求/响应体用 AES-256-GCM 加密（配对密钥存 `data/api-enc-key.json`，经 `/api` 二维码下发；客户端带 `x-enc: v1` 请求头即启用，未带仍走明文，渐进兼容；SSE、媒体流与导出/备份的文件附件不加密）。
 
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 存活检查：版本、当前引擎、时区 |
 | `GET /info` | 会话与配对信息（同 `/id` + `/api`）：引擎/模型、会话 ID、工作目录、推送聊天 ID、API 监听地址；令牌不会回传 |
-| `GET /help` | 与 Telegram 共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记，供 App 直接展示） |
-| `GET /session` | 当前引擎/模型/工作目录；`POST /agent {engine}` 切换、`POST /model {model}` 切模型（`default` 恢复默认）、`POST /new` 重置会话 |
+| `GET /help` | 与 Telegram 共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记，供 App 直接展示）；`commands` 是 Bot 菜单里的全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`），App 的 `/` 面板与带参数命令解析都以这两份列表为准 |
+| `GET /session` | 当前引擎/模型/工作目录；OpenCode 会话额外给出 `modelRef`（`providerID`/`modelID`/`label`），CLI 会话只有模型名；`POST /agent {engine}` 切换（接受 id、标签、`bin` 或别名）、`POST /model {model}` 切模型（`default` 恢复默认）、`POST /new` 重置会话 |
+| `GET /peers` · `POST /peers/follow {scope}` | Bot 的全部活动会话（本机 App 与主人的 Telegram 聊天）及其引擎/模型/工作目录与用量（最近活动时间、今日成功/总数、累计数，取自两端共用的 usage 记录），用于回答「Telegram 现在用的是什么」；响应只给 `scope`/`label`、设置与计数，不回传内部会话键（Telegram 的键就是聊天 ID），也不下发任何聊天正文；排队/执行深度只在 App 自己的队列里报告，因为这个进程看不到 Telegram 的队列。`follow` 只对 App 生效：把 App 的引擎、模型与工作目录对齐到该会话并重置 App 侧 CLI 上下文，不会反向改动 Telegram；跟随自己返回 409 |
 | `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；附件为 `{name, mime, data(base64)}` 数组，最多 4 个共 15MB，文本内联、图片/音频/PDF 直连模型；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；返回 202 与 taskId |
 | `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`POST /stop` 停止全部 |
 | `POST /task/:id/stop` · `GET /queue` · `POST /queue/clear` | 停止单个任务（排队中直接丢弃、执行中中止）；查看当前排队/执行中的任务；一键清空排队（仅取消 queued，不影响执行中的任务） |
 | `GET /task/:id/events` | SSE 事件流：实时推送任务进度行与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
+| `POST /task/:id/retry` | 重放已结束的任务：服务端用自己的记录复原原始文本、引擎、临时模型与附件，返回 202 与新任务（`retriedFrom` 为旧 ID）。排队/执行中返回 409（请先停止），已被清理或不属于本会话返回 404。App 的「重试」按钮与 Telegram `/retry` 走同一条路径，不再从本地聊天记录拼文本 |
 | `GET /task/:id/media/:index` | 下载回复中的第 `index` 个媒体（任务视图 `media[]` 给出 kind/label/name/size/remote）；本地文件限 `data/outbox`，远程链接沿用与 Telegram 相同的 SSRF/代理防护 |
 | `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话 |
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
@@ -185,27 +190,29 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `GET /cc/proxy` · `GET /cc/mcp` · `POST /cc/mcp/sync` | cc-switch 代理状态、MCP 列表与同步 |
 | `GET /cc/prompts` · `POST /cc/prompts/activate` · `POST /cc/prompts/deactivate` | 提示词列表、启用（body `{id}`）与停用 |
 | `GET /cc/env?mode=tools\|check` | cc-switch 环境工具与检查输出 |
-| `GET /cc/view?name=config\|sessions\|auth\|skills\|failover\|daemon\|settings` | cc-switch 只读视图（配置、会话、认证、技能、故障转移、守护进程、设置），输出脱敏 |
+| `GET /cc/views` · `GET /cc/view?name=&target=` | cc-switch 只读视图清单与实际输出。清单由服务端下发（名称/中文标题/是否需要参数/参数名/可用词组 `tokens`），App 直接渲染，新增视图不需要发版；`tokens` 由参数表推导（含 `provider rm` 这类别名，也含 `skills repos add` 这类三词形状），所以聊天框里输入的 `/cc provider current` 在 App 内也能解析；`target` 走 `assertSafeId`（不得以 `-` 开头），缺参数返回 400 而不是执行半截命令。视图含 `config`、`config-path`、`sessions`、`session-show`、`session-messages`、`provider-current`、`auth`、`auth-list`、`skills`、`skill-info`、`skills-discover`、`skills-updates`、`failover`、`failover-list`、`failover-available`、`prompt-current`、`prompt-live`、`prompt-show`、`daemon`、`daemon-logs`、`settings`，网络类视图用 90 秒长超时，输出脱敏 |
 | `GET /cc/stream?id=` · `GET /cc/models?id=` · `GET /cc/quota?id=` | 对应 `/cc stream`、`/cc models`、`/cc quota`：流式连通性、Provider 模型列表与配额（只读，不含烧额度的 `--reset`） |
 | `POST /cc/mcp/import` · `POST /cc/prompts/create` | 对应 `/cc mcp import`（body `{json}`）与 `/cc prompt new`（body `{name, content}`），上限 20000 字 |
-| `GET /cc/exec` · `POST /cc/exec` | cc-switch 危险命令白名单：`GET` 下发可执行项（名称/说明/是否需要目标 ID/是否需确认），`POST` body `{name, arg?, confirm?}` 只跑表内固定参数；未知名称、缺 `confirm`、非法目标 ID 一律 400。表内含 `skill-install`（`owner/name`，90 秒长超时）、`mcp-enable|disable`、`provider-duplicate|set-default|import-live|remove-from-config`、`proxy-enable|disable`、`failover-add|remove`、`config-validate`、`sessions-sync-usage`、`skills-sync|update|update-all` |
+| `GET /cc/exec` · `POST /cc/exec` | cc-switch 危险命令白名单：`GET` 下发可执行项（名称/说明/是否需要目标 ID/是否需确认/可用词组 `tokens`），含 `prompt-activate|deactivate`（`/cc prompts use|off` 的同一条命令），`POST` body `{name, arg?, confirm?}` 只跑表内固定参数；未知名称、缺 `confirm`、非法目标 ID 一律 400。表内含 `skill-install`（`owner/name`，90 秒长超时）、`mcp-enable|disable`、`provider-duplicate|set-default|import-live|remove-from-config`、`proxy-enable|disable`、`failover-add|remove`、`config-validate`、`sessions-sync-usage`、`skills-sync|update|update-all`、`prompt-activate|deactivate`、`skills-repos-add`、`settings-language`、`daemon-start|stop`、`config-backup`、`auth-default` |
 | `GET /cc/sessions?q=` · `POST /cc/deeplink` | 对应 `/cc sessions search`（关键词上限 128 字、不得以 `-` 开头或含控制字符，90 秒超时）与 `/cc deeplink`：仅接受 `ccswitch://v1/import?...`（上限 8192 字）、需 `confirm: true`，响应不回显链接本身 |
 | `GET /config` · `PUT /config/:key` · `DELETE /config/:key` | `.env` 配置项：查看（密钥值不下发）、修改、删除；仅允许规则内的键，`TELEGRAM_ALLOW_USERS` 仍须走 `/access`，`REMINDER_TIMEZONE` 立即生效 |
-| `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性）与模型列表；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400 |
+| `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性，并带 `aliases`、`bin`、`sessionMode`、`supportsModel`、`models`，客户端可用与 Telegram 相同的别名输入命中同一引擎）与模型列表；引擎列表第一项是内置的 `opencode`（`installed: true`，不可安装/更新/卸载），与 `POST /agent` 可接受的取值一致，客户端因此总能切回内置引擎；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400，`models` 里每个条目带 `aliases`，CLI 不列模型时改由 `modelHint` 给出可输入的写法 |
 | `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
+| `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；Telegram 端是 `/ops` 面板的「📦 备份数据」按钮，直接发文件到聊天 |
 | `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` | 运行检查（npm run check）、更新项目（git pull + 依赖 + 构建）、重启 Bot；同一时间只允许一个运维操作，输出自动脱敏 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
 | `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
 | `GET /history?limit=` · `DELETE /history` | 任务历史：`limit`（1–50）取最近 N 条，响应同时返回服务端保留的 `total`（最多 50 条），供 App 显示「已显示 N / 共 M 条」 |
 | `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
 | `GET /usage` | 用量统计与近 7 天趋势 |
-| `GET/POST /reminders` · `DELETE /reminders/:id` | 提醒管理（触发时经 Telegram 推送） |
+| `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
+| `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时经 Telegram 推送）；`snooze` 延后一条待触发的一次性提醒（1–10080 分钟），响应返回更新后的行，App 的「延后」按钮与列表同步都走它 |
 | `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间） |
-| `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性 |
+| `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |
 
-App 的会话是独立上下文（`api:app`），与各 Telegram 聊天互不干扰。
+App 的会话是独立上下文（`api:app`），与各 Telegram 聊天互不干扰；`GET /peers` 会把两端现状都摆出来，App 的会话设置页因此能显示 Telegram 正在使用的引擎/模型/目录与最近的用量，并一键 `POST /peers/follow` 把 App 对齐过去（单向，不改动 Telegram）。
 
 ## Agent CLI 适配
 
@@ -331,7 +338,7 @@ bot/
 │   └── logger.ts
 ├── tests/            单元测试（node:test）
 ├── deploy/           systemd 单元示例
-├── scripts/          邮件、X、搜图、免费服务器扫描/抢注、重启与 cc-switch 安装脚本
+├── scripts/          邮件、X、搜图、免费服务器扫描/抢注、重启、cc-switch 安装与安卓源码检查脚本
 ├── bin/              可选：`npm run cc-switch:install` 下载的 cc-switch 二进制（已 gitignore）
 ├── .opencode/agent/assistant.md   Bot 的 agent 人设与工具权限
 ├── opencode.json     Provider 与模型配置
@@ -356,6 +363,7 @@ MY_API_KEY=...
 - `MAX_MEDIA_MB` / `MAX_INPUT_MB`：出站单文件与入站附件上限，默认均为 20MB。
 - `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接访问本机/内网地址；仅在本地调试时设为 `1`。
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
+- `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL` / `STT_LANGUAGE`：可选的语音转写服务（OpenAI 兼容 `/audio/transcriptions`，如 OpenAI、Groq 或本地 whisper）。`STT_BASE_URL` 留空关闭；配置后，当前模型不支持音频输入时，发来的语音自动转写为文字交给模型（`STT_API_KEY` 属密钥，只能写 `.env`，不能经 `/env` 查看或修改）。
 - `USAGE_DAILY_REPORT` / `USAGE_DAILY_REPORT_TIME`：每日用量报告开关（默认 `0`）与推送时间（默认 `21:00`，24 小时制，按 `REMINDER_TIMEZONE` 解析）；到点向白名单第一位用户推送一次，重启当天会补发、不会重复发。也可用 `/env` 修改。
 - `STARTUP_NOTICE`：默认 `1`，每次 Bot 上线后向白名单第一位用户推送一条「Bot 已上线」通知；设为 `0` 关闭。也可用 `/env set STARTUP_NOTICE 0` 修改。
 - `OPENCODE_AGENT`：默认 `assistant`，对应 `.opencode/agent/assistant.md`。
@@ -412,7 +420,7 @@ Token 在向导输出中只显示掩码；输入行仍由终端回显，请留�
 它还通过 `BOT_LOG_FILE` 告知 Bot 日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
 重复启动会被 `data/bot.lock` 拒绝，提示已有实例的 PID；锁文件同时记录进程启动时间，PID 被系统复用后不会误判为仍在运行。
 
-开发模式：`npm run dev`；完整检查：`npm run check`（类型检查 + 测试 + 构建）。
+开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
 
 ### systemd 常驻（可选）
 
@@ -497,7 +505,7 @@ Telegram Token、API Key、密码、账号凭据等永远不会在 `/env`、`/lo
 | 文本/代码文件（`.txt`/`.md`/`.json`/`.ts`/`.log` 等） | 读取内容并随提示词发送（最多 6 万字，超出截断） |
 | 图片 | 保存到 `data/inbox/`；当前模型声明支持图片时作为附件发送 |
 | PDF | 同上（按模型的 PDF 能力） |
-| 语音/音频 | 保存到 `data/inbox/`；模型支持音频时直接附加，否则提示无法转写 |
+| 语音/音频 | 保存到 `data/inbox/`；模型支持音频时直接附加；不支持但配置了 `STT_BASE_URL` 时自动转写为文字（OpenAI 兼容 `/audio/transcriptions`，Groq、本地 whisper 等均可），转写失败回退为"无法转写"提示 |
 
 - 附件保存在 `data/inbox/`，超过 24 小时自动清理；单文件上限 20MB（`MAX_INPUT_MB`），单条消息附件合计上限 15MB、内联文本合计 10 万字。入站附件以 `0600` 写入、目录以 `0700` 创建，同机其他账户无法读取。
 - 能力检测来自 opencode 的 `GET /provider`。当前环境中的 custom/grok 模型未开启视觉/音频输入，因此图片与语音会以“路径 + 不支持”提示交给模型。
@@ -551,6 +559,7 @@ Telegram Token、API Key、密码、账号凭据等永远不会在 `/env`、`/lo
 - 停机期间到期的一次性提醒会在启动后补发，并标记「补发」；过期超过 7 天的提醒会被丢弃。
 - 投递失败（例如 Telegram 暂时不可用）会保留提醒，并按 1 分钟 → 5 分钟 → 15 分钟 → 1 小时退避重试；一次性提醒连续失败 8 次后放弃并记录错误，**重复提醒只跳过这一次**并排到下一个周期，不会因为一段网络故障而永久消失。
 - 每个会话最多同时保留 20 条提醒；提醒投递依赖 Bot 进程运行。
+- **延后（snooze）三端一致**：投递消息带「10 分钟 / 1 小时 / 明天」按钮；`/reminders` 面板的一次性提醒带「⏰+1h」一键延后；App 列表可选三档时长（`POST /api/v1/reminders/:id/snooze`）。延后只作用于待触发的一次性提醒，重复提醒保持周期。
 
 ## 定时 AI 任务
 
@@ -571,7 +580,7 @@ Telegram Token、API Key、密码、账号凭据等永远不会在 `/env`、`/lo
 - 排队中的任务被 `/stop` 取消时：重复任务按原周期继续，一次性任务自动暂停并在聊天中提示恢复方式（`/schedule resume 编号`），不会静默丢失。
 - 任务保存在 `data/schedules.json`（权限 600）；Bot 重启后继续生效，崩溃中断的任务会在下次启动时补跑。停机超过 7 天的一次性任务会被删除，并在聊天中告知。
 - 每个会话最多 20 个任务，提示词上限 2000 字。
-- 面板中的「暂停 / 恢复 / 删除」按钮与 `/schedule pause|resume|del 编号` 等价；`/status` 会显示任务数量。
+- 面板中的「暂停 / 恢复 / 删除」按钮与 `/schedule pause|resume|del 编号` 等价；`/status` 会显示任务数量。任务超过 4 个时面板自动分页（⬅️/➡️ 翻页，每页 4 个）。
 - `▶️ 运行` 按钮或 `/schedule run 编号` 可立即执行一次（暂停中的任务也可以），只更新最近运行状态，不改动原定时间或消耗一次性任务。
 
 ## cc-switch 与模型管理
@@ -705,5 +714,6 @@ npm run models -- assign self argon2
 | `scripts/check_free_site.mjs` | 检查站点是否提供免费额度 |
 | `scripts/sniper_free_vps.mjs` | 免费 VPS 抢注守护进程（读取 `SNIPER_*`） |
 | `scripts/proxy-exec.sh` | 按 `/proxy` 当前启用项注入代理环境后执行命令 |
+| `scripts/check-android-sources.mjs` | 无 Android SDK 时的安卓源码静态门：必需源文件是否缺失、是否被 `.gitignore` 吞掉、Kotlin 括号与字符串是否闭合（`npm run check:android`） |
 | `scripts/install-cc-switch.sh` | 下载 cc-switch CLI 到 `./bin`（`npm run cc-switch:install`） |
 | `scripts/restart.sh` | 构建产物重启 Bot 并维护 `data/bot.pid` |

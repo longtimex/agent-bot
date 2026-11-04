@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -7,6 +7,7 @@ import { ApiServer, resolveApiToken } from "../src/api.js"
 import { AgentCliRegistry } from "../src/agentCli.js"
 import type { AgentCliInstaller } from "../src/agentInstaller.js"
 import type { BotConfig } from "../src/config.js"
+import { CC_SUB_ALIASES } from "../src/help.js"
 import { TaskHistoryStore } from "../src/history.js"
 import type { Logger } from "../src/logger.js"
 import { ModelAdmin } from "../src/modelAdmin.js"
@@ -19,7 +20,8 @@ import { ReminderService } from "../src/reminders.js"
 import { ScheduleService } from "../src/scheduler.js"
 import { SessionStore } from "../src/store.js"
 import type { AgentCliService } from "../src/agentCli.js"
-import type { UsageOutcome, UsageStore } from "../src/usage.js"
+import { UsageStore } from "../src/usage.js"
+import { appModelShape } from "./support/appModels.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error(...a: unknown[]) { console.error("LOG-ERR", ...a) } }
 const TOKEN = "test-token-0123456789abcdef"
@@ -40,19 +42,16 @@ interface Harness {
   ccCalls: string[]
 }
 
-async function withApi(
+export async function withApi(
   promptImpl: (key: string, engine: string, text: string, onProgress?: (s: string) => void, signal?: AbortSignal) => Promise<string>,
   run: (h: Harness) => Promise<void>,
+  encKey?: Buffer,
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "agent-bot-api-"))
   const store = new SessionStore(join(dir, "sessions.json"), log)
-  const usage = {
-    record(_key: string, _input: { engine: string; model?: string; ms: number; outcome: UsageOutcome }): void {},
-    summary(key: string) {
-      return { total: 0, ok: 0, failed: 0, cancelled: 0, avgMs: 0, engines: {}, today: { total: 0, ok: 0, failed: 0, cancelled: 0, avgMs: 0 } } as never
-    },
-    recentDays: () => [],
-  } as unknown as UsageStore
+  // The real store, keyed exactly as Telegram keys it, so per-session views are tested
+  // against the shapes the App decodes rather than a stub that always answers zero.
+  const usage = new UsageStore(join(dir, "usage.json"), log, "Asia/Shanghai")
   const history = new TaskHistoryStore(join(dir, "history.json"), log)
   const reminders = new ReminderService(
     join(dir, "reminders.json"),
@@ -66,7 +65,11 @@ async function withApi(
   const agents = {
     registry,
     defaultWorkDir: dir,
-    workDir: () => dir,
+    // Mirrors AgentCliService.workDir: a stored dir only counts while it still exists
+    workDir: (key: string) => {
+      const custom = store.getDir(key)
+      return custom && existsSync(custom) ? custom : dir
+    },
     prompt: (key: string, engine: string, text: string, _m: unknown, onProgress?: (s: string) => void, signal?: AbortSignal) =>
       promptImpl(key, engine, text, onProgress, signal),
   } as unknown as AgentCliService
@@ -122,6 +125,7 @@ async function withApi(
       log: { path: join(dir, "bot.log"), bytes: 10 },
       opencodeLog: { path: join(dir, "opencode.log"), bytes: 0 },
       memory: { freeBytes: 1, totalBytes: 2 },
+      lastBackupAt: 0,
     }),
     tailLogs: (source: string, lines: number) => ({
       ok: true,
@@ -307,6 +311,7 @@ async function withApi(
       ownerChatId: 42,
     },
     TOKEN,
+    encKey,
   )
   // Deterministic engine for the prompts: the CLI stub resolves immediately.
   store.setEngine("api:app", "claude")
@@ -336,7 +341,7 @@ async function withApi(
   }
 }
 
-function authHeaders(token = TOKEN): Record<string, string> {
+export function authHeaders(token = TOKEN): Record<string, string> {
   return { authorization: `Bearer ${token}`, "content-type": "application/json" }
 }
 
@@ -671,6 +676,84 @@ test("api work dir can be viewed, changed and reset", async () => {
   })
 })
 
+test("api reports the Telegram session and lets the App adopt it", async () => {
+  await withApi(async () => "ok", async (h) => {
+    // A work dir only counts when it exists, so use a real one
+    const peerDir = mkdtempSync(join(tmpdir(), "agent-bot-peer-"))
+    try {
+      // The Telegram end usually runs something else; the App should see that, not guess it
+      h.store.setEngine("tg:42", "codex")
+      h.store.setCliModel("tg:42", "codex", "gpt-5.1-codex")
+      h.store.setDir("tg:42", peerDir)
+      // Usage is keyed the same way on both ends, so the App can report real activity here
+      h.usage.record("tg:42", { engine: "codex", model: "gpt-5.1-codex", ms: 1200, outcome: "ok" })
+      h.history.record("tg:42", { prompt: "SECRET-CHAT-TEXT", engine: "codex", ms: 1200, outcome: "ok" })
+
+      const list = await fetch(`${h.base}/api/v1/peers`, { headers: authHeaders() })
+      assert.equal(list.status, 200)
+      const { peers } = (await list.json()) as {
+        peers: Array<{
+          scope: string
+          label: string
+          current: boolean
+          activity: { lastAt: number; lastEngine: string | null; todayTasks: number; todayOk: number; totalTasks: number }
+          session: Record<string, unknown>
+        }>
+      }
+      const app = peers.find((peer) => peer.scope === "app")
+      const telegram = peers.find((peer) => peer.scope === "telegram")
+      assert.equal(app?.current, true)
+      assert.equal(telegram?.current, false)
+      assert.equal(telegram?.session.engine, "codex")
+      assert.equal(telegram?.session.workDir, peerDir)
+      assert.ok((telegram?.activity.lastAt ?? 0) > 0, "the Telegram peer must report when it last ran")
+      assert.equal(telegram?.activity.lastEngine, "codex")
+      assert.equal(telegram?.activity.todayTasks, 1)
+      assert.equal(telegram?.activity.todayOk, 1)
+      assert.equal(telegram?.activity.totalTasks, 1)
+      assert.equal(app?.activity.todayTasks, 0, "the App's own usage must not leak into the Telegram counts")
+      // A peer's internal key is `tg:<chatId>` and its prompts are chat content, so neither
+      // may travel; queue depth is never claimed either, since this server only tracks App tasks
+      const payload = JSON.stringify(peers)
+      assert.equal(Object.hasOwn(telegram?.session ?? {}, "key"), false)
+      assert.ok(!payload.includes("tg:42"), "the session key must stay server-side")
+      assert.ok(!payload.includes("SECRET-CHAT-TEXT"), "chat text must never reach the peers view")
+      assert.ok(!/"queued"|"running"/.test(payload), "peers must not report queue depth this server cannot see")
+
+      const follow = await fetch(`${h.base}/api/v1/peers/follow`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ scope: "telegram" }),
+      })
+      assert.equal(follow.status, 200)
+      const followed = (await follow.json()) as { message: string; session: { engine: string; workDir?: string } }
+      assert.match(followed.message, /已跟随/)
+      assert.equal(h.store.getEngine("api:app"), "codex")
+      assert.equal(h.store.getCliModel("api:app", "codex"), "gpt-5.1-codex")
+      assert.equal(h.store.getDir("api:app"), peerDir)
+      assert.equal(followed.session.engine, "codex")
+
+      // Repeating it changes nothing, so the message says so instead of claiming a switch
+      const again = await fetch(`${h.base}/api/v1/peers/follow`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({}),
+      })
+      assert.match(((await again.json()) as { message: string }).message, /已经一致/)
+
+      // Following one's own session is refused, not silently applied
+      const self = await fetch(`${h.base}/api/v1/peers/follow`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ scope: "app" }),
+      })
+      assert.equal(self.status, 409)
+    } finally {
+      rmSync(peerDir, { recursive: true, force: true })
+    }
+  })
+})
+
 test("api timezone can be viewed and switched", async () => {
   await withApi(async () => "ok", async (h) => {
     const before = await fetch(`${h.base}/api/v1/timezone`, { headers: authHeaders() })
@@ -790,6 +873,124 @@ test("api queue lists queued tasks and stops a single task", async () => {
   )
 })
 
+test("api task retry replays the stored prompt, engine, model pin and attachments", async () => {
+  const seen: string[] = []
+  let attempts = 0
+  await withApi(
+    async (_key, engine, text) => {
+      attempts += 1
+      seen.push(`${engine}|${text}`)
+      if (attempts === 1) throw new Error("模拟引擎故障")
+      return "重试后的回复"
+    },
+    async (h) => {
+      const created = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          text: "看这个文件",
+          engine: "claude",
+          model: "haiku",
+          attachments: [{ name: "note.txt", mime: "text/plain", data: "SGVsbG8=" }],
+        }),
+      })
+      assert.equal(created.status, 202)
+      const first = (await created.json()) as {
+        task: { id: string; engine: string; model?: string; attachmentCount?: number }
+      }
+      assert.equal(first.task.engine, "claude")
+      assert.equal(first.task.model, "haiku")
+      assert.equal(first.task.attachmentCount, 1)
+
+      let status = ""
+      for (let i = 0; i < 50 && status !== "failed"; i++) {
+        const res = await fetch(`${h.base}/api/v1/task/${first.task.id}`, { headers: authHeaders() })
+        status = ((await res.json()) as { task: { status: string } }).task.status
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.equal(status, "failed")
+
+      const retry = await fetch(`${h.base}/api/v1/task/${first.task.id}/retry`, {
+        method: "POST",
+        headers: authHeaders(),
+      })
+      assert.equal(retry.status, 202)
+      const retried = (await retry.json()) as {
+        ok: boolean
+        retriedFrom: string
+        task: { id: string; status: string; engine: string; model?: string; attachmentCount?: number }
+      }
+      // The app sends no body here, so everything must come from the server's copy
+      assert.equal(retried.retriedFrom, first.task.id)
+      assert.notEqual(retried.task.id, first.task.id)
+      assert.equal(retried.task.engine, "claude")
+      assert.equal(retried.task.model, "haiku")
+      assert.equal(retried.task.attachmentCount, 1)
+
+      let doneStatus = retried.task.status
+      for (let i = 0; i < 50 && doneStatus !== "done"; i++) {
+        const res = await fetch(`${h.base}/api/v1/task/${retried.task.id}`, { headers: authHeaders() })
+        doneStatus = ((await res.json()) as { task: { status: string } }).task.status
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.equal(doneStatus, "done")
+
+      assert.equal(seen.length, 2)
+      for (const call of seen) {
+        assert.match(call, /^claude\|/)
+        assert.match(call, /看这个文件/)
+        assert.match(call, /note\.txt/)
+        assert.match(call, /Hello/)
+      }
+    },
+  )
+})
+
+test("api task retry refuses a live task and an unknown id", async () => {
+  await withApi(
+    (_key, _engine, _text, _onProgress, signal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("已取消当前任务。")))
+      }),
+    async (h) => {
+      const created = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "执行中" }),
+      })
+      const id = ((await created.json()) as { task: { id: string } }).task.id
+      await new Promise((resolve) => setTimeout(resolve, 60))
+
+      const running = await fetch(`${h.base}/api/v1/task/${id}/retry`, { method: "POST", headers: authHeaders() })
+      assert.equal(running.status, 409)
+      assert.match(((await running.json()) as { error: string }).error, /请先停止/)
+
+      const missing = await fetch(`${h.base}/api/v1/task/t-does-not-exist/retry`, {
+        method: "POST",
+        headers: authHeaders(),
+      })
+      assert.equal(missing.status, 404)
+
+      // A cancelled task is finished, so retrying it is exactly Telegram's behaviour
+      await fetch(`${h.base}/api/v1/task/${id}/stop`, { method: "POST", headers: authHeaders() })
+      let status = ""
+      for (let i = 0; i < 50 && status !== "cancelled"; i++) {
+        const res = await fetch(`${h.base}/api/v1/task/${id}`, { headers: authHeaders() })
+        status = ((await res.json()) as { task: { status: string } }).task.status
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.equal(status, "cancelled")
+
+      const retry = await fetch(`${h.base}/api/v1/task/${id}/retry`, { method: "POST", headers: authHeaders() })
+      assert.equal(retry.status, 202)
+      const body = (await retry.json()) as { task: { id: string; status: string } }
+      assert.notEqual(body.task.id, id)
+
+      await fetch(`${h.base}/api/v1/stop`, { method: "POST", headers: authHeaders() })
+    },
+  )
+})
+
 test("api ops exposes diagnostics and log tails", async () => {
   await withApi(async () => "ok", async (h) => {
     const diag = await fetch(`${h.base}/api/v1/ops/diag`, { headers: authHeaders() })
@@ -820,9 +1021,12 @@ test("api agent install, update and uninstall honour guards", async () => {
     assert.equal(installedBody.agent.managed, true)
     assert.deepEqual(h.installs, ["amp"])
 
-    // claude is on PATH in the test environment, so install is refused
+    // Installing over a binary already on PATH is refused. Whether claude exists
+    // depends on the machine running the suite, so ask the same lookup the API uses
+    // instead of hardcoding an environment-specific expectation.
+    const claude = h.registry.get("claude")
     const already = await fetch(`${h.base}/api/v1/agents/claude/install`, { method: "POST", headers: authHeaders() })
-    assert.equal(already.status, 409)
+    assert.equal(already.status, claude && h.registry.binPath(claude) ? 409 : 200)
 
     const unknown = await fetch(`${h.base}/api/v1/agents/nope/install`, { method: "POST", headers: authHeaders() })
     assert.equal(unknown.status, 404)
@@ -846,6 +1050,40 @@ test("api agent install, update and uninstall honour guards", async () => {
     const updated = await fetch(`${h.base}/api/v1/agents/codex/update`, { method: "POST", headers: authHeaders() })
     assert.equal(updated.status, 200)
     assert.equal(((await updated.json()) as { message: string }).message, "updated codex")
+  })
+})
+
+test("api lists the built-in OpenCode engine beside the CLIs", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const listed = await fetch(`${h.base}/api/v1/agents`, { headers: authHeaders() })
+    assert.equal(listed.status, 200)
+    type AgentRow = { id: string; installed: boolean; installable: boolean; updateable: boolean; uninstallable: boolean }
+    const rows = ((await listed.json()) as { agents: AgentRow[] }).agents
+    const builtIn = rows.find((row) => row.id === "opencode")
+    assert.ok(builtIn, "GET /agents must offer the engine that POST /agent accepts")
+    assert.equal(builtIn.installed, true)
+    // It ships with the bot, so no client may be offered an install, update or removal
+    assert.equal(builtIn.installable, false)
+    assert.equal(builtIn.updateable, false)
+    assert.equal(builtIn.uninstallable, false)
+    assert.ok(new Set(rows.map((row) => row.id)).size === rows.length, "engine ids must stay unique")
+
+    const refused = await fetch(`${h.base}/api/v1/agents/opencode/install`, { method: "POST", headers: authHeaders() })
+    assert.equal(refused.status, 404)
+
+    // The point of listing it: a session on a CLI engine can be handed back
+    const switchTo = async (engine: string): Promise<string> => {
+      const res = await fetch(`${h.base}/api/v1/agent`, {
+        method: "POST",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ engine }),
+      })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { session: { engine: string } }
+      return body.session.engine
+    }
+    assert.equal(await switchTo("claude"), "claude")
+    assert.equal(await switchTo("opencode"), "opencode")
   })
 })
 
@@ -1614,6 +1852,113 @@ test("api assigns agent models and exposes read-only cc views", async () => {
   })
 })
 
+test("api exposes the cc view catalog and its targeted views", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const list = await fetch(`${h.base}/api/v1/cc/views`, { headers: authHeaders() })
+    assert.equal(list.status, 200)
+    const views = (await list.json()) as {
+      views: Array<{ name: string; label: string; needsTarget: boolean; targetLabel: string }>
+    }
+    // The app renders these verbatim, so every entry carries a usable title
+    assert.ok(views.views.length > 7)
+    assert.ok(views.views.every((view) => view.label.length > 0))
+    assert.equal(views.views.find((view) => view.name === "config")?.needsTarget, false)
+    const skillInfo = views.views.find((view) => view.name === "skill-info")
+    assert.equal(skillInfo?.needsTarget, true)
+    assert.equal(skillInfo?.targetLabel, "技能目录或 ID")
+
+    const session = await fetch(`${h.base}/api/v1/cc/view?name=session-show&target=abc123`, {
+      headers: authHeaders(),
+    })
+    assert.equal(session.status, 200)
+    assert.equal(((await session.json()) as { text: string }).text, "view sessions show abc123")
+
+    const prompt = await fetch(`${h.base}/api/v1/cc/view?name=prompt-show&target=review`, { headers: authHeaders() })
+    assert.equal(((await prompt.json()) as { text: string }).text, "view prompts show review")
+
+    // Network-bound views still answer through the same route
+    const discover = await fetch(`${h.base}/api/v1/cc/view?name=skills-discover`, { headers: authHeaders() })
+    assert.equal(discover.status, 200)
+
+    // A view that needs an argument says so instead of running a half command
+    const missingTarget = await fetch(`${h.base}/api/v1/cc/view?name=prompt-show`, { headers: authHeaders() })
+    assert.equal(missingTarget.status, 400)
+    assert.match(((await missingTarget.json()) as { error: string }).error, /需要提示词 ID/)
+
+    // The target can never turn into a flag of its own
+    const flagTarget = await fetch(`${h.base}/api/v1/cc/view?name=session-show&target=--help`, {
+      headers: authHeaders(),
+    })
+    assert.equal(flagTarget.status, 400)
+
+    assert.deepEqual(h.ccCalls.slice(-3), [
+      "run:sessions show abc123",
+      "run:prompts show review",
+      "run:skills discover",
+    ])
+  })
+})
+
+test("api cc token tables let the app resolve typed /cc words", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const [viewsRes, execRes] = await Promise.all([
+      fetch(`${h.base}/api/v1/cc/views`, { headers: authHeaders() }),
+      fetch(`${h.base}/api/v1/cc/exec`, { headers: authHeaders() }),
+    ])
+    const { views } = (await viewsRes.json()) as { views: Array<{ name: string; tokens: string[] }> }
+    const { commands } = (await execRes.json()) as { commands: Array<{ name: string; tokens: string[] }> }
+
+    // Every entry must carry at least one two-word token pair
+    assert.ok(views.every((v) => v.tokens.length > 0), "every cc view must expose at least one token pair")
+    assert.ok(commands.every((c) => c.tokens.length > 0), "every cc exec command must expose at least one token pair")
+
+    const providerCurrent = views.find((v) => v.name === "provider-current")
+    assert.ok(providerCurrent?.tokens.includes("provider current"), "provider-current must list its canonical pair")
+
+    const providerDelete = commands.find((c) => c.name === "provider-delete")
+    assert.ok(providerDelete?.tokens.includes("provider delete"))
+    assert.ok(providerDelete?.tokens.includes("provider del"), "provider del alias must reach the app")
+    assert.ok(providerDelete?.tokens.includes("provider rm"), "provider rm alias must reach the app")
+
+    // Primary token pairs are unique across views (no two views share the same first pair)
+    const viewPrimaries = views.map((v) => v.tokens[0])
+    assert.equal(new Set(viewPrimaries).size, viewPrimaries.length, "primary cc view token pairs must be unique")
+
+    // The app reads views first, so a pair naming both a view and a write would hide the write
+    const viewTokens = new Set(views.flatMap((view) => view.tokens))
+    const shared = commands.flatMap((command) => command.tokens).filter((token) => viewTokens.has(token))
+    assert.deepEqual(shared, [], "a token pair must not name both a view and a mutating command")
+
+    // The only known exec collision is skills-update / skills-update-all (disambiguated by needsTarget)
+    const execPrimaries = commands.map((c) => c.tokens[0])
+    const dupes = execPrimaries.filter((t, i) => execPrimaries.indexOf(t) !== i)
+    assert.deepEqual(dupes.sort(), ["skills update"], "only the skills-update collision is allowed among exec primaries")
+  })
+})
+
+test("api surfaces every Telegram /cc alias the app can stand for", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const [viewsRes, execRes] = await Promise.all([
+      fetch(`${h.base}/api/v1/cc/views`, { headers: authHeaders() }),
+      fetch(`${h.base}/api/v1/cc/exec`, { headers: authHeaders() }),
+    ])
+    const { views } = (await viewsRes.json()) as { views: Array<{ tokens: string[] }> }
+    const { commands } = (await execRes.json()) as { commands: Array<{ tokens: string[] }> }
+    const entries = [...views, ...commands]
+
+    for (const [alias, pair] of Object.entries(CC_SUB_ALIASES)) {
+      const owner = entries.find((entry) => entry.tokens.includes(`${pair[0]} ${pair[1]}`))
+      // An alias with no entry behind it would be a word Telegram answers and the App cannot
+      assert.ok(owner, `「${alias}」 resolves to 「${pair.join(" ")}」, which no cc entry runs`)
+      assert.ok(owner.tokens.includes(alias), `「${alias}」 must reach the entry running ${pair.join(" ")}`)
+    }
+
+    // A three-word shape is addressable by its full run, its pair and its alias alike
+    const repoAdd = commands.find((command) => command.name === "skills-repos-add")
+    assert.deepEqual(repoAdd?.tokens, ["skills repos add", "skills repos", "skills repo"])
+  })
+})
+
 test("api runs provider stream check, model fetch, MCP import and prompt creation", async () => {
   await withApi(async () => "ok", async (h) => {
     const stream = await fetch(`${h.base}/api/v1/cc/stream?id=p1`, { headers: authHeaders() })
@@ -1891,7 +2236,11 @@ test("api serves the shared help copy as plain text", async () => {
   await withApi(async () => "ok", async (h) => {
     const res = await fetch(`${h.base}/api/v1/help`, { headers: authHeaders() })
     assert.equal(res.status, 200)
-    const body = (await res.json()) as { sections: Array<{ id: string; title: string; text: string }> }
+    const body = (await res.json()) as {
+      sections: Array<{ id: string; title: string; text: string }>
+      commands: Array<{ command: string; description: string }>
+      aliases: Record<string, string>
+    }
     assert.deepEqual(body.sections.map((s) => s.id), ["basic", "full", "cc"])
     for (const section of body.sections) {
       assert.ok(section.title.length > 0)
@@ -1902,6 +2251,24 @@ test("api serves the shared help copy as plain text", async () => {
     assert.match(body.sections[0]!.text, /\/new/)
     assert.match(body.sections[1]!.text, /\/schedule add/)
     assert.match(body.sections[2]!.text, /\/cc provider list/)
+
+    // The app builds its "/" palette from this list, so it must be the bot's real surface
+    const names = body.commands.map((item) => item.command)
+    assert.ok(names.length > 20, `expected the full command list, got ${names.length}`)
+    assert.equal(new Set(names).size, names.length, "the command list must not repeat a name")
+    for (const name of ["agent", "model", "dir", "timezone", "remind", "cancel", "queue", "cc", "env"]) {
+      assert.ok(names.includes(name), `/${name} is missing from the command list`)
+    }
+    for (const item of body.commands) {
+      assert.match(item.command, /^[a-z][a-z0-9_]*$/, `${item.command} is not a plain command word`)
+      assert.ok(item.description.trim().length > 0, item.command)
+    }
+    // Aliases resolve to a listed command, so the app can never route to an unknown one
+    for (const [alias, target] of Object.entries(body.aliases)) {
+      assert.ok(names.includes(target), `/${alias} points at the unlisted /${target}`)
+    }
+    assert.equal(body.aliases.tz, "timezone")
+    assert.equal(body.aliases.reset, "new")
   })
 })
 
@@ -2066,4 +2433,272 @@ test("api exports history as markdown and json", async () => {
     const bad = await fetch(`${h.base}/api/v1/export?format=xml`, { headers: authHeaders() })
     assert.equal(bad.status, 400)
   })
+})
+
+/**
+ * The App decodes each of these payloads with `ignoreUnknownKeys`, so drift on either side
+ * never raises: a renamed field simply keeps its Kotlin default, and a `0` or `false` default
+ * is indistinguishable from a measurement. This walks the live responses against the field
+ * names the App's models actually declare — the closest a sandbox without an Android SDK comes
+ * to compiling both halves together.
+ */
+interface WireCase {
+  url: string
+  /** Dotted path into the response, e.g. "tasks" or "diagnostics.git". Empty for the body. */
+  pick: string
+  model: string
+  /** `pick` is a list: every element is compared, not just the first row. */
+  list?: boolean
+}
+
+/**
+ * Objects the App reaches through a parent model. Walking them is what catches a field that
+ * only appears in a nested row — an engine's model list, a peer's session, a task's media.
+ */
+const NESTED_FIELDS: Record<string, Array<{ field: string; model: string }>> = {
+  Status: [{ field: "usageToday", model: "UsageDay" }, { field: "activeTask", model: "Task" }],
+  Usage: [{ field: "today", model: "UsageDay" }],
+  Task: [{ field: "media", model: "TaskMedia" }],
+  Session: [{ field: "modelRef", model: "ModelRef" }],
+  Peer: [{ field: "session", model: "Session" }, { field: "activity", model: "PeerActivity" }],
+  AgentInfo: [{ field: "models", model: "AgentModelOption" }],
+  ModelChoices: [{ field: "models", model: "ModelEntry" }],
+  Reminder: [{ field: "repeat", model: "Repeat" }],
+  Schedule: [{ field: "repeat", model: "Repeat" }],
+  DailyReport: [
+    { field: "totals", model: "UsageDay" },
+    { field: "byChat", model: "DailyReportSource" },
+    { field: "trend", model: "UsageTrendDay" },
+  ],
+  DailyReportSource: [{ field: "usage", model: "UsageDay" }],
+}
+
+function pickPath(payload: unknown, pick: string): unknown {
+  if (!pick) return payload
+  let value: unknown = payload
+  for (const segment of pick.split(".")) {
+    if (value === null || typeof value !== "object") return undefined
+    value = (value as Record<string, unknown>)[segment]
+  }
+  return value
+}
+
+test("api responses fill every field the App's models decode", async () => {
+  // One task stays running while the sweep reads /status, so `activeTask` is a real object
+  // instead of a key the JSON encoder quietly drops.
+  let release: (() => void) | undefined
+  await withApi(
+    async (_key, _engine, text) => {
+      if (!text.includes("挂起")) return "ok"
+      return new Promise<string>((resolve) => {
+        release = () => resolve("回复：挂起")
+      })
+    },
+    async (h) => {
+      const get = async (url: string): Promise<unknown> => {
+        const res = await fetch(`${h.base}/api/v1/${url}`, { headers: authHeaders() })
+        assert.equal(res.status, 200, `GET /${url} is not answering, so its fields cannot be compared`)
+        return res.json()
+      }
+      const post = async (url: string, body: unknown): Promise<unknown> => {
+        const res = await fetch(`${h.base}/api/v1/${url}`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+        assert.ok(res.status >= 200 && res.status < 300, `POST /${url} must accept the same body the App sends (${res.status})`)
+        return res.json()
+      }
+
+      try {
+        // Every case below needs a row, so seed one of each list the App renders
+        await post("task", { text: "契约检查" })
+        // History and usage are written when a task settles, not when it is accepted
+        for (let i = 0; i < 100; i++) {
+          const body = (await get("history")) as { history: unknown[] }
+          if (body.history?.length) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        const submitted = (await post("task", { text: "挂起的契约检查" })) as { task: unknown }
+        await post("reminders", { text: "30m 喝水" })
+        await post("schedules", { text: "30m 检查服务器" })
+        await post("aliases", { name: "review", expansion: "审查当前改动" })
+        await post("proxy", { url: "socks5://127.0.0.1:1080", name: "测试代理" })
+
+        const cases: WireCase[] = [
+          { url: "health", pick: "", model: "Health" },
+          { url: "session", pick: "", model: "Session" },
+          { url: "status", pick: "", model: "Status" },
+          { url: "info", pick: "", model: "ServerInfo" },
+          // GET /dir answers with the view itself; POST answers with { ok, message, dir }
+          { url: "dir", pick: "", model: "DirInfo" },
+          { url: "usage", pick: "usage", model: "Usage" },
+          { url: "usage", pick: "trend", model: "UsageTrendDay", list: true },
+          { url: "usage/report", pick: "", model: "DailyReport" },
+          { url: "task", pick: "task", model: "Task" },
+          { url: "history", pick: "history", model: "HistoryEntry", list: true },
+          { url: "reminders", pick: "reminders", model: "Reminder", list: true },
+          { url: "schedules", pick: "schedules", model: "Schedule", list: true },
+          { url: "aliases", pick: "aliases", model: "AliasEntry", list: true },
+          { url: "proxy", pick: "", model: "ProxyList" },
+          { url: "proxy", pick: "proxies", model: "ProxyInfo", list: true },
+          { url: "access", pick: "", model: "AccessInfo" },
+          { url: "config", pick: "", model: "ConfigView" },
+          { url: "help", pick: "", model: "HelpView" },
+          { url: "help", pick: "sections", model: "HelpSection", list: true },
+          { url: "help", pick: "commands", model: "BotCommand", list: true },
+          { url: "agents", pick: "agents", model: "AgentInfo", list: true },
+          // Both engine kinds answer /models, and their entry shapes differ
+          { url: "models", pick: "models", model: "ModelChoices" },
+          { url: "models?engine=opencode", pick: "models", model: "ModelChoices" },
+          { url: "peers", pick: "peers", model: "Peer", list: true },
+          { url: "ops/diag", pick: "diagnostics", model: "Diagnostics" },
+          { url: "ops/service", pick: "service", model: "ServiceStatus" },
+          { url: "ops/logs?source=bot&lines=20", pick: "", model: "LogTail" },
+          { url: "cc", pick: "", model: "CcStatus" },
+          { url: "cc/views", pick: "views", model: "CcViewSpec", list: true },
+          { url: "cc/exec", pick: "commands", model: "CcExecCommand", list: true },
+        ]
+
+        const problems: string[] = []
+        const compared = new Set<string>()
+
+        const compare = (value: unknown, model: string, label: string): void => {
+          if (value === null || typeof value !== "object" || Array.isArray(value)) {
+            problems.push(`${label}: no object to compare (got ${JSON.stringify(value)})`)
+            return
+          }
+          compared.add(model)
+          const fields = appModelShape(model)
+          const declared = new Set(fields.map((field) => field.name))
+          const sent = Object.keys(value as Record<string, unknown>)
+          const dropped = sent.filter((key) => !declared.has(key))
+          const silent = fields.filter((field) => field.required && !sent.includes(field.name)).map((field) => field.name)
+          if (dropped.length) problems.push(`${model} (${label}): server sends ${dropped.join(", ")} the App never decodes`)
+          if (silent.length) problems.push(`${model} (${label}): App requires ${silent.join(", ")} but the server omits it (reads back as zero)`)
+          for (const nested of NESTED_FIELDS[model] ?? []) {
+            const child = (value as Record<string, unknown>)[nested.field]
+            if (Array.isArray(child)) {
+              child.forEach((row, index) => compare(row, nested.model, `${label}.${nested.field}.${index}`))
+            } else if (child !== undefined && child !== null) {
+              compare(child, nested.model, `${label}.${nested.field}`)
+            }
+          }
+        }
+
+        for (const wire of cases) {
+          const payload = wire.url === "task" ? submitted : await get(wire.url)
+          const value = pickPath(payload, wire.pick)
+          if (wire.list) {
+            if (!Array.isArray(value) || value.length === 0) {
+              problems.push(`${wire.url}#${wire.pick}: expected rows to compare, got ${JSON.stringify(value)}`)
+              continue
+            }
+            value.forEach((row, index) => compare(row, wire.model, `${wire.url}#${wire.pick}.${index}`))
+          } else {
+            compare(value, wire.model, `${wire.url}#${wire.pick || "(body)"}`)
+          }
+        }
+        assert.ok(compared.size >= 25, `the sweep must compare real models, got ${compared.size}`)
+        assert.deepEqual(problems, [], `App models and API payloads disagree:\n${problems.join("\n")}`)
+      } finally {
+        release?.()
+      }
+    },
+  )
+})
+
+test("api daily report aggregates every chat and renders the push text", async () => {
+  await withApi(
+    async () => "回复",
+    async (h) => {
+      // Two surfaces the report must merge: a Telegram chat and the App session
+      h.usage.record("tg:123", { engine: "opencode", ms: 60_000, outcome: "ok" })
+      h.usage.record("tg:123", { engine: "opencode", ms: 30_000, outcome: "failed" })
+      h.usage.record("api:app", { engine: "claude", ms: 90_000, outcome: "ok" })
+
+      const res = await fetch(`${h.base}/api/v1/usage/report`, { headers: authHeaders() })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as {
+        day: string
+        totals: { tasks: number; ok: number; failed: number }
+        byChat: Array<{ key: string; source: string; usage: { tasks: number } }>
+        trend: Array<{ tasks: number }>
+        text: string
+      }
+      assert.match(body.day, /^\d{4}-\d{2}-\d{2}$/)
+      assert.deepEqual(
+        { tasks: body.totals.tasks, ok: body.totals.ok, failed: body.totals.failed },
+        { tasks: 3, ok: 2, failed: 1 },
+      )
+      // Sources are labelled for display; api:app must not leak as a raw key
+      const sources = body.byChat.map((row) => `${row.source}:${row.usage.tasks}`).sort()
+      assert.deepEqual(sources, ["App:1", "Telegram 123:2"])
+      assert.equal(body.trend.length, 7)
+      assert.equal(body.trend[6].tasks, 3)
+      assert.match(body.text, /每日用量报告/)
+      assert.match(body.text, /今日任务：3/)
+    },
+  )
+})
+
+test("api snoozes a pending one-shot reminder by id", async () => {
+  await withApi(
+    async () => "回复",
+    async (h) => {
+      const post = async (url: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
+        const res = await fetch(`${h.base}/api/v1/${url}`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        })
+        return { status: res.status, body: (await res.json()) as Record<string, unknown> }
+      }
+
+      const created = await post("reminders", { text: "30m 喝水" })
+      const reminder = created.body.reminder as { id: number }
+      assert.ok(reminder?.id, "the created reminder carries an id")
+
+      const snoozed = await post(`reminders/${reminder.id}/snooze`, { minutes: 45 })
+      assert.equal(snoozed.status, 200)
+      const updated = snoozed.body.reminder as { id: number; dueAt: number }
+      assert.equal(updated.id, reminder.id)
+      assert.ok(updated.dueAt > Date.now() + 40 * 60_000, "dueAt moved about 45 minutes out")
+
+      // The list reflects the new time right away
+      const list = (await (await fetch(`${h.base}/api/v1/reminders`, { headers: authHeaders() })).json()) as {
+        reminders: Array<{ id: number; dueAt: number }>
+      }
+      assert.equal(list.reminders.find((item) => item.id === reminder.id)?.dueAt, updated.dueAt)
+
+      const unknown = await post("reminders/9999/snooze", { minutes: 10 })
+      assert.equal(unknown.status, 400)
+      const badMinutes = await post(`reminders/${reminder.id}/snooze`, { minutes: 0 })
+      assert.equal(badMinutes.status, 400)
+      const repeat = await post("reminders", { text: "every 30m 起身" })
+      const repeatReminder = repeat.body.reminder as { id: number }
+      const repeatSnooze = await post(`reminders/${repeatReminder.id}/snooze`, { minutes: 10 })
+      assert.equal(repeatSnooze.status, 400)
+    },
+  )
+})
+
+test("identity and config endpoints never leak the token or secret values", async () => {
+  await withApi(
+    async () => "回复",
+    async (h) => {
+      // 这些端点是最容易被顺手加字段的;一旦有人把凭据塞进载荷,这里立刻红
+      for (const url of ["health", "info", "session", "peers", "status", "config", "usage", "usage/report"]) {
+        const res = await fetch(`${h.base}/api/v1/${url}`, { headers: authHeaders() })
+        assert.equal(res.status, 200, `GET /${url} should answer`)
+        const text = await res.text()
+        assert.ok(!text.includes(TOKEN), `GET /${url} leaked the API token`)
+        // 密钥形态的值（32 字节 base64）也不应出现
+        assert.doesNotMatch(text, /["':][A-Za-z0-9+/]{43}=/, `GET /${url} looks like it leaked a base64 secret`)
+      }
+      // /config 的密钥条目只带 secret 标记,值字段必须缺席
+      const config = (await (await fetch(`${h.base}/api/v1/config`, { headers: authHeaders() })).json()) as {
+        config?: { entries?: Array<{ key: string; secret?: boolean; value?: string }> }
+      }
+      for (const entry of config.config?.entries ?? []) {
+        if (entry.secret) assert.equal(entry.value, undefined, `secret entry ${entry.key} must not carry a value`)
+      }
+    },
+  )
 })

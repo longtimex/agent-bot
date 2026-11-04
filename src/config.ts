@@ -57,6 +57,17 @@ export interface BotConfig {
     /** Push time "HH:MM" (24 h), resolved in REMINDER_TIMEZONE. */
     time: string
   }
+  /** Optional OpenAI-compatible speech-to-text for voice notes; present only when STT_BASE_URL is set. */
+  stt?: {
+    baseUrl: string
+    apiKey?: string
+    model: string
+    language?: string
+  }
+  /** Message-level encryption for the App API (AES-256-GCM under a pairing key). */
+  encryption: {
+    enabled: boolean
+  }
 }
 
 /** A startup configuration problem: the message is the guidance, so no stack is printed. */
@@ -194,6 +205,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       enabled: bool(env.USAGE_DAILY_REPORT, false),
       time: validateReportTime(pick(env.USAGE_DAILY_REPORT_TIME) ?? "21:00"),
     },
+    stt: parseStt(env),
+    encryption: {
+      enabled: bool(env.API_ENCRYPTION, false),
+    },
+  }
+}
+
+/** STT stays off until STT_BASE_URL is set; the model then defaults to whisper-1. */
+function parseStt(env: NodeJS.ProcessEnv): BotConfig["stt"] {
+  const baseUrl = pick(env.STT_BASE_URL)
+  if (!baseUrl) return undefined
+  if (!/^https?:\/\//.test(baseUrl)) {
+    throw new StartupConfigError(`拒绝启动：STT_BASE_URL 无效（${baseUrl}）。请以 http:// 或 https:// 开头。`)
+  }
+  return {
+    baseUrl,
+    apiKey: pick(env.STT_API_KEY),
+    model: pick(env.STT_MODEL) ?? "whisper-1",
+    language: pick(env.STT_LANGUAGE),
   }
 }
 

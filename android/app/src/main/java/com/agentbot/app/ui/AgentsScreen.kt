@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,34 @@ fun AgentsScreen(vm: AppViewModel) {
     var pending by remember { mutableStateOf<PendingAgentAction?>(null) }
     val busy = vm.agentBusy != null
 
+    // The request waits for the engine list, because the guards below read its flags
+    LaunchedEffect(vm.agentConfirmRequested, vm.agents.size) {
+        val request = vm.agentConfirmRequested ?: return@LaunchedEffect
+        if (vm.agents.isEmpty()) {
+            vm.refreshAgents()
+            return@LaunchedEffect
+        }
+        vm.clearAgentConfirmRequest()
+        val (engine, action) = request
+        val agent = vm.agents.firstOrNull { it.id == engine || it.label.equals(engine, ignoreCase = true) }
+        if (agent == null) {
+            vm.showToast("未识别的 Agent CLI：$engine，可发送 /agents 查看可管理列表")
+            return@LaunchedEffect
+        }
+        // The same refusals Telegram shows before it ever offers a confirm button
+        val refusal = when {
+            action == "install" && agent.installed -> "${agent.label} 已安装，无需重复安装"
+            action == "install" && !agent.installable ->
+                "${agent.label} 暂不支持自动安装${agent.install?.let { "，安装方式：$it" } ?: ""}"
+            action != "install" && !agent.managed ->
+                "${agent.label} 不是由 Bot 安装的，无法自动${if (action == "update") "更新" else "卸载"}"
+            action == "uninstall" && agent.id == vm.session?.engine ->
+                "当前正在使用 ${agent.label}，请先切换到其他引擎再卸载"
+            else -> null
+        }
+        if (refusal != null) vm.showToast(refusal) else pending = PendingAgentAction(agent, action)
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
@@ -55,6 +84,14 @@ fun AgentsScreen(vm: AppViewModel) {
                 Text("刷新", modifier = Modifier.padding(start = 4.dp))
             }
         }
+
+        // Telegram's /agent panel names the current engine, so the management page does too
+        Text(
+            "当前引擎：${vm.session?.engineLabel ?: vm.session?.engine ?: "未知"} · 推荐使用 OpenCode（多模型、工具调用、附件收发）",
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 20.dp),
+        )
 
         if (busy) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
@@ -111,6 +148,7 @@ fun AgentsScreen(vm: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             items(vm.agents, key = { it.id }) { agent ->
+                val current = agent.id == vm.session?.engine
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                     Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -121,20 +159,36 @@ fun AgentsScreen(vm: AppViewModel) {
                             )
                             Text(
                                 when {
+                                    current -> "当前引擎"
                                     agent.installed && agent.managed -> "Bot 托管"
                                     agent.installed -> "已安装"
                                     else -> "未安装"
                                 },
-                                color = if (agent.installed) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    TextSecondary
+                                color = when {
+                                    current -> MaterialTheme.colorScheme.primary
+                                    agent.installed -> TextSecondary
+                                    else -> MaterialTheme.colorScheme.error
                                 },
                                 style = MaterialTheme.typography.labelMedium,
                             )
                         }
                         agent.desc?.let {
                             Text(it, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                        }
+                        // The two things Telegram explains after a switch: context and models
+                        val capability = listOfNotNull(
+                            agent.sessionMode?.let { if (agent.stateless) "每次全新会话" else "保留上下文" },
+                            agent.supportsModel?.let { if (it) "可切换模型" else "模型由 CLI 配置" },
+                        ).joinToString(" · ")
+                        if (capability.isNotBlank()) {
+                            Text(capability, color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                        }
+                        if (agent.aliases.isNotEmpty()) {
+                            Text(
+                                "也可发送 /engine ${agent.id} 或 ${agent.aliases.take(3).joinToString("、")}",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
                         }
                         agent.defaultModel?.let {
                             Text(
@@ -153,6 +207,12 @@ fun AgentsScreen(vm: AppViewModel) {
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            // Every engine the bot can run is tappable here, as in Telegram's panel
+                            if (!current) {
+                                TextButton(onClick = { vm.switchAgent(agent.id) }) {
+                                    Text(if (agent.installed) "🔁 使用此引擎" else "⚠️ 仍要使用")
+                                }
+                            }
                             if (agent.installable) {
                                 TextButton(
                                     enabled = !busy,

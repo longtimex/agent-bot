@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   renameSync,
@@ -49,6 +50,8 @@ export interface OpsResult {
   ok: boolean
   message: string
   steps: OpsStep[]
+  /** Absolute path of the artifact the operation produced (data backup). */
+  file?: string
 }
 
 export interface OpsDiagnostics {
@@ -65,6 +68,8 @@ export interface OpsDiagnostics {
   opencodeLog: { path: string; bytes: number }
   disk?: { freeBytes: number; totalBytes: number }
   memory: { freeBytes: number; totalBytes: number }
+  /** Epoch ms of the newest archive in data/backups/, undefined when never backed up. */
+  lastBackupAt?: number
 }
 
 export interface OpsLogResult {
@@ -208,7 +213,17 @@ const ENV_RULES: Record<string, EnvRule> = {
     hint: "HH:MM（24 小时制，按 REMINDER_TIMEZONE）",
     validate: (value) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? undefined : "时间格式无效，应为 HH:MM"),
   },
+  STT_BASE_URL: urlRule(true),
+  STT_MODEL: {
+    hint: "转写模型名（如 whisper-1）",
+    validate: (value) => (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) ? undefined : "模型名格式无效"),
+  },
+  STT_LANGUAGE: {
+    hint: "语言代码（如 zh，可留空）",
+    validate: (value) => (/^[A-Za-z]{2,8}(-[A-Za-z0-9]+)*$/.test(value) ? undefined : "语言代码格式无效"),
+  },
   MEDIA_ALLOW_PRIVATE_URLS: boolRule,
+  API_ENCRYPTION: boolRule,
   TELEGRAM_ALLOW_ALL_USERS: boolRule,
   TELEGRAM_ALLOW_USERS: { hint: "逗号分隔的 Telegram 用户 ID（请用 /access 修改）", validate: allowUsersRule },
   OPENCODE_URL: urlRule(false),
@@ -362,10 +377,79 @@ export class OpsService {
       opencodeLog: { path: this.#opencodeLogPath, bytes: this.#fileSize(this.#opencodeLogPath) },
       disk,
       memory: { freeBytes: freemem(), totalBytes: totalmem() },
+      // 恒为数字（0 = 从未备份）：编码器会丢弃 undefined,而 App 模型按必填解码
+      lastBackupAt: this.#lastBackupAt() ?? 0,
+    }
+  }
+
+  /** Newest archive's mtime from data/backups/; undefined when never backed up. */
+  #lastBackupAt(): number | undefined {
+    const backupDir = join(this.#dataDir, "backups")
+    if (!existsSync(backupDir)) return undefined
+    try {
+      const newest = readdirSync(backupDir)
+        .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz"))
+        .sort()
+        .pop()
+      return newest ? statSync(join(backupDir, newest)).mtimeMs : undefined
+    } catch {
+      return undefined
     }
   }
 
   /** Dry-run update check: fetch upstream and count new commits; changes nothing locally. */
+  /**
+   * Packs the JSON state stores into data/backups/ (latest 5 kept) for migration
+   * or safekeeping. The pairing token is deliberately excluded: it is a secret,
+   * and a fresh machine regenerates one on first start anyway.
+   */
+  async backupData(): Promise<OpsResult & { file?: string }> {
+    if (!this.#which("tar")) return { ok: false, message: "未找到 tar，无法打包备份。", steps: [] }
+    const steps: OpsStep[] = []
+
+    // 配对令牌与消息加密密钥都属于秘密，不进备份：令牌在新机自动重生，加密密钥
+    // 重新扫码配对即可获得——把任何一个打进 tar.gz 都等于把它们发到聊天里。
+    // A missing/unreadable data dir simply means there is nothing to back up yet.
+    const files = existsSync(this.#dataDir)
+      ? readdirSync(this.#dataDir).filter(
+          (name) => name.endsWith(".json") && name !== "api-token.json" && name !== "api-enc-key.json",
+        )
+      : []
+    if (files.length === 0) {
+      return { ok: false, message: "data 目录里还没有可备份的状态文件。", steps }
+    }
+    const backupDir = join(this.#dataDir, "backups")
+    mkdirSync(backupDir, { recursive: true })
+    const now = new Date()
+    const pad = (value: number, width = 2): string => String(value).padStart(width, "0")
+    // Milliseconds in the name: two backups in the same second must not overwrite each other
+    const out = join(
+      backupDir,
+      `backup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}${pad(now.getMilliseconds(), 3)}.tar.gz`,
+    )
+    const tar = await this.#runCommand("tar", ["-czf", out, "-C", this.#dataDir, ...files], 60_000)
+    steps.push(this.#step("打包状态文件", tar))
+    if (tar.code !== 0) {
+      return { ok: false, message: "打包失败，请根据输出排查。", steps }
+    }
+
+    // Keep the newest 5 archives so long-running bots do not fill the disk
+    const archives = readdirSync(backupDir)
+      .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz"))
+      .sort()
+    for (const stale of archives.slice(0, Math.max(0, archives.length - 5))) {
+      unlinkSync(join(backupDir, stale))
+    }
+
+    const kb = (statSync(out).size / 1024).toFixed(1)
+    return {
+      ok: true,
+      file: out,
+      message: `📦 已备份 ${files.length} 个状态文件（${kb} KB）。配对令牌未包含：新机器首次启动会自动重新生成。`,
+      steps,
+    }
+  }
+
   async checkUpdate(): Promise<OpsResult> {
     if (!this.#which("git")) return { ok: false, message: "未找到 git，无法检查更新。", steps: [] }
     const steps: OpsStep[] = []

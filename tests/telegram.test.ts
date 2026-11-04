@@ -15,7 +15,8 @@ import { Opencode, OpencodeError } from "../src/opencode.js"
 import { OpsService } from "../src/ops.js"
 import { ProxyService } from "../src/proxy.js"
 import { SessionStore } from "../src/store.js"
-import { BOT_MENU_COMMANDS, HELP_FULL, parseProviderAdd, pruneChatState, TelegramBridge } from "../src/telegram.js"
+import { HELP_FULL, parseProviderAdd, pruneChatState, TelegramBridge } from "../src/telegram.js"
+import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS, isBotCommand } from "../src/help.js"
 
 interface ApiCall {
   method: string
@@ -1882,6 +1883,16 @@ test("the Telegram autocomplete menu stays in sync with /help full", () => {
   assert.deepEqual(missing, [], `missing from the Telegram menu: ${missing.join(", ")}`)
   const phantom = names.filter((name) => !documented.has(name) && !shortcuts.has(name))
   assert.deepEqual(phantom, [], `absent from /help full: ${phantom.join(", ")}`)
+
+  // Aliases are the other half of what the bot answers; the HTTP API sends both
+  // lists so the App's "/" handling covers the same words as Telegram's
+  for (const [alias, target] of Object.entries(BOT_COMMAND_ALIASES)) {
+    assert.match(alias, /^[a-z][a-z0-9_]{0,31}$/, `${alias} is not a valid command name`)
+    assert.ok(names.includes(target), `/${alias} points at the unlisted /${target}`)
+    assert.ok(isBotCommand(`/${alias}`, target), `/${alias} must resolve to /${target}`)
+    assert.ok(isBotCommand(`/${target}`, target), `/${target} must resolve to itself`)
+  }
+  assert.equal(isBotCommand("/model", "timezone"), false)
 })
 
 test("parseProviderAdd reads the friendly key=value form", () => {

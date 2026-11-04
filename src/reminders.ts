@@ -411,6 +411,24 @@ export class ReminderStore {
     return removed
   }
 
+  /**
+   * Pushes a pending one-shot reminder `minutes` into the future (the App's
+   * snooze). Repeating reminders keep their schedule and are refused, matching
+   * the Telegram delivery buttons which only target one-shots.
+   */
+  postpone(chatId: number, id: number, minutes: number, now: number): Reminder | undefined {
+    const index = this.#reminders.findIndex((item) => item.id === id && item.chatId === chatId)
+    if (index < 0) return undefined
+    const item = this.#reminders[index]!
+    if (item.repeat) return undefined
+    this.#assertWritable()
+    item.dueAt = now + minutes * 60_000
+    item.attempts = undefined
+    item.retryAt = undefined
+    this.#save()
+    return { ...item }
+  }
+
   takeDue(now: number): Reminder[] {
     const isDue = (item: Reminder): boolean =>
       !item.runningAt && item.dueAt <= now && (item.retryAt ?? 0) <= now
@@ -567,6 +585,21 @@ export class ReminderService {
       throw new Error(`每个会话最多设置 ${MAX_PER_CHAT} 条提醒，请先取消部分提醒。`)
     }
     return this.#store.add(chatId, userId, text, now + minutes * 60_000)
+  }
+
+  /**
+   * App-side snooze: postpones a pending one-shot reminder by `minutes`, so the
+   * next ring is exactly that much later and the list shows the new time.
+   */
+  postpone(chatId: number, id: number, minutes: number, now = Date.now()): Reminder {
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60 * 24 * 7) {
+      throw new Error("稍后提醒的时长需在 1 分钟到 7 天之间。")
+    }
+    const postponed = this.#store.postpone(chatId, id, Math.round(minutes), now)
+    if (!postponed) {
+      throw new Error(`提醒 #${id} 不存在、已触发或为重复提醒。`)
+    }
+    return postponed
   }
 
   start(): void {

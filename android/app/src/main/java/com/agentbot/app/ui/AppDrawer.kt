@@ -66,16 +66,16 @@ fun AppDrawer(current: Screen, onNavigate: (Screen) -> Unit, onNewChat: () -> Un
             DrawerItem(Icons.Filled.Notifications, "提醒", current is Screen.Reminders) { onNavigate(Screen.Reminders) }
             DrawerItem(Icons.Filled.Schedule, "定时任务", current is Screen.Schedules) { onNavigate(Screen.Schedules) }
             DrawerItem(Icons.Filled.List, "任务队列", current is Screen.Queue) { onNavigate(Screen.Queue) }
+            DrawerItem(Icons.Filled.Info, "运行状态", current is Screen.Status) { onNavigate(Screen.Status) }
             DrawerItem(Icons.Filled.Tune, "会话设置", current is Screen.Session) { onNavigate(Screen.Session) }
             DrawerItem(Icons.Filled.Bolt, "快捷指令", current is Screen.Aliases) { onNavigate(Screen.Aliases) }
-            DrawerItem(Icons.Filled.Lock, "访问白名单", current is Screen.Access) { onNavigate(Screen.Access) }
             DrawerItem(Icons.Filled.Extension, "引擎管理", current is Screen.Agents) { onNavigate(Screen.Agents) }
             DrawerItem(Icons.Filled.Memory, "模型管理", current is Screen.Models) { onNavigate(Screen.Models) }
             DrawerItem(Icons.Filled.SwapHoriz, "cc-switch", current is Screen.Cc) { onNavigate(Screen.Cc) }
+            DrawerItem(Icons.Filled.Lock, "访问白名单", current is Screen.Access) { onNavigate(Screen.Access) }
+            DrawerItem(Icons.Filled.Public, "网络代理", current is Screen.Proxy) { onNavigate(Screen.Proxy) }
             DrawerItem(Icons.Filled.Build, "配置项", current is Screen.Config) { onNavigate(Screen.Config) }
             DrawerItem(Icons.Filled.Terminal, "运维中心", current is Screen.Ops) { onNavigate(Screen.Ops) }
-            DrawerItem(Icons.Filled.Public, "网络代理", current is Screen.Proxy) { onNavigate(Screen.Proxy) }
-            DrawerItem(Icons.Filled.Info, "运行状态", current is Screen.Status) { onNavigate(Screen.Status) }
             DrawerItem(Icons.Filled.Help, "帮助", current is Screen.Help) { onNavigate(Screen.Help) }
             Spacer(modifier = Modifier.height(8.dp))
             DrawerItem(Icons.Filled.Settings, "设置", current is Screen.Settings) { onNavigate(Screen.Settings) }

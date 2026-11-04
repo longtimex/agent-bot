@@ -1,14 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import { readFileSync, statSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { readFileSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { normalizeWorkDirInput } from "./agentCli.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
-import type { AgentCliProfile } from "./agentCli.js"
 import { isTextAttachment, pruneInbox, readTextAttachment, saveAttachment, type AttachmentKind, type SavedAttachment } from "./attachments.js"
 import { buildAttachmentSections, MAX_ATTACH_TOTAL_BYTES } from "./attachmentInput.js"
-import { AVAILABLE_MODELS, type ModelInfo } from "./models.js"
+import { applyStt } from "./stt.js"
+import { decodeEncKey, decryptPayload, encryptPayload, ENC_HEADER, ENC_VERSION, randomEncKey } from "./apiCrypto.js"
+import { clampLimit, mimeForName, res_attachment_binary } from "./apiHttp.js"
+import type { ModelInfo } from "./models.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 import { callEngine, defaultOpencodeModel, resolveOpencodeModel, type EngineCallDeps } from "./engineCall.js"
 import {
@@ -24,22 +24,38 @@ import {
   type CcSwitchService,
 } from "./ccswitch.js"
 import type { Logger } from "./logger.js"
-import type { Reminder, ReminderService } from "./reminders.js"
-import { scheduleTargetLabel } from "./scheduler.js"
-import type { ScheduleService, ScheduledTask } from "./scheduler.js"
+import type { ReminderService } from "./reminders.js"
+import type { ScheduleService } from "./scheduler.js"
+import {
+  routeAccess as routeAccessApi,
+  routeAliases as routeAliasesApi,
+  routeConfig as routeConfigApi,
+  routeDir as routeDirApi,
+  routePeers,
+  routeProxy as routeProxyApi,
+  routeReminders as routeRemindersApi,
+  routeSchedules as routeSchedulesApi,
+  routeTimezone as routeTimezoneApi,
+  routeUsageHistory as routeUsageHistoryApi,
+  agentView,
+  agentsView,
+  modelsView,
+  customModelView,
+  type PersonalRouteDeps,
+} from "./apiPersonal.js"
 import type { SessionStore } from "./store.js"
 import type { UsageOutcome, UsageStore } from "./usage.js"
-import { formatHistoryMarkdown, type TaskHistoryStore } from "./history.js"
-import { helpSections } from "./help.js"
+import type { TaskHistoryStore } from "./history.js"
+import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS, CC_SUB_ALIASES, helpSections } from "./help.js"
 import { mediaLabel, parseReply, resolveMedia, type MediaKind } from "./media.js"
 import type { AgentCliService } from "./agentCli.js"
 import type { PromptFile } from "./opencode.js"
 import type { ResolvedModel } from "./engineCall.js"
 import type { BotConfig } from "./config.js"
 import type { Opencode } from "./opencode.js"
-import { OPS_COMMAND_MANAGED_KEYS, OPS_ENV_KEYS, type OpsResult, type OpsService } from "./ops.js"
-import type { AliasEntry, AliasStore } from "./aliases.js"
-import { maskProxyUrl, type ProxyRecord, type ProxyService } from "./proxy.js"
+import { type OpsResult, type OpsService } from "./ops.js"
+import type { AliasStore } from "./aliases.js"
+import type { ProxyService } from "./proxy.js"
 
 const API_PREFIX = "/api/v1"
 // Attachment uploads are base64 on the same endpoint: a 15MB batch inflates
@@ -50,40 +66,8 @@ const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 /** Finished task records kept for polling; the queue itself never grows past the per-key chain. */
 const MAX_TASK_RECORDS = 200
-const MEDIA_MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  bmp: "image/bmp",
-  mp3: "audio/mpeg",
-  ogg: "audio/ogg",
-  oga: "audio/ogg",
-  wav: "audio/wav",
-  m4a: "audio/mp4",
-  mp4: "video/mp4",
-  webm: "video/webm",
-  mov: "video/quicktime",
-  pdf: "application/pdf",
-  txt: "text/plain; charset=utf-8",
-  md: "text/markdown; charset=utf-8",
-  csv: "text/csv; charset=utf-8",
-  json: "application/json",
-  zip: "application/zip",
-}
 
-function mimeForName(name: string): string {
-  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : ""
-  return MEDIA_MIME[ext] ?? "application/octet-stream"
-}
-
-function clampLimit(raw: string | null, fallback: number, max: number): number {
-  // A garbage value must fall back to the default: NaN would slice the list empty.
-  const value = Number(raw?.trim() || fallback)
-  return Math.min(Math.max(Number.isFinite(value) ? Math.floor(value) : fallback, 1), max)
-}
+/** HTTP helpers live in apiHttp.ts so the route split can grow without re-plumbing. */
 
 /** Session search text is free-form, so it gets a looser check than an ID. */
 function assertSafeQuery(raw: string, label: string): string {
@@ -96,15 +80,81 @@ function assertSafeQuery(raw: string, label: string): string {
   return value
 }
 
-/** Read-only `/cc` views the app may request by name; writes stay restricted to typed routes. */
-const CC_VIEW_COMMANDS: Readonly<Record<string, string[]>> = {
-  config: ["config", "show"],
-  sessions: ["sessions", "list"],
-  auth: ["auth", "status"],
-  skills: ["skills", "list"],
-  failover: ["failover", "show"],
-  daemon: ["daemon", "status"],
-  settings: ["settings", "show"],
+/**
+ * The word runs a typed `/cc …` can use for one argv shape: the group and subcommand
+ * it really runs — a third literal word included, for shapes like `skills repos add` —
+ * plus every Telegram alias that resolves to them (`provider rm` for `provider delete`).
+ * Derived from the tables below, so the App answers a typed command without hardcoding
+ * a single cc-switch word.
+ */
+function ccPhrases(argv: string[]): string[] {
+  const words = argv.filter((part) => part.length > 0 && !part.startsWith("-")).slice(0, 3)
+  const [group, sub, third] = words
+  if (!group || !sub) return []
+  const pair = `${group} ${sub}`
+  const phrases = third ? [`${pair} ${third}`, pair] : [pair]
+  for (const [alias, target] of Object.entries(CC_SUB_ALIASES)) {
+    if (target[0] === group && target[1] === sub) phrases.push(alias)
+  }
+  return phrases
+}
+
+interface CcViewSpec {
+  label: string
+  /** Build the fixed argv; `target` is already validated with assertSafeId. */
+  args: (target: string) => string[]
+  needsTarget?: boolean
+  targetLabel?: string
+  /** Network-bound (repos, marketplace), so it needs the long cc-switch timeout. */
+  long?: boolean
+}
+
+/**
+ * Read-only `/cc` views, mirroring what Telegram can print. The app renders this
+ * table, so a new view needs no app release; argv stays built here.
+ */
+const CC_VIEWS: Readonly<Record<string, CcViewSpec>> = {
+  config: { label: "cc-switch 配置", args: () => ["config", "show"] },
+  sessions: { label: "会话列表", args: () => ["sessions", "list"] },
+  "session-show": {
+    label: "会话详情",
+    args: (id) => ["sessions", "show", id],
+    needsTarget: true,
+    targetLabel: "会话 ID 或 provider/ID",
+  },
+  "session-messages": {
+    label: "会话消息",
+    args: (id) => ["sessions", "messages", id],
+    needsTarget: true,
+    targetLabel: "会话 ID 或 provider/ID",
+  },
+  "provider-current": { label: "当前 Provider", args: () => ["provider", "current"] },
+  auth: { label: "认证状态", args: () => ["auth", "status"] },
+  "auth-list": { label: "ChatGPT 账号列表", args: () => ["auth", "list"] },
+  skills: { label: "技能列表", args: () => ["skills", "list"] },
+  "skill-info": {
+    label: "技能详情",
+    args: (name) => ["skills", "info", name],
+    needsTarget: true,
+    targetLabel: "技能目录或 ID",
+  },
+  "skills-discover": { label: "仓库可用技能", args: () => ["skills", "discover"], long: true },
+  "skills-updates": { label: "检查技能更新", args: () => ["skills", "check-updates"], long: true },
+  failover: { label: "故障转移状态", args: () => ["failover", "show"] },
+  "failover-list": { label: "故障转移队列", args: () => ["failover", "list"] },
+  "failover-available": { label: "可加入队列的 Provider", args: () => ["failover", "available"] },
+  "prompt-current": { label: "当前提示词", args: () => ["prompts", "current"] },
+  "prompt-live": { label: "生效中的提示词文件", args: () => ["prompts", "live"] },
+  "prompt-show": {
+    label: "提示词内容",
+    args: (id) => ["prompts", "show", id],
+    needsTarget: true,
+    targetLabel: "提示词 ID",
+  },
+  "config-path": { label: "配置文件路径", args: () => ["config", "path"] },
+  "daemon-logs": { label: "守护进程日志", args: () => ["daemon", "logs"] },
+  daemon: { label: "守护进程", args: () => ["daemon", "status"] },
+  settings: { label: "cc-switch 设置", args: () => ["settings", "show"] },
 }
 
 interface CcExecSpec {
@@ -132,6 +182,8 @@ const CC_EXEC_GROUPS: Readonly<Record<string, string>> = {
   proxy: "代理",
   config: "配置",
   auth: "ChatGPT 账号",
+  daemon: "守护进程",
+  settings: "设置",
 }
 
 /**
@@ -240,6 +292,16 @@ const CC_EXEC_COMMANDS: Readonly<Record<string, CcExecSpec>> = {
     pty: true,
     confirm: true,
   },
+  "prompt-activate": {
+    label: "启用提示词预设",
+    args: (id) => ["prompts", "activate", id],
+    needsTarget: true,
+    targetLabel: "提示词 ID",
+  },
+  "prompt-deactivate": {
+    label: "停用当前提示词预设",
+    args: () => ["prompts", "deactivate"],
+  },
   "prompt-delete": {
     label: "删除提示词预设",
     args: (id) => ["prompts", "delete", id],
@@ -283,6 +345,41 @@ const CC_EXEC_COMMANDS: Readonly<Record<string, CcExecSpec>> = {
   "failover-clear": {
     label: "清空故障转移队列",
     args: () => ["failover", "clear", "--yes"],
+    confirm: true,
+  },
+  // The `/cc` words Telegram also answers, given the same argv shapes here so a typed
+  // command in the App resolves instead of stopping at the panel.
+  "skills-repos-add": {
+    label: "添加技能仓库",
+    args: (spec) => ["skills", "repos", "add", spec],
+    needsTarget: true,
+    targetLabel: "技能仓库 owner/name",
+    long: true,
+  },
+  "settings-language": {
+    label: "切换 cc-switch 界面语言",
+    args: (lang) => ["settings", "language", lang],
+    needsTarget: true,
+    targetLabel: "语言代码（en / zh）",
+  },
+  "daemon-start": {
+    label: "后台启动 cc-switch 守护进程",
+    args: () => ["daemon", "start", "--detach"],
+  },
+  "daemon-stop": {
+    label: "停止 cc-switch 守护进程",
+    args: () => ["daemon", "stop"],
+    confirm: true,
+  },
+  "config-backup": {
+    label: "备份当前配置文件",
+    args: () => ["config", "backup"],
+  },
+  "auth-default": {
+    label: "设为默认 ChatGPT 账号",
+    args: (id) => ["auth", "default", id],
+    needsTarget: true,
+    targetLabel: "账号 ID",
     confirm: true,
   },
   "auth-remove": {
@@ -407,12 +504,14 @@ export class ApiError extends Error {
   }
 }
 
-interface ApiRequestContext {
+export interface ApiRequestContext {
   req: IncomingMessage
   res: ServerResponse
   url: URL
   method: string
   segments: string[]
+  /** True when this request asked for (and got) v1 message-level encryption. */
+  encrypted: boolean
 }
 
 /**
@@ -438,26 +537,33 @@ export function resolveApiToken(cfg: BotConfig): string {
   return token
 }
 
-
-/** A download-style response with an attachment filename. */
-function res_attachment(res: ServerResponse, filename: string, contentType: string, body: string): void {
-  res.writeHead(200, {
-    "content-type": contentType,
-    "content-length": Buffer.byteLength(body),
-    "content-disposition": `attachment; filename="${filename}"`,
+/**
+ * Pairing key for message-level encryption, created on first start when
+ * API_ENCRYPTION=1. It deliberately never appears in chat output — the App
+ * receives it through the /api QR code alongside the address and token.
+ */
+export function resolveEncKey(cfg: BotConfig): Buffer | undefined {
+  if (!cfg.encryption?.enabled) return undefined
+  const path = resolve(cfg.dataDir, "api-enc-key.json")
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+    const key = decodeEncKey((parsed as { key?: unknown } | undefined)?.key)
+    if (key) return key
+  } catch {
+    // Missing or unreadable file: generate a fresh key below.
+  }
+  const key = decodeEncKey(randomEncKey()) ?? randomBytes(32)
+  writeFileSync(path, `${JSON.stringify({ key: key.toString("base64"), createdAt: new Date().toISOString() }, null, 2)}\n`, {
+    mode: 0o600,
   })
-  res.end(body)
-}
-
-function stamp(now = new Date()): string {
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+  return key
 }
 
 /** HTTP control surface for the companion Android app. Telegram keeps working in parallel. */
 export class ApiServer {  readonly #opts: ApiServerOptions
   readonly #log: Logger
   readonly #token: string
+  readonly #encKey?: Buffer
   #server?: Server
   #sequence = 0
   #agentActionRunning = false
@@ -469,11 +575,15 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   /** SSE subscribers per task id; each gets the serialized task view on every update. */
   readonly #taskListeners = new Map<string, Set<(payload: string) => void>>()
   readonly #lastEmit = new Map<string, number>()
+  /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
+  readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
+  readonly #resKeys = new WeakMap<ServerResponse, Buffer>()
 
-  constructor(options: ApiServerOptions, token: string) {
+  constructor(options: ApiServerOptions, token: string, encKey?: Buffer) {
     this.#opts = options
     this.#log = options.log
     this.#token = token
+    this.#encKey = encKey
   }
 
   get appKey(): string {
@@ -529,7 +639,25 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     }
 
     const segments = url.pathname.slice(API_PREFIX.length).split("/").filter(Boolean)
-    const ctx: ApiRequestContext = { req, res, url, method: (req.method ?? "GET").toUpperCase(), segments }
+    // Message-level encryption is opt-in per request via the x-enc header; the server
+    // answers in kind only when API_ENCRYPTION enabled a pairing key.
+    const requestedEncrypted = req.headers[ENC_HEADER] === ENC_VERSION
+    if (requestedEncrypted && !this.#encKey) {
+      this.#json(res, 400, { error: "服务器未启用消息加密（API_ENCRYPTION=0），请去掉 x-enc 请求头后重试" })
+      return
+    }
+    if (requestedEncrypted && this.#encKey) {
+      this.#bodyKeys.set(req, this.#encKey)
+      this.#resKeys.set(res, this.#encKey)
+    }
+    const ctx: ApiRequestContext = {
+      req,
+      res,
+      url,
+      method: (req.method ?? "GET").toUpperCase(),
+      segments,
+      encrypted: requestedEncrypted && this.#encKey !== undefined,
+    }
     try {
       await this.#route(ctx)
     } catch (err) {
@@ -563,12 +691,19 @@ export class ApiServer {  readonly #opts: ApiServerOptions
         uptimeMs: Math.round(process.uptime() * 1000),
         engine,
         timezone: this.#opts.timezone(),
+        encryption: this.#encKey !== undefined,
       })
       return
     }
 
     if (resource === "help" && method === "GET") {
-      this.#json(ctx.res, 200, { sections: helpSections() })
+      // The command list rides along so the app's "/" palette and its argument
+      // handling follow the bot's real surface instead of a hardcoded copy
+      this.#json(ctx.res, 200, {
+        sections: helpSections(),
+        commands: BOT_MENU_COMMANDS,
+        aliases: BOT_COMMAND_ALIASES,
+      })
       return
     }
 
@@ -738,8 +873,13 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
+    if (resource === "peers") {
+      await this.#routePeers(ctx, id)
+      return
+    }
+
     if (resource === "agents" && method === "GET") {
-      this.#json(ctx.res, 200, { agents: this.#agentsView() })
+      this.#json(ctx.res, 200, { agents: agentsView(this.#personalDeps()) })
       return
     }
 
@@ -791,7 +931,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     }
 
     if (resource === "models" && method === "GET") {
-      this.#json(ctx.res, 200, { models: this.#modelsView(ctx.url.searchParams.get("engine") ?? undefined) })
+      this.#json(ctx.res, 200, { models: modelsView(this.#personalDeps(), ctx.url.searchParams.get("engine") ?? undefined) })
       return
     }
 
@@ -830,6 +970,17 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
+    // Streams the fresh data backup; the pairing token is never inside the archive
+    if (resource === "ops" && method === "GET" && id === "backup") {
+      const ops = this.#opts.ops
+      if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
+      const result = await ops.backupData()
+      if (!result.ok || !result.file) throw new ApiError(500, result.message)
+      const file = result.file.split("/").pop() ?? "backup.tar.gz"
+      res_attachment_binary(ctx.res, file, "application/gzip", readFileSync(result.file))
+      return
+    }
+
     if (resource === "ops" && method === "POST" && id) {
       await this.#routeOpsAction(ctx, id, action)
       return
@@ -845,46 +996,13 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
-    if (resource === "usage" && method === "GET") {
-      const summary = this.#opts.usage.summary(this.appKey)
-      this.#json(ctx.res, 200, { usage: summary, trend: this.#opts.usage.recentDays(this.appKey, 7) })
-      return
-    }
-
-    if (resource === "history" && method === "GET") {
-      const limit = clampLimit(ctx.url.searchParams.get("limit"), 20, 50)
-      // total lets the app show the same "已显示 N / 共 M 条" line Telegram does
-      this.#json(ctx.res, 200, {
-        history: this.#opts.history.list(this.appKey, limit),
-        total: this.#opts.history.count(this.appKey),
-      })
-      return
-    }
-
-    if (resource === "export" && method === "GET") {
-      const format = (ctx.url.searchParams.get("format") ?? "markdown").toLowerCase()
-      if (format !== "markdown" && format !== "json") throw new ApiError(400, "format 仅支持 markdown 或 json")
-      const entries = this.#opts.history.list(this.appKey, 50)
-      if (format === "json") {
-        const payload = JSON.stringify({ exportedAt: new Date().toISOString(), key: this.appKey, entries }, null, 2)
-        res_attachment(ctx.res, `agentbot-history-${stamp()}.json`, "application/json; charset=utf-8", payload)
-        return
-      }
-      const markdown = formatHistoryMarkdown(entries, {
-        source: `App (${this.appKey})`,
-        timeZone: this.#opts.timezone(),
-      })
-      res_attachment(ctx.res, `agentbot-history-${stamp()}.md`, "text/markdown; charset=utf-8", markdown)
-      return
-    }
-
-    if (resource === "history" && method === "DELETE") {
-      this.#json(ctx.res, 200, { cleared: this.#opts.history.clear(this.appKey) })
+    if (resource === "usage" || resource === "history" || resource === "export") {
+      await routeUsageHistoryApi(this.#personalDeps(), ctx, resource, id)
       return
     }
 
     if (resource === "reminders") {
-      await this.#routeReminders(ctx, id)
+      await this.#routeReminders(ctx, id, action)
       return
     }
 
@@ -901,16 +1019,12 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     this.#json(ctx.res, 404, { error: "未知的 API 路径" })
   }
 
-  #customModelView(key: string, entry: ModelInfo): Record<string, unknown> {
-    return { key, providerID: entry.providerID, modelID: entry.modelID, label: entry.label, desc: entry.desc }
-  }
-
   async #routeCustomModels(ctx: ApiRequestContext, key: string | undefined): Promise<void> {
     const models = this.#opts.models
     if (ctx.method === "GET" && !key) {
       const custom = models.listCustomModels()
       this.#json(ctx.res, 200, {
-        models: Object.entries(custom).map(([name, entry]) => this.#customModelView(name, entry)),
+        models: Object.entries(custom).map(([name, entry]) => customModelView(name, entry)),
         agents: models.listAgents().map((agent) => ({
           name: agent.name,
           model: agent.model,
@@ -944,7 +1058,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       this.#json(ctx.res, 200, {
         ok: true,
         message: `已添加自定义模型 ${added.key}（${input.providerID}/${input.modelID}）。`,
-        model: this.#customModelView(added.key, added.entry),
+        model: customModelView(added.key, added.entry),
       })
       return
     }
@@ -1037,11 +1151,31 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
+    if (ctx.method === "GET" && id === "views") {
+      // Labels and target prompts come from the server, so the app never hardcodes this list
+      this.#json(ctx.res, 200, {
+        views: Object.entries(CC_VIEWS).map(([name, spec]) => ({
+          name,
+          label: spec.label,
+          needsTarget: spec.needsTarget ?? false,
+          targetLabel: spec.targetLabel ?? "目标 ID",
+          // So a typed 「/cc provider current」 resolves here instead of in the app
+          tokens: ccPhrases(spec.args("")),
+        })),
+      })
+      return
+    }
+
     if (ctx.method === "GET" && id === "view") {
       const name = ctx.url.searchParams.get("name") ?? ""
-      const args = Object.hasOwn(CC_VIEW_COMMANDS, name) ? CC_VIEW_COMMANDS[name] : undefined
-      if (!args) throw new ApiError(400, "未知的视图，可用：config、sessions、auth、skills、failover、daemon、settings")
-      const result = await this.#ccQuery(() => cc.run(args))
+      const spec = Object.hasOwn(CC_VIEWS, name) ? CC_VIEWS[name] : undefined
+      if (!spec) throw new ApiError(400, `未知的视图，可用：${Object.keys(CC_VIEWS).join("、")}`)
+      const raw = ctx.url.searchParams.get("target") ?? ""
+      const label = spec.targetLabel ?? "目标 ID"
+      // An absent target stays empty (the argv builder ignores it); a needed one must validate
+      const target = raw ? this.#ccTargetId(raw, label) : ""
+      if (spec.needsTarget && !target) throw new ApiError(400, `「${spec.label}」需要${label}`)
+      const result = await this.#ccQuery(() => cc.run(spec.args(target), spec.long ? CC_LONG_TIMEOUT_MS : undefined))
       this.#json(ctx.res, 200, {
         name,
         text: this.#clipCcOutput(redactSecrets(stripAnsi(result.stdout || result.stderr))),
@@ -1095,7 +1229,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       // `/cc quota <id>` read-only: the --reset variant burns credit and stays on Telegram.
       const providerId = ctx.url.searchParams.get("id")?.trim() ?? ""
       if (!providerId) throw new ApiError(400, "缺少 id 查询参数（Provider ID）")
-      const result = await this.#ccQuery(() => cc.run(["provider", "quota", assertSafeId(providerId, "Provider ID")]))
+      const result = await this.#ccQuery(() => cc.run(["provider", "quota", this.#ccTargetId(providerId, "Provider ID")]))
       this.#json(ctx.res, 200, {
         id: providerId,
         text: this.#clipCcOutput(redactSecrets(stripAnsi(result.stdout || result.stderr))),
@@ -1184,6 +1318,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
           needsTarget: spec.needsTarget ?? false,
           targetLabel: spec.targetLabel ?? "目标 ID",
           confirm: spec.confirm ?? false,
+          // Same word list as the views, so 「/cc provider del foo」 reaches this gate
+          tokens: ccPhrases(spec.args("")),
         }))
         // stable sort keeps the table order inside a section
         .sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group))
@@ -1299,6 +1435,15 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     return text.length > 20_000 ? text.slice(-20_000) : text
   }
 
+  /** cc-switch's ID guard throws its own error type; a bad id is the caller's mistake. */
+  #ccTargetId(raw: string, label: string): string {
+    try {
+      return assertSafeId(raw, label)
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : `${label} 不合法`)
+    }
+  }
+
   async #ccQuery<T>(run: () => Promise<T>): Promise<T> {
     try {
       return await run()
@@ -1329,72 +1474,11 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   }
 
   async #routeConfig(ctx: ApiRequestContext, key: string | undefined): Promise<void> {
-    const ops = this.#opts.ops
-    if (!ops) throw new ApiError(409, "当前运行环境不支持配置管理")
-
-    if (ctx.method === "GET" && !key) {
-      this.#json(ctx.res, 200, this.#configView(ops))
-      return
-    }
-
-    if (ctx.method === "PUT" && key) {
-      const body = await this.#readJsonBody(ctx.req)
-      if (typeof body.value !== "string") throw new ApiError(400, "缺少 value 字段")
-      const upper = key.trim().toUpperCase()
-      // Timezone has a live-apply path shared with /timezone; going through it keeps
-      // reminders/schedules in sync instead of only rewriting .env
-      const result =
-        upper === "REMINDER_TIMEZONE" && this.#opts.setTimezone
-          ? this.#opts.setTimezone(body.value.trim())
-          : ops.envSet(upper, body.value)
-      if (!result.ok) throw new ApiError(400, result.message)
-      this.#json(ctx.res, 200, { ok: true, message: result.message, config: this.#configView(ops) })
-      return
-    }
-
-    if (ctx.method === "DELETE" && key) {
-      const result = ops.envUnset(key)
-      if (!result.ok) throw new ApiError(400, result.message)
-      this.#json(ctx.res, 200, { ok: true, message: result.message, config: this.#configView(ops) })
-      return
-    }
-
-    throw new ApiError(404, "未知的配置 API 路径")
-  }
-
-  #configView(ops: OpsService): Record<string, unknown> {
-    const list = ops.envList()
-    return {
-      exists: list.exists,
-      entries: list.entries,
-      editableKeys: OPS_ENV_KEYS.filter((name) => !OPS_COMMAND_MANAGED_KEYS.has(name)),
-    }
+    await routeConfigApi(this.#personalDeps(), ctx, key)
   }
 
   async #routeAccess(ctx: ApiRequestContext, id: string | undefined): Promise<void> {
-    const access = this.#opts.access
-    if (!access) throw new ApiError(409, "当前运行环境不支持白名单管理")
-    if (ctx.method === "GET" && !id) {
-      this.#json(ctx.res, 200, access.list())
-      return
-    }
-    if (ctx.method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const raw = Array.isArray(body.ids) ? body.ids : typeof body.id === "string" ? [body.id] : []
-      const ids = raw.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-      if (ids.length === 0) throw new ApiError(400, "缺少 id 字段，例如：{\"id\":\"12345678\"}")
-      const result = access.add(ids)
-      if (!result.ok) throw new ApiError(400, result.message)
-      this.#json(ctx.res, 200, { ok: true, message: result.message, ...access.list() })
-      return
-    }
-    if (ctx.method === "DELETE" && id) {
-      const result = access.remove([id])
-      if (!result.ok) throw new ApiError(400, result.message)
-      this.#json(ctx.res, 200, { ok: true, message: result.message, ...access.list() })
-      return
-    }
-    throw new ApiError(404, "未知的白名单 API 路径")
+    await routeAccessApi(this.#personalDeps(), ctx, id)
   }
 
   #expandAlias(text: string): string {
@@ -1413,276 +1497,29 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     return current
   }
 
-  #aliasView(entry: AliasEntry): Record<string, unknown> {
-    return { name: entry.name, expansion: entry.expansion, createdAt: entry.createdAt }
-  }
-
   async #routeAliases(ctx: ApiRequestContext, id: string | undefined): Promise<void> {
-    const aliases = this.#opts.aliases
-    if (!aliases) throw new ApiError(409, "当前运行环境不支持快捷指令")
-    const chatId = this.#requireOwnerChat("快捷指令")
-    if (ctx.method === "GET" && !id) {
-      this.#json(ctx.res, 200, { aliases: aliases.list(chatId).map((entry) => this.#aliasView(entry)) })
-      return
-    }
-    if (ctx.method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const name = typeof body.name === "string" ? body.name.trim().replace(/^\//, "") : ""
-      const expansion = typeof body.expansion === "string" ? body.expansion.trim() : ""
-      if (!name) throw new ApiError(400, "缺少 name 字段，例如：{\"name\":\"code\",\"expansion\":\"审查代码\"}")
-      if (!expansion) throw new ApiError(400, "缺少 expansion 字段（指令触发后要发送的内容）")
-      let entry: AliasEntry
-      try {
-        entry = aliases.add(chatId, name, expansion)
-      } catch (err) {
-        throw new ApiError(400, err instanceof Error ? err.message : "无法创建快捷指令")
-      }
-      this.#json(ctx.res, 201, { ok: true, message: `已创建 /${entry.name}。`, alias: this.#aliasView(entry) })
-      return
-    }
-    if (ctx.method === "DELETE" && id) {
-      const removed = aliases.remove(chatId, id)
-      if (!removed) throw new ApiError(404, "快捷指令不存在")
-      this.#json(ctx.res, 200, { ok: true, message: `已删除 /${removed.name}。` })
-      return
-    }
-    throw new ApiError(404, "未知的快捷指令 API 路径")
-  }
-
-  #proxyView(proxy: ProxyRecord, activeId?: number): Record<string, unknown> {
-    return {
-      id: proxy.id,
-      name: proxy.name,
-      // The URL can embed SOCKS/HTTP credentials; the app only ever sees the masked form.
-      url: maskProxyUrl(proxy.url),
-      protocol: proxy.protocol,
-      createdAt: proxy.createdAt,
-      active: proxy.id === activeId,
-    }
+    await routeAliasesApi(this.#personalDeps(), ctx, id)
   }
 
   async #routeProxy(ctx: ApiRequestContext, id: string | undefined, action: string | undefined): Promise<void> {
-    const proxies = this.#opts.proxies
-    if (!proxies) throw new ApiError(409, "当前运行环境不支持代理管理")
-    if (ctx.method === "GET" && !id) {
-      const active = proxies.active()
-      this.#json(ctx.res, 200, {
-        active: active?.id ?? null,
-        proxies: proxies.list().map((proxy) => this.#proxyView(proxy, active?.id)),
-      })
-      return
-    }
-    if (ctx.method === "POST" && id === "off") {
-      proxies.disable()
-      this.#json(ctx.res, 200, { ok: true, message: "已停用代理。", active: null })
-      return
-    }
-    if (ctx.method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const url = typeof body.url === "string" ? body.url.trim() : ""
-      const name = typeof body.name === "string" ? body.name.trim() : undefined
-      if (!url) throw new ApiError(400, "缺少 url 字段，例如：{\"url\":\"http://127.0.0.1:7890\"}")
-      let proxy: ProxyRecord
-      try {
-        proxy = await proxies.add(url, name)
-      } catch (err) {
-        throw new ApiError(400, err instanceof Error ? err.message : "无法添加代理")
-      }
-      this.#json(ctx.res, 201, {
-        ok: true,
-        message: `代理 #${proxy.id} 测试通过并已添加。`,
-        proxy: this.#proxyView(proxy, proxies.active()?.id),
-      })
-      return
-    }
-    const proxyId = Number(id)
-    if (!Number.isInteger(proxyId)) throw new ApiError(404, "未知的代理 API 路径")
-    if (ctx.method === "POST" && action === "use") {
-      let proxy: ProxyRecord
-      try {
-        proxy = proxies.use(proxyId)
-      } catch {
-        throw new ApiError(404, "代理不存在")
-      }
-      this.#json(ctx.res, 200, {
-        ok: true,
-        message: `已启用代理 #${proxy.id}。`,
-        proxy: this.#proxyView(proxy, proxy.id),
-      })
-      return
-    }
-    if (ctx.method === "POST" && action === "test") {
-      if (!proxies.list().some((proxy) => proxy.id === proxyId)) throw new ApiError(404, "代理不存在")
-      const result = await proxies.test(proxyId)
-      this.#json(ctx.res, 200, result)
-      return
-    }
-    if (ctx.method === "DELETE" && !action) {
-      const removed = proxies.remove(proxyId)
-      if (!removed) throw new ApiError(404, "代理不存在")
-      this.#json(ctx.res, 200, { ok: true, message: `已删除代理 #${removed.id}。` })
-      return
-    }
-    throw new ApiError(404, "未知的代理 API 路径")
+    await routeProxyApi(this.#personalDeps(), ctx, id, action)
   }
 
-  async #routeReminders(ctx: ApiRequestContext, id: string | undefined): Promise<void> {
-    const chatId = this.#requireOwnerChat("提醒")
-    if (ctx.method === "GET" && !id) {
-      this.#json(ctx.res, 200, { reminders: this.#opts.reminders.list(chatId).map((r) => this.#publicReminder(r)) })
-      return
-    }
-    if (ctx.method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const text = typeof body.text === "string" ? body.text.trim() : ""
-      if (!text) throw new ApiError(400, "缺少 text 字段，例如：{\"text\":\"30m 喝水\"}")
-      let reminder
-      try {
-        reminder = this.#opts.reminders.add(chatId, chatId, text)
-      } catch (err) {
-        throw new ApiError(400, err instanceof Error ? err.message : "无法解析提醒时间")
-      }
-      this.#json(ctx.res, 201, { reminder: this.#publicReminder(reminder) })
-      return
-    }
-    const reminderId = Number(id)
-    if (ctx.method === "DELETE" && Number.isInteger(reminderId)) {
-      const removed = this.#opts.reminders.cancel(chatId, reminderId)
-      if (!removed) throw new ApiError(404, "提醒不存在")
-      this.#json(ctx.res, 200, { ok: true })
-      return
-    }
-    throw new ApiError(404, "未知的提醒 API 路径")
+  async #routeReminders(ctx: ApiRequestContext, id: string | undefined, action?: string): Promise<void> {
+    await routeRemindersApi(this.#personalDeps(), ctx, id, action)
   }
 
   async #routeSchedules(ctx: ApiRequestContext, id: string | undefined, action: string | undefined): Promise<void> {
-    const chatId = this.#requireOwnerChat("定时任务")
-    if (ctx.method === "GET" && !id) {
-      this.#json(ctx.res, 200, { schedules: this.#opts.schedules.list(chatId).map((task) => this.#publicSchedule(task)) })
-      return
-    }
-    if (ctx.method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const text = typeof body.text === "string" ? body.text.trim() : ""
-      if (!text) throw new ApiError(400, "缺少 text 字段，例如：{\"text\":\"每天 09:00 检查服务器\"}")
-      const engine = this.#opts.store.getEngine(this.appKey)
-      const defaults =
-        engine === "opencode"
-          ? { engine, model: resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, this.appKey) }
-          : { engine, cliModel: this.#opts.store.getCliModel(this.appKey, engine) }
-      let task
-      try {
-        task = this.#opts.schedules.add(chatId, chatId, text, defaults)
-      } catch (err) {
-        throw new ApiError(400, err instanceof Error ? err.message : "无法解析定时任务")
-      }
-      this.#json(ctx.res, 201, { schedule: this.#publicSchedule(task) })
-      return
-    }
-    const taskId = Number(id)
-    if (!Number.isInteger(taskId)) throw new ApiError(404, "未知的定时任务 API 路径")
-    if (ctx.method === "DELETE" && !action) {
-      const removed = this.#opts.schedules.remove(chatId, taskId)
-      if (!removed) throw new ApiError(404, "定时任务不存在")
-      this.#json(ctx.res, 200, { ok: true })
-      return
-    }
-    if (ctx.method === "POST" && (action === "pause" || action === "resume")) {
-      const updated =
-        action === "pause" ? this.#opts.schedules.pause(chatId, taskId) : this.#opts.schedules.resume(chatId, taskId)
-      if (!updated) throw new ApiError(404, "定时任务不存在")
-      this.#json(ctx.res, 200, { schedule: this.#publicSchedule(updated) })
-      return
-    }
-    if (ctx.method === "POST" && action === "run") {
-      let task
-      try {
-        task = this.#opts.schedules.runNow(chatId, taskId)
-      } catch (err) {
-        throw new ApiError(409, err instanceof Error ? err.message : "定时任务正在执行中")
-      }
-      if (!task) throw new ApiError(404, "定时任务不存在")
-      this.#json(ctx.res, 200, {
-        ok: true,
-        message: `已立即执行定时任务 #${taskId}，结果会发送到 Telegram（不影响原定时间）。`,
-        schedule: this.#publicSchedule(task),
-      })
-      return
-    }
-    throw new ApiError(404, "未知的定时任务 API 路径")
+    await routeSchedulesApi(this.#personalDeps(), ctx, id, action)
   }
 
   /** `/dir` equivalent: the working directory CLI engines start in for the app session. */
   async #routeDir(ctx: ApiRequestContext): Promise<void> {
-    if (ctx.method === "GET") {
-      this.#json(ctx.res, 200, this.#dirView())
-      return
-    }
-    if (ctx.method !== "POST") throw new ApiError(405, "只支持 GET 或 POST")
-    const body = await this.#readJsonBody(ctx.req)
-
-    if (body.reset === true) {
-      const cleared = this.#opts.store.clearDir(this.appKey)
-      if (cleared) this.#resetCliSessions()
-      this.#json(ctx.res, 200, {
-        ok: true,
-        message: cleared ? "已恢复默认工作目录（CLI 会话上下文已重置）" : "已经是默认工作目录",
-        dir: this.#dirView(),
-      })
-      return
-    }
-
-    const raw = typeof body.dir === "string" ? body.dir.trim() : ""
-    if (!raw) throw new ApiError(400, "缺少 dir 字段（或传 reset: true 恢复默认目录）")
-    // Switching directories under a running task would split one session across projects
-    if (this.#hasActiveTask()) throw new ApiError(409, "任务执行中，请先停止当前任务再切换工作目录")
-    const dir = normalizeWorkDirInput(raw, this.#opts.agents.defaultWorkDir, homedir())
-    if (!dir) {
-      throw new ApiError(400, "路径无效：不能为空、含控制字符、超过 512 字符，或指向文件系统根目录")
-    }
-    let isDirectory = false
-    try {
-      isDirectory = statSync(dir).isDirectory()
-    } catch {
-      // reported below
-    }
-    if (!isDirectory) throw new ApiError(400, `目录不存在或不是目录：${dir}`)
-
-    this.#opts.store.setDir(this.appKey, dir)
-    this.#resetCliSessions()
-    this.#json(ctx.res, 200, {
-      ok: true,
-      message: "工作目录已更新（CLI 会话上下文已重置）",
-      dir: this.#dirView(),
-    })
-  }
-
-  #dirView(): Record<string, unknown> {
-    const engine = this.#opts.store.getEngine(this.appKey)
-    const view: Record<string, unknown> = {
-      engine,
-      workDir: this.#opts.agents.workDir(this.appKey),
-      defaultWorkDir: this.#opts.agents.defaultWorkDir,
-      custom: this.#opts.store.getDir(this.appKey) ?? null,
-    }
-    if (engine === "opencode") view.note = "OpenCode 的目录由其服务端决定，该设置只影响 CLI 引擎"
-    return view
+    await routeDirApi(this.#personalDeps(), ctx)
   }
 
   async #routeTimezone(ctx: ApiRequestContext): Promise<void> {
-    if (ctx.method === "GET") {
-      this.#json(ctx.res, 200, { timezone: this.#opts.timezone() })
-      return
-    }
-    if (ctx.method !== "POST") throw new ApiError(405, "只支持 GET 或 POST")
-    const body = await this.#readJsonBody(ctx.req)
-    const zone = typeof body.timezone === "string" ? body.timezone.trim() : ""
-    if (!zone) throw new ApiError(400, "缺少 timezone 字段，例如：Asia/Shanghai")
-    const setter = this.#opts.setTimezone
-    if (!setter) throw new ApiError(409, "当前运行环境不支持在线切换时区")
-    const result = setter(zone)
-    if (!result.ok) throw new ApiError(400, result.message)
-    this.#json(ctx.res, 200, { ok: true, message: result.message, timezone: this.#opts.timezone() })
+    await routeTimezoneApi(this.#personalDeps(), ctx)
   }
 
   #hasActiveTask(): boolean {
@@ -1691,45 +1528,108 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     )
   }
 
-  /** A CLI session belongs to the directory it was created in, so both reset together. */
+  /** Everything the personal-data route modules need from this class, in one object. */
+  #personalDeps(): PersonalRouteDeps {
+    return {
+      appKey: this.appKey,
+      ownerChatId: this.#opts.ownerChatId,
+      store: this.#opts.store,
+      cfg: this.#opts.cfg,
+      registry: this.#opts.agents.registry,
+      reminders: this.#opts.reminders,
+      schedules: this.#opts.schedules,
+      usage: this.#opts.usage,
+      models: this.#opts.models,
+      installer: this.#opts.installer,
+      json: (res, status, body) => this.#json(res, status, body),
+      readJsonBody: (req) => this.#readJsonBody(req),
+      sessionView: (key) => this.#sessionView(key),
+      adoptSession: (from) => this.#adoptSession(from),
+      workDir: (key) => this.#opts.agents.workDir(key),
+      defaultWorkDir: this.#opts.agents.defaultWorkDir,
+      resetCliSessions: () => this.#resetCliSessions(),
+      hasActiveTask: () => this.#hasActiveTask(),
+      timezone: () => this.#opts.timezone(),
+      setTimezone: this.#opts.setTimezone,
+      aliases: this.#opts.aliases,
+      ops: this.#opts.ops,
+      proxies: this.#opts.proxies,
+      history: this.#opts.history,
+      access: this.#opts.access,
+    }
+  }
+
+  async #routePeers(ctx: ApiRequestContext, id: string | undefined): Promise<void> {
+    await routePeers(this.#personalDeps(), ctx, id)
+  }
+
+  /** Copies engine, model and working directory from another session onto this one. */
+  #adoptSession(from: string): string[] {
+    const store = this.#opts.store
+    const changed: string[] = []
+    const engine = store.getEngine(from)
+    if (store.getEngine(this.appKey) !== engine) {
+      store.setEngine(this.appKey, engine)
+      changed.push(`引擎切换为 ${this.#opts.agents.registry.label(engine)}`)
+    }
+    if (engine === "opencode") {
+      const model = store.getModel(from)
+      const own = store.getModel(this.appKey)
+      if (model?.modelID !== own?.modelID || model?.providerID !== own?.providerID) {
+        if (model) store.setModel(this.appKey, model)
+        else store.clearModel(this.appKey)
+        changed.push(model ? `模型 ${model.label}` : "恢复默认模型")
+      }
+    } else {
+      const model = store.getCliModel(from, engine) ?? ""
+      if (model !== (store.getCliModel(this.appKey, engine) ?? "")) {
+        store.setCliModel(this.appKey, engine, model)
+        changed.push(model ? `模型 ${this.#opts.agents.registry.modelLabel(engine, model)}` : "恢复该引擎的默认模型")
+      }
+    }
+    // Copy what the other session really runs in, which `workDir` already resolved to an
+    // existing directory — a deleted repo dir must not become this session's setting too.
+    const sourceDir = this.#opts.agents.workDir(from)
+    if (sourceDir !== this.#opts.agents.workDir(this.appKey)) {
+      this.#opts.store.setDir(this.appKey, sourceDir)
+      // Another directory means another repository, so a CLI session cannot carry over
+      this.#resetCliSessions()
+      changed.push(`工作目录 ${sourceDir}`)
+    }
+    return changed
+  }
+
   #resetCliSessions(): void {
     for (const profile of this.#opts.agents.registry.list()) {
       this.#opts.store.clearCliSession(this.appKey, profile.id)
     }
   }
 
-  #requireOwnerChat(feature: string): number {
-    const owner = this.#opts.ownerChatId
-    if (!owner) {
-      throw new ApiError(409, `${feature}需要一个推送目标：请在 .env 的 TELEGRAM_ALLOW_USERS 配置你的 Telegram 用户 ID`)
-    }
-    return owner
-  }
-
-  #sessionView(): Record<string, unknown> {
-    const engine = this.#opts.store.getEngine(this.appKey)
+  /** Session state for any key, so the App can also read the Telegram side. */
+  #sessionView(key = this.appKey): Record<string, unknown> {
+    const engine = this.#opts.store.getEngine(key)
     const profile = this.#opts.agents.registry.get(engine)
     const view: Record<string, unknown> = {
-      key: this.appKey,
+      key,
       engine,
       engineLabel: this.#opts.agents.registry.label(engine),
       engineInstalled: engine === "opencode" ? true : Boolean(profile && this.#opts.agents.registry.binPath(profile)),
       timezone: this.#opts.timezone(),
     }
     if (engine === "opencode") {
-      const model = resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, this.appKey)
+      const model = resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, key)
       view.model = model.label
       view.modelRef = model
-      view.hasSession = Boolean(this.#opts.store.get(this.appKey))
+      view.hasSession = Boolean(this.#opts.store.get(key))
     } else {
-      const model = this.#opts.store.getCliModel(this.appKey, engine) ?? this.#opts.agents.registry.defaultModel(engine)
+      const model = this.#opts.store.getCliModel(key, engine) ?? this.#opts.agents.registry.defaultModel(engine)
       view.model = model
         ? this.#opts.agents.registry.modelLabel(engine, model)
         : profile?.supportsModel
           ? "默认"
           : "由 CLI 决定"
-      view.hasSession = Boolean(this.#opts.store.getCliSession(this.appKey, engine))
-      view.workDir = this.#opts.agents.workDir(this.appKey)
+      view.hasSession = Boolean(this.#opts.store.getCliSession(key, engine))
+      view.workDir = this.#opts.agents.workDir(key)
     }
     return view
   }
@@ -1903,7 +1803,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       if (task.attachments?.length) {
         const caps = isOpencode ? await this.#opts.oc.inputCapabilities(opencodeModel) : undefined
         const { saved, failed } = this.#saveAttachments(task.attachments)
-        input = buildAttachmentSections(task.text, { saved, failed, modelCapabilities: caps })
+        const stt = await applyStt(saved, { stt: this.#opts.cfg.stt, modelCapabilities: caps })
+        input = buildAttachmentSections(task.text, { saved: stt.saved, failed: [...failed, ...stt.errors], modelCapabilities: caps })
       }
 
       const reply = await callEngine(this.#engineDeps, {
@@ -2049,61 +1950,14 @@ export class ApiServer {  readonly #opts: ApiServerOptions
         ok: result.ok,
         message: redactSecrets(result.message),
         output: result.output ? redactSecrets(result.output).slice(0, 20_000) : undefined,
-        agent: this.#agentView(profile),
+        agent: agentView(this.#personalDeps(), profile),
       })
     } finally {
       this.#agentActionRunning = false
     }
   }
 
-  #agentsView(): Array<Record<string, unknown>> {
-    return this.#opts.agents.registry.list().map((profile) => this.#agentView(profile))
-  }
-
-  #agentView(profile: AgentCliProfile): Record<string, unknown> {
-    const installer = this.#opts.installer
-    const installed = Boolean(this.#opts.agents.registry.binPath(profile))
-    return {
-      id: profile.id,
-      label: profile.label,
-      desc: profile.desc,
-      installed,
-      install: profile.install,
-      sessionMode: profile.sessionMode,
-      supportsModel: Boolean(profile.supportsModel),
-      defaultModel: profile.defaultModel,
-      models: profile.models,
-      experimental: profile.experimental,
-      managed: installer?.isManaged(profile.id) ?? false,
-      installable: Boolean(!installed && installer?.installCommand(profile)),
-      updateable: Boolean(installer?.updateCommand(profile.id)),
-      uninstallable: Boolean(installer?.uninstallCommand(profile.id)),
-      installCommand: installer?.installCommand(profile),
-      updateCommand: installer?.updateCommand(profile.id),
-      uninstallCommand: installer?.uninstallCommand(profile.id),
-    }
-  }
-
-  #modelsView(requestedEngine?: string): Record<string, unknown> {
-    // A one-off pin can target another engine than the session, so callers may ask
-    // explicitly instead of only getting the current engine's list.
-    const engine = requestedEngine?.trim() || this.#opts.store.getEngine(this.appKey)
-    if (engine !== "opencode" && !this.#opts.agents.registry.get(engine)) {
-      throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
-    }
-    if (engine === "opencode") {
-      const custom = this.#opts.models.listCustomModels()
-      const builtin = Object.entries(AVAILABLE_MODELS).map(([key, info]) => ({ key, ...info }))
-      const customEntries = Object.entries(custom).map(([key, info]) => ({ key, ...info }))
-      return { engine, models: [...customEntries, ...builtin] }
-    }
-    const profile = this.#opts.agents.registry.get(engine)
-    return {
-      engine,
-      models: profile?.supportsModel ? (profile.models ?? []) : [],
-      modelHint: profile?.modelHint,
-    }
-  }
+  // Engine/model views moved to apiPersonal.ts (agentsView/modelsView/agentView).
 
   #applyModel(raw: string): string {
     const engine = this.#opts.store.getEngine(this.appKey)
@@ -2137,28 +1991,11 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     return `模型已切换为 ${this.#opts.agents.registry.modelLabel(engine, resolved)}`
   }
 
-  #publicReminder(reminder: Reminder): Record<string, unknown> {
-    return { id: reminder.id, text: reminder.text, dueAt: reminder.dueAt, repeat: reminder.repeat }
-  }
-
-  #publicSchedule(task: ScheduledTask): Record<string, unknown> {
-    return {
-      id: task.id,
-      prompt: task.prompt,
-      dueAt: task.dueAt,
-      engine: task.engine,
-      // Same "引擎 / 模型" line Telegram shows, including `--engine/--model` pins.
-      target: scheduleTargetLabel(task, this.#opts.agents.registry),
-      repeat: task.repeat,
-      paused: Boolean(task.paused),
-      lastRunAt: task.lastRunAt,
-      lastStatus: task.lastStatus,
-    }
-  }
+  // Wire views for reminders/schedules moved to apiPersonal.ts (publicReminder/publicSchedule).
 
   async #statusView(): Promise<Record<string, unknown>> {
     const usage = this.#opts.usage.summary(this.appKey)
-    const running = [...this.#tasks.values()].find((task) => task.status === "running" || task.status === "queued")
+    const pending = [...this.#tasks.values()].filter((task) => task.status === "running" || task.status === "queued")
     return {
       uptimeMs: Math.round(process.uptime() * 1000),
       version: this.#opts.version,
@@ -2166,8 +2003,11 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       engine: this.#opts.store.getEngine(this.appKey),
       usageToday: usage.today,
       opencodeReachable: await this.#opts.oc.health(),
-      activeTask: running ? this.#view(running) : undefined,
+      activeTask: pending[0] ? this.#view(pending[0]) : undefined,
+      // `tasksTotal` also covers finished rows the map still keeps for retry and SSE,
+      // so a client that wants queue depth needs `tasksActive` rather than reading into it.
       tasksTotal: this.#tasks.size,
+      tasksActive: pending.length,
     }
   }
 
@@ -2333,6 +2173,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   }
 
   async #readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+    const encKey = this.#bodyKeys.get(req)
     const chunks: Buffer[] = []
     let total = 0
     for await (const chunk of req) {
@@ -2341,22 +2182,42 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       chunks.push(chunk as Buffer)
     }
     if (total === 0) return {}
-    try {
-      const parsed: unknown = JSON.parse(Buffer.concat(chunks, total).toString("utf8"))
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-      throw new ApiError(400, "请求体必须是 JSON 对象")
-    } catch (err) {
-      if (err instanceof ApiError) throw err
-      throw new ApiError(400, "请求体不是合法的 JSON")
+    const raw = Buffer.concat(chunks, total)
+
+    const parseObject = (text: string): Record<string, unknown> => {
+      try {
+        const parsed: unknown = JSON.parse(text)
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+        throw new ApiError(400, "请求体必须是 JSON 对象")
+      } catch (err) {
+        if (err instanceof ApiError) throw err
+        throw new ApiError(400, "请求体不是合法的 JSON")
+      }
     }
+    if (encKey) {
+      let inner: string
+      try {
+        inner = decryptPayload(encKey, raw.toString("utf8"))
+      } catch (err) {
+        throw new ApiError(400, `解密请求体失败：${(err as Error).message}`)
+      }
+      return parseObject(inner)
+    }
+    return parseObject(raw.toString("utf8"))
   }
 
   #json(res: ServerResponse, status: number, body: unknown): void {
-    const payload = JSON.stringify(body)
-    res.writeHead(status, {
+    let payload = JSON.stringify(body)
+    const encKey = this.#resKeys.get(res)
+    const headers: Record<string, string | number> = {
       "content-type": "application/json; charset=utf-8",
-      "content-length": Buffer.byteLength(payload),
-    })
+    }
+    if (encKey) {
+      payload = encryptPayload(encKey, payload)
+      headers[ENC_HEADER] = ENC_VERSION
+    }
+    headers["content-length"] = Buffer.byteLength(payload)
+    res.writeHead(status, headers)
     res.end(payload)
   }
 }

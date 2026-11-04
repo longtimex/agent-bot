@@ -592,3 +592,38 @@ test("reminder delivery passes the reminder so the bridge can offer snooze butto
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("ReminderService.postpone moves a pending one-shot and refuses repeats", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+  try {
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async () => {},
+      log,
+    )
+    const now = Date.now()
+    const oneShot = service.add(42, 7, "1h 站会", now)
+    const repeating = service.add(42, 7, "every 30m 喝水", now)
+
+    const postponed = service.postpone(42, oneShot.id, 30, now)
+    assert.equal(postponed.dueAt, now + 30 * 60_000, "dueAt moves exactly by the given minutes")
+    assert.equal(service.list(42).find((item) => item.id === oneShot.id)?.dueAt, postponed.dueAt)
+
+    assert.throws(() => service.postpone(42, repeating.id, 30, now), /重复提醒/)
+    assert.throws(() => service.postpone(42, 999, 30, now), /不存在/)
+    assert.throws(() => service.postpone(42, oneShot.id, 0, now), /时长需在/)
+    assert.throws(() => service.postpone(42, oneShot.id, 60 * 24 * 8, now), /时长需在/)
+
+    // The postponed reminder still fires, at the new time (the repeat is removed
+    // first so its own schedule does not fire during this window)
+    service.cancel(42, repeating.id)
+    const sent: string[] = []
+    const firing = new ReminderService(join(dir, "reminders.json"), async (_chatId, text) => sent.push(text), log)
+    await firing.tick(now + 29 * 60_000)
+    assert.equal(sent.length, 0)
+    await firing.tick(now + 31 * 60_000)
+    assert.equal(sent.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

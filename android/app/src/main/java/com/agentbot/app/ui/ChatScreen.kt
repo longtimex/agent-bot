@@ -1099,6 +1099,13 @@ private fun ChatInputBar(
     LaunchedEffect(enginePicker) {
         if (enginePicker) vm.refreshAgentsQuietly()
     }
+    // A bare `/engine` or `/model!` typed into the box asks for this picker
+    LaunchedEffect(vm.pinPickerRequested) {
+        if (vm.pinPickerRequested) {
+            vm.clearPinPickerRequest()
+            enginePicker = true
+        }
+    }
     val cameraTarget = remember { mutableStateOf<Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(CapturePhoto()) { ok ->
         val uri = cameraTarget.value
@@ -1140,25 +1147,37 @@ private fun ChatInputBar(
         SlashCommand("/ops", "运维中心") { vm.navigate(Screen.Ops) },
         SlashCommand("/alias", "快捷指令") { vm.navigate(Screen.Aliases) },
         SlashCommand("/help", "帮助") { vm.navigate(Screen.Help) },
+        // App-only pins: they affect the next message, not the session
+        SlashCommand("/engine", "本条消息交给另一个引擎") { enginePicker = true },
+        SlashCommand("/model!", "本条消息换一个模型") { enginePicker = true },
     )
-    val typed = draft.trim()
+    // Commands the bot answers that have no local button still belong in the palette,
+    // so the App shows the same "/" surface as Telegram's menu
+    val serverCommands = vm.botCommands
+        .filter { item -> commands.none { command -> command.name.equals("/" + item.command, ignoreCase = true) } }
+        .map { item ->
+            SlashCommand("/" + item.command, item.description) { vm.runSlash("/" + item.command) }
+        }
     // Stored shortcuts appear after builtins; a builtin always wins on a name clash.
     val aliasCommands = vm.aliases
-        .filter { alias -> commands.none { it.name.equals("/${alias.name}", ignoreCase = true) } }
+        .filter { alias ->
+            (commands + serverCommands).none { it.name.equals("/${alias.name}", ignoreCase = true) }
+        }
         .map { alias ->
             SlashCommand(
                 "/${alias.name}",
                 "快捷指令 · ${alias.expansion.lineSequence().first().take(30)}",
             ) { onSendText("/${alias.name}") }
         }
+    val typed = draft.trim()
     // Show the palette only while typing the command word itself, not its arguments.
     val typingSlash = draft.startsWith("/") && !typed.contains(' ')
     val suggestions = if (typingSlash) {
-        (commands + aliasCommands).filter { it.name.startsWith(typed, ignoreCase = true) }
+        (commands + serverCommands + aliasCommands).filter { it.name.startsWith(typed, ignoreCase = true) }
     } else {
         emptyList()
     }
-    val exact = commands.firstOrNull { it.name.equals(typed, ignoreCase = true) }
+    val exact = (commands + serverCommands).firstOrNull { it.name.equals(typed, ignoreCase = true) }
     val exactAlias = aliasCommands.firstOrNull { it.name.equals(typed, ignoreCase = true) }
     fun runCommand(command: SlashCommand) {
         onDraftChange("")
@@ -1167,9 +1186,9 @@ private fun ChatInputBar(
     val canSend = exact != null || exactAlias != null || vm.pendingAttachments.isNotEmpty() ||
         (suggestions.isEmpty() && draft.isNotBlank())
 
-    // Their list lives server-side; refresh when the palette opens so new shortcuts show up.
+    // Their lists live server-side; refresh when the palette opens so new shortcuts show up.
     LaunchedEffect(typingSlash) {
-        if (typingSlash) vm.refreshAliasesQuietly()
+        if (typingSlash) vm.refreshPalette()
     }
 
     Surface(color = MaterialTheme.colorScheme.background) {
@@ -1413,7 +1432,9 @@ private fun ChatInputBar(
                                 }
                                 if (vm.oneOffModels.isEmpty()) {
                                     Text(
-                                        "该引擎不列出可选模型，留空即使用默认。",
+                                        vm.oneOffModelHint?.let {
+                                            "该引擎不列出可选模型，可在聊天里发送 /model! <模型ID>（提示：$it）"
+                                        } ?: "该引擎不列出可选模型，留空即使用默认。",
                                         color = TextSecondary,
                                         style = MaterialTheme.typography.bodyMedium,
                                         modifier = Modifier.padding(vertical = 6.dp),
@@ -1422,7 +1443,7 @@ private fun ChatInputBar(
                                 vm.oneOffModels.forEach { option ->
                                     EngineOptionRow(
                                         label = option.label,
-                                        detail = option.desc ?: option.value,
+                                        detail = option.desc ?: option.detail,
                                         selected = vm.oneOffModel == option.value,
                                     ) {
                                         vm.setOneOffModel(option.value)

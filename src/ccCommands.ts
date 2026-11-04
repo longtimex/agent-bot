@@ -3,7 +3,7 @@ import type { Context } from "grammy"
 import { InlineKeyboard } from "grammy"
 import { escapeMarkdown, clip, pruneChatState, type Panel } from "./messages.js"
 import { AVAILABLE_MODELS, reloadCustomModels } from "./models.js"
-import { CC_HELP } from "./help.js"
+import { CC_HELP, CC_SUB_ALIASES } from "./help.js"
 import { CcSwitchService, CC_LONG_TIMEOUT_MS, redactSecrets, stripAnsi, type CcSwitchProvider, type CcSwitchProviderDraft, type CcSwitchSpeedtest } from "./ccswitch.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 import type { Logger } from "./logger.js"
@@ -119,22 +119,6 @@ export function parseProviderAdd(tokens: string[]): CcSwitchProviderDraft | stri
 }
 
 const CC_UPDATE_TIMEOUT_MS = 180_000
-
-const CC_SUB_ALIASES: Record<string, [string, string]> = {
-  "provider del": ["provider", "delete"],
-  "provider rm": ["provider", "delete"],
-  "mcp del": ["mcp", "delete"],
-  "mcp rm": ["mcp", "delete"],
-  "prompts use": ["prompts", "activate"],
-  "prompts off": ["prompts", "deactivate"],
-  "prompts stop": ["prompts", "deactivate"],
-  "prompts del": ["prompts", "delete"],
-  "prompts rm": ["prompts", "delete"],
-  "skills del": ["skills", "uninstall"],
-  "skills repo": ["skills", "repos"],
-  "sessions del": ["sessions", "delete"],
-  "auth del": ["auth", "remove"],
-}
 
 const CC_CONFIRM_TTL_MS = 5 * 60_000
 

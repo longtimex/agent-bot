@@ -1,6 +1,6 @@
 {
   "name": "telegram-opencode-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Bridge a personal Telegram bot to a local opencode server and mainstream agent CLIs",
@@ -13,8 +13,9 @@
     "setup": "tsx src/setup-cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "check:android": "node scripts/check-android-sources.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run check:android && npm run typecheck && npm test && npm run build",
     "serve": "opencode serve --port 4096 --hostname 127.0.0.1",
     "serve:proxy": "bash -c 'set -a; [ -f data/proxy.env ] && . data/proxy.env; set +a; exec opencode serve --port 4096 --hostname 127.0.0.1'",
     "restart": "bash scripts/restart.sh",

@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.agentbot.app.data.ApiFormat
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.OpsResult
 import com.agentbot.app.ui.theme.TextSecondary
@@ -45,6 +47,14 @@ private val LOG_LINE_CHOICES = listOf(80, 200, 400)
 fun OpsScreen(vm: AppViewModel) {
     var pending by remember { mutableStateOf<Pair<String, String>?>(null) }
     val busyLabel = vm.opsActionBusy
+
+    // `/restart`, `/update` and `/service opencode stop` typed in the chat box land here
+    LaunchedEffect(vm.opsConfirmRequested) {
+        vm.opsConfirmRequested?.let {
+            vm.clearOpsConfirmRequest()
+            pending = it
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Row(
@@ -134,7 +144,11 @@ private fun OpsActionsCard(vm: AppViewModel, onConfirm: (String, String) -> Unit
             Text("项目维护", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(enabled = !busy, onClick = { vm.runOpsAction("check", "运行检查") }) { Text("🧪 运行检查") }
+                TextButton(enabled = !busy, onClick = { vm.checkForUpdates() }) { Text("🔍 检查更新") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(enabled = !busy, onClick = { onConfirm("update", "更新项目") }) { Text("⬆️ 更新项目") }
+                TextButton(enabled = !busy, onClick = { vm.shareBackup() }) { Text("📦 备份数据") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(enabled = !busy, onClick = { onConfirm("restart", "重启 Bot") }) {
@@ -258,6 +272,9 @@ private fun DiagnosticsCard(diag: Diagnostics) {
             }
             diag.memory.let { mem ->
                 InfoRow("内存", "${formatBytes(mem.freeBytes)} 可用 / ${formatBytes(mem.totalBytes)}")
+            }
+            if (diag.lastBackupAt > 0) {
+                InfoRow("最近备份", ApiFormat.epochMsToLocalString(diag.lastBackupAt))
             }
             val log = diag.log
             if (log != null) InfoRow("Bot 日志", "${formatBytes(log.bytes)} · ${log.path ?: "—"}")

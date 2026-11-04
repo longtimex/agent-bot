@@ -76,7 +76,7 @@ export function buildAttachmentSections(text: string, opts: AttachmentSectionsOp
 
   const header =
     text ||
-    (saved.some((item) => item.kind === "audio")
+    (saved.some((item) => item.kind === "audio" && item.text === undefined)
       ? "请转写这段音频并回应相关内容。"
       : saved.some((item) => item.kind === "image")
         ? "请查看用户发送的图片并回应。"

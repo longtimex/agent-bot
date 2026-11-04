@@ -24,11 +24,13 @@ import com.agentbot.app.data.MediaCache
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.ProxyInfo
 import com.agentbot.app.data.ApiException
+import com.agentbot.app.data.BotCommand
 import com.agentbot.app.data.AgentBinding
 import com.agentbot.app.data.CcExecCommand
 import com.agentbot.app.data.CcProviderDraft
 import com.agentbot.app.data.CcProviderMeta
 import com.agentbot.app.data.CcStatus
+import com.agentbot.app.data.CcViewSpec
 import com.agentbot.app.data.ConfigView
 import com.agentbot.app.data.Connection
 import com.agentbot.app.data.CustomModel
@@ -36,6 +38,7 @@ import com.agentbot.app.data.DirInfo
 import com.agentbot.app.data.HelpView
 import com.agentbot.app.data.HistoryEntry
 import com.agentbot.app.data.Health
+import com.agentbot.app.data.ModelChoices
 import com.agentbot.app.data.ModelEntry
 import com.agentbot.app.data.NotConfiguredException
 import com.agentbot.app.data.OpsResult
@@ -48,6 +51,7 @@ import com.agentbot.app.data.Session
 import com.agentbot.app.data.SettingsRepository
 import com.agentbot.app.data.Status
 import com.agentbot.app.data.Task
+import com.agentbot.app.data.DailyReport
 import com.agentbot.app.data.TaskMedia
 import com.agentbot.app.data.TaskNotifier
 import com.agentbot.app.data.Usage
@@ -129,10 +133,22 @@ class AppViewModel(
     var helpSection by mutableStateOf("basic")
         private set
 
+    /** Command words the bot answers, as listed by the server next to the help copy. */
+    var botCommands by mutableStateOf<List<BotCommand>>(emptyList())
+        private set
+
+    /** Extra words that run a listed command, e.g. `tz` for `timezone`. */
+    var botAliases by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
     var connectionError by mutableStateOf<String?>(null)
         private set
 
     var session by mutableStateOf<Session?>(null)
+        private set
+
+    /** The Bot's other live sessions — normally the Telegram chat this App shadows. */
+    var peers by mutableStateOf<List<Peer>>(emptyList())
         private set
 
     var health by mutableStateOf<Health?>(null)
@@ -161,8 +177,12 @@ class AppViewModel(
     var agents by mutableStateOf<List<AgentInfo>>(emptyList())
         private set
 
-    var models by mutableStateOf<List<ModelEntry>>(emptyList())
+    var modelChoices by mutableStateOf(ModelChoices())
         private set
+
+    /** The session engine's switchable models; `hint` explains an engine that lists none. */
+    val models: List<ModelEntry> get() = modelChoices.models
+    val modelHint: String? get() = modelChoices.modelHint
 
     var customModels by mutableStateOf<List<CustomModel>>(emptyList())
         private set
@@ -185,6 +205,10 @@ class AppViewModel(
 
     /** Mutating `/cc` commands the server allowlists; rendered as the danger zone. */
     var ccCommands by mutableStateOf<List<CcExecCommand>>(emptyList())
+        private set
+
+    /** Read-only `/cc` views the server offers; some want an id or keyword. */
+    var ccViews by mutableStateOf<List<CcViewSpec>>(emptyList())
         private set
 
     /** Values for the provider create form; fetched when the form opens. */
@@ -232,6 +256,10 @@ class AppViewModel(
         private set
 
     var trend by mutableStateOf<List<UsageTrendDay>>(emptyList())
+        private set
+
+    /** Cross-chat aggregate from `/usage/report`; covers Telegram and the App together. */
+    var dailyReport by mutableStateOf<DailyReport?>(null)
         private set
 
     var status by mutableStateOf<Status?>(null)
@@ -319,8 +347,11 @@ class AppViewModel(
         private set
 
     /** Switchable models for the pinned engine, loaded when the pin changes. */
-    var oneOffModels by mutableStateOf<List<ModelEntry>>(emptyList())
+    var oneOffChoices by mutableStateOf(ModelChoices())
         private set
+
+    val oneOffModels: List<ModelEntry> get() = oneOffChoices.models
+    val oneOffModelHint: String? get() = oneOffChoices.modelHint
 
     val oneOffEngineLabel: String?
         get() = oneOffEngine?.let { id -> agents.firstOrNull { it.id == id }?.label ?: id }
@@ -328,10 +359,10 @@ class AppViewModel(
     fun setOneOffEngine(engine: String?) {
         oneOffEngine = engine?.takeIf { it.isNotBlank() }
         oneOffModel = null
-        oneOffModels = emptyList()
+        oneOffChoices = ModelChoices()
         val pinned = oneOffEngine ?: return
         // A pin may target another engine than the session, so ask for that engine's list
-        silent { oneOffModels = api.models(conn(), pinned) }
+        silent { oneOffChoices = api.models(conn(), pinned) }
     }
 
     fun setOneOffModel(model: String?) {
@@ -405,7 +436,9 @@ class AppViewModel(
                 } catch (_: Exception) {
                 }
             }
-            if (staged < uris.size) toast = "部分分享内容无法读取"
+            if (staged < uris.size) {
+                toast = if (staged == 0) "分享内容无法读取" else "部分分享内容无法读取（已导入 $staged/${uris.size}）"
+            }
         }
     }
 
@@ -433,6 +466,7 @@ class AppViewModel(
             Screen.Session -> {
                 refreshDir()
                 refreshTimezone()
+                refreshPeers()
             }
             Screen.Queue -> refreshQueue()
             Screen.Agents -> refreshAgents()
@@ -454,9 +488,10 @@ class AppViewModel(
         if (session == null) refreshSession()
     }
 
-    fun saveConnection(baseUrl: String, token: String) {
+    fun saveConnection(baseUrl: String, token: String, encKey: String? = null) {
         settings.baseUrl = baseUrl
         settings.token = token
+        settings.encKey = encKey.orEmpty()
         configured = settings.connection() != null
         session = null
         health = null
@@ -483,6 +518,22 @@ class AppViewModel(
         }
     }
 
+    fun refreshPeers() {
+        guarded("加载对端会话") { peers = api.peers(conn()) }
+    }
+
+    /**
+     * Takes the other end's engine, model and work dir for this App. Nothing is pushed to
+     * Telegram — the two sessions stay separate, and this only aligns the App with it.
+     */
+    fun followPeer(scope: String) {
+        guarded("跟随对端会话") {
+            toast = api.followPeer(conn(), scope)
+            session = api.session(conn())
+            peers = api.peers(conn())
+        }
+    }
+
     /** Refreshes the visible tab after the app returns to the foreground; failures stay silent. */
     fun onForeground() {
         silent { health = api.health(conn()); session = api.session(conn()) }
@@ -492,16 +543,18 @@ class AppViewModel(
             Screen.Schedules -> silent { schedules = api.schedules(conn()) }
             Screen.Queue -> pollQueue()
             Screen.Agents -> silent { agents = api.agents(conn()) }
-            Screen.Models -> silent { models = api.models(conn()) }
+            Screen.Models -> silent { modelChoices = api.models(conn()) }
             Screen.Session -> {
                 silent { dirInfo = api.dir(conn()) }
                 silent { timezone = api.timezone(conn()) }
+                silent { peers = api.peers(conn()) }
             }
             Screen.Status -> silent {
                 status = api.status(conn())
                 val (summary, days) = api.usage(conn())
                 usage = summary
                 trend = days
+                dailyReport = api.usageReport(conn())
                 serverInfo = api.info(conn())
             }
             Screen.Proxy -> silent {
@@ -515,11 +568,7 @@ class AppViewModel(
                 accessUsers = info.users
                 allowAllUsers = info.allowAll
             }
-            Screen.Cc -> if (!ccBusy) silent {
-                val status = api.ccStatus(conn())
-                ccStatus = status
-                if (status.available) ccCommands = api.ccExecCommands(conn())
-            }
+            Screen.Cc -> if (!ccBusy) silent { reloadCcTables() }
             Screen.Config -> silent { configView = api.config(conn()) }
             Screen.Help -> silent { helpView = api.help(conn()) }
             Screen.Ops -> if (opsActionBusy == null) {
@@ -631,11 +680,19 @@ class AppViewModel(
 
     // ---- cc-switch console ----
 
+    /** Reloads the console's server-driven tables, so views and actions never drift apart. */
+    private suspend fun reloadCcTables() {
+        val status = api.ccStatus(conn())
+        ccStatus = status
+        if (status.available) {
+            ccCommands = api.ccExecCommands(conn())
+            ccViews = api.ccViews(conn())
+        }
+    }
+
     fun refreshCc() {
         guarded("加载 cc-switch") {
-            val status = api.ccStatus(conn())
-            ccStatus = status
-            if (status.available) ccCommands = api.ccExecCommands(conn())
+            reloadCcTables()
         }
     }
 
@@ -681,9 +738,7 @@ class AppViewModel(
                 ccPanelTitle = "🧩 新建 Provider · $name"
                 ccPanelText = result.text
                 // A new provider changes the list and the danger zone in one go
-                val status = api.ccStatus(conn())
-                ccStatus = status
-                if (status.available) ccCommands = api.ccExecCommands(conn())
+                reloadCcTables()
             } catch (err: Exception) {
                 connectionError = "创建 Provider 失败：${err.message}"
             } finally {
@@ -734,7 +789,7 @@ class AppViewModel(
         }
     }
 
-    /** Loads one of the read-only cc-switch panels by name. */
+    /** Loads one of the console's dedicated text panels (proxy, MCP, prompts, env). */
     fun ccShowPanel(kind: String) {
         if (ccBusy) return
         viewModelScope.launch {
@@ -745,19 +800,28 @@ class AppViewModel(
                     "mcp" -> "MCP 列表" to api.ccMcp(conn())
                     "prompts" -> "提示词" to api.ccPrompts(conn())
                     "env-tools" -> "环境工具" to api.ccEnv(conn(), "tools").text
-                    "config" -> "cc-switch 配置" to api.ccView(conn(), "config")
-                    "sessions" -> "会话列表" to api.ccView(conn(), "sessions")
-                    "auth" -> "认证状态" to api.ccView(conn(), "auth")
-                    "skills" -> "技能列表" to api.ccView(conn(), "skills")
-                    "failover" -> "故障转移" to api.ccView(conn(), "failover")
-                    "daemon" -> "守护进程" to api.ccView(conn(), "daemon")
-                    "settings" -> "cc-switch 设置" to api.ccView(conn(), "settings")
                     else -> "环境检查" to api.ccEnv(conn(), "check").text
                 }
                 ccPanelTitle = title
                 ccPanelText = text
             } catch (err: Exception) {
                 connectionError = "加载 $kind 失败：${err.message}"
+            } finally {
+                ccBusy = false
+            }
+        }
+    }
+
+    /** Opens one of the server-listed read-only views; [target] is needed by some of them. */
+    fun ccShowView(view: CcViewSpec, target: String? = null) {
+        if (ccBusy) return
+        viewModelScope.launch {
+            ccBusy = true
+            try {
+                ccPanelTitle = "🔍 ${view.label}"
+                ccPanelText = api.ccView(conn(), view.name, target)
+            } catch (err: Exception) {
+                connectionError = "加载 ${view.label} 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -941,8 +1005,7 @@ class AppViewModel(
                 ccPanelTitle = "🔗 Deep Link 导入"
                 ccPanelText = result.text
                 // A link can add providers, so the console should show the new state at once
-                ccStatus = api.ccStatus(conn())
-                ccCommands = api.ccExecCommands(conn())
+                reloadCcTables()
             } catch (err: Exception) {
                 connectionError = "Deep Link 导入失败：${err.message}"
             } finally {
@@ -1044,7 +1107,7 @@ class AppViewModel(
     }
 
     fun refreshModels() {
-        guarded("加载模型") { models = api.models(conn()) }
+        guarded("加载模型") { modelChoices = api.models(conn()) }
     }
 
     fun refreshHistory() {
@@ -1064,7 +1127,74 @@ class AppViewModel(
     }
 
     /** The full history document for the share sheet; throws on transport errors. */
-    suspend fun historyExport(): String = api.exportHistory(conn(), "markdown")
+    suspend fun historyExport(format: String = "markdown"): String = api.exportHistory(conn(), format)
+
+    /**
+     * Set by a typed `/export json` so the history page runs the share sheet it already
+     * owns; the ViewModel has no Android intent business.
+     */
+    var exportRequested by mutableStateOf<String?>(null)
+        private set
+
+    fun requestExport(format: String) {
+        exportRequested = format
+        navigate(Screen.History)
+    }
+
+    fun clearExportRequest() {
+        exportRequested = null
+    }
+
+    /**
+     * A destructive maintenance action typed as `/restart`, `/update` or
+     * `/service opencode stop`; the ops page keeps the confirmation dialog so a
+     * typed word can never run it without a tap, exactly like Telegram's confirm card.
+     */
+    var opsConfirmRequested by mutableStateOf<Pair<String, String>?>(null)
+        private set
+
+    fun requestOpsConfirm(path: String, label: String) {
+        opsConfirmRequested = path to label
+        navigate(Screen.Ops)
+    }
+
+    fun clearOpsConfirmRequest() {
+        opsConfirmRequested = null
+    }
+
+    /**
+     * `/agents install codex` typed in the chat box. The engine page owns the confirmation
+     * dialog, so a word the user typed never installs, updates or removes a CLI by itself —
+     * Telegram sends a confirm card for these too, and the server re-checks every guard.
+     */
+    var agentConfirmRequested by mutableStateOf<Pair<String, String>?>(null)
+        private set
+
+    fun requestAgentConfirm(engine: String, action: String) {
+        agentConfirmRequested = engine to action
+        navigate(Screen.Agents)
+    }
+
+    fun clearAgentConfirmRequest() {
+        agentConfirmRequested = null
+    }
+
+    /**
+     * `/cc provider current` typed in the chat box. The console resolves it against the
+     * word pairs the server sends (`GET /cc/views` and `GET /cc/exec`), so a destructive
+     * one still goes through that page's confirmation dialog rather than running on text.
+     */
+    var ccRunRequested by mutableStateOf<String?>(null)
+        private set
+
+    fun requestCcWords(arg: String) {
+        ccRunRequested = arg
+        navigate(Screen.Cc)
+    }
+
+    fun clearCcRunRequest() {
+        ccRunRequested = null
+    }
 
     fun clearHistory() {
         guarded("清空历史") {
@@ -1089,12 +1219,21 @@ class AppViewModel(
             val (summary, days) = api.usage(conn())
             usage = summary
             trend = days
+            dailyReport = api.usageReport(conn())
             serverInfo = api.info(conn())
         }
     }
 
     fun refreshHelp() {
-        guarded("加载帮助") { helpView = api.help(conn()) }
+        guarded("加载帮助") { loadHelp() }
+    }
+
+    /** The help copy and the command list come from one endpoint, so they never drift apart. */
+    private suspend fun loadHelp() {
+        val view = api.help(conn())
+        helpView = view
+        botCommands = view.commands
+        botAliases = view.aliases
     }
 
     fun selectHelpSection(id: String) {
@@ -1171,10 +1310,24 @@ class AppViewModel(
                 }
                 persistMessages()
                 pollTask(task.id)
+            } catch (err: ApiException) {
+                // The server prunes old tasks; then only the local history can help,
+                // at the cost of attachments and the model pin
+                if (err.code == 404) resendFromHistory(index) else connectionError = "重试失败：${err.message}"
             } catch (err: Exception) {
                 connectionError = "重试失败：${err.message}"
             }
         }
+    }
+
+    /** Text-only resend of the prompt preceding message [index]. */
+    private fun resendFromHistory(index: Int) {
+        val prompt = messages.subList(0, index).lastOrNull { it.role == ChatMessage.Role.USER }?.text
+        if (prompt.isNullOrBlank()) {
+            toast = "没有可重试的任务"
+            return
+        }
+        if (!send(prompt)) toast = "任务执行中，请先等待或停止当前任务"
     }
 
     fun resetModel() {
@@ -1218,8 +1371,12 @@ class AppViewModel(
     }
 
     /** Silent refresh for the chat palette; a failed lookup must not paint an error banner. */
-    fun refreshAliasesQuietly() {
-        silent { aliases = api.aliases(conn()) }
+    fun refreshPalette() {
+        silent {
+            aliases = api.aliases(conn())
+            // The "/" palette needs the bot's own command words; they ride on /help
+            if (botCommands.isEmpty()) loadHelp()
+        }
     }
 
     /** Input format matches `/alias add 名称 指令内容`: first word is the name. */
@@ -1366,6 +1523,23 @@ class AppViewModel(
         opsResult = null
     }
 
+    /** 干跑检查更新：与 Telegram「🔍 检查更新」一致，不改动服务器工作区。 */
+    fun checkForUpdates() {
+        if (opsActionBusy != null) return
+        viewModelScope.launch {
+            opsActionBusy = "检查更新"
+            try {
+                val result = api.checkUpdate(conn())
+                opsResult = result
+                toast = result.message ?: "检查完成"
+            } catch (err: Exception) {
+                connectionError = "检查更新失败：${err.message}"
+            } finally {
+                opsActionBusy = null
+            }
+        }
+    }
+
     fun refreshLogs(source: String = logSource, lines: Int = logLines) {
         logSource = source
         logLines = lines
@@ -1405,18 +1579,118 @@ class AppViewModel(
     }
 
     fun switchAgent(engine: String) {
+        guarded("切换引擎") { applyEngine(engine) }
+    }
+
+    private suspend fun applyEngine(engine: String) {
+        session = api.switchAgent(conn(), engine)
+        toast = "已切换到 ${session?.engineLabel ?: engine}"
+        refreshModels()
+    }
+
+    /** `/agent <id>` resolves against the server's engine list, the way Telegram's `/agent` does. */
+    fun switchAgentByQuery(query: String) {
+        val wanted = query.trim().lowercase()
         guarded("切换引擎") {
-            session = api.switchAgent(conn(), engine)
-            toast = "已切换到 ${session?.engineLabel ?: engine}"
-            refreshModels()
+            if (agents.isEmpty()) agents = api.agents(conn())
+            val hit = agents.matchEngine(wanted)
+            if (hit == null) {
+                val ids = agents.map { it.id }
+                // An older server does not list the built-in engine, so always name it
+                val choices = if ("opencode" in ids) ids else ids + "opencode"
+                connectionError = "未识别的 Agent 引擎：$query，可选：${choices.joinToString("、")}"
+            } else {
+                applyEngine(hit.id)
+            }
         }
     }
 
     fun setModel(model: ModelEntry) {
+        guarded("切换模型") { applyModel(model) }
+    }
+
+    private suspend fun applyModel(model: ModelEntry) {
+        val message = api.setModel(conn(), model.value)
+        session = api.session(conn())
+        toast = message
+    }
+
+    /** `/model <id|label>` picks a listed model, matching the same words Telegram accepts. */
+    fun selectModelByQuery(query: String) {
+        val wanted = query.trim().lowercase()
         guarded("切换模型") {
-            val message = api.setModel(conn(), model.value)
-            session = api.session(conn())
-            toast = message
+            if (modelChoices.models.isEmpty()) modelChoices = api.models(conn())
+            val hit = modelChoices.models.matchModel(wanted)
+            if (hit == null) {
+                connectionError = modelMissMessage(modelChoices, query)
+            } else {
+                applyModel(hit)
+            }
+        }
+    }
+
+    /** Telegram's refusal for a `/model <word>` that lands on nothing, worded per engine. */
+    private fun modelMissMessage(choices: ModelChoices, query: String): String {
+        if (choices.models.isNotEmpty()) {
+            return "未找到模型：$query，可选：${choices.models.joinToString("、") { it.label }}"
+        }
+        return choices.modelHint?.let {
+            "该引擎的模型由 CLI 自身配置，可用提示：$it（也可发送 /model <模型ID>）"
+        } ?: "该引擎不支持通过 Bot 切换模型，可在「引擎管理」改用 OpenCode，或在 CLI 配置中设置。"
+    }
+
+    /** `/engine <id>` pins the next message to a CLI engine without touching the session. */
+    fun pinEngineByQuery(query: String) {
+        val wanted = query.trim().lowercase()
+        if (wanted == "opencode") {
+            // The built-in engine is listed now, but a pin only means "use something else",
+            // so asking for OpenCode clears it rather than pinning its id
+            setOneOffEngine(null)
+            toast = "下一条消息交给 OpenCode"
+            return
+        }
+        guarded("设置一次性引擎") {
+            if (agents.isEmpty()) agents = api.agents(conn())
+            val hit = agents.matchEngine(wanted)
+            if (hit == null) {
+                connectionError = "未识别的 Agent 引擎：$query"
+            } else {
+                setOneOffEngine(hit.id)
+                toast = "下一条消息交给 ${hit.label}"
+            }
+        }
+    }
+
+    /** `/model! <id|label>` pins the next message's model for the pinned engine. */
+    fun pinModelByQuery(query: String) {
+        val wanted = query.trim().lowercase()
+        val local = if (oneOffEngine != null) oneOffChoices else modelChoices
+        local.models.matchModel(wanted)?.let {
+            setOneOffModel(it.value)
+            toast = "下一条消息的模型：${it.label}"
+            return
+        }
+        guarded("设置一次性模型") {
+            val choices = api.models(conn(), oneOffEngine ?: session?.engine)
+            if (oneOffEngine != null) {
+                oneOffChoices = choices
+            } else {
+                modelChoices = choices
+            }
+            val hit = choices.models.matchModel(wanted)
+            if (hit != null) {
+                setOneOffModel(hit.value)
+                toast = "下一条消息的模型：${hit.label}"
+                return
+            }
+            // A CLI that lists nothing but names a format takes the word as typed, like Telegram
+            val raw = query.trim()
+            if (choices.models.isEmpty() && choices.modelHint != null) {
+                setOneOffModel(raw)
+                toast = "下一条消息的模型：$raw"
+            } else {
+                connectionError = modelMissMessage(choices, query)
+            }
         }
     }
 
@@ -1432,9 +1706,44 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Runs a typed `/command [args]` line the way Telegram's router does, so arguments
+     * no longer turn a command into an AI prompt. Returns false when the word is not one
+     * the bot lists — then the text is a prompt (or a user shortcut for the server to expand).
+     */
+    fun runSlash(raw: String): Boolean {
+        val line = raw.trim()
+        if (!line.startsWith("/")) return false
+        val parts = line.split(SLASH_SPACES)
+        val word = parts.first().removePrefix("/").substringBefore("@").lowercase()
+        if (word.isEmpty()) return false
+        val arg = parts.drop(1).joinToString(" ").trim()
+        if (word in ONE_OFF_WORDS) return applyOneOffSlashCommand(this, word, arg)
+        val name = botAliases[word] ?: word
+        // An outdated server may not send the list yet, so the App's own table counts as known too
+        if (!(name in SLASH_COMMANDS || botCommands.any { it.command == name })) return false
+        applySlashCommand(this, name, arg)
+        return true
+    }
+
+    /** Asks the chat screen to open the one-off engine/model picker (a bare `/engine` or `/model!`). */
+    var pinPickerRequested by mutableStateOf(false)
+        private set
+
+    fun requestPinPicker() {
+        pinPickerRequested = true
+    }
+
+    fun clearPinPickerRequest() {
+        pinPickerRequested = false
+    }
+
     /** Queues a prompt; returns false when it was rejected (busy or empty). */
     fun send(text: String): Boolean {
         val raw = text.trim()
+        // A bot command typed with arguments is executed, not sent to the AI, exactly
+        // as Telegram's router does. Unknown words fall through as prompts.
+        if (raw.startsWith("/") && runSlash(raw)) return true
         if (busy) return false
         val attachments = pendingAttachments
         val engine = oneOffEngine
@@ -1447,7 +1756,7 @@ class AppViewModel(
                 val task = api.submitTask(conn(), raw, attachments, engine, model)
                 oneOffEngine = null
                 oneOffModel = null
-                oneOffModels = emptyList()
+                oneOffChoices = ModelChoices()
                 pendingAttachments = emptyList()
                 val sentAt = System.currentTimeMillis()
                 val sent = attachments.map { SentAttachment(it.name, it.mime, it.sizeBytes) }
@@ -1469,8 +1778,19 @@ class AppViewModel(
         return true
     }
 
-    /** Re-sends the last failed user prompt (the error banner's 重试, also `/retry`). */
+    /** Re-runs the last failed task (the error banner's 重试, also `/retry`). */
     fun retryLastFailed() {
+        // Telegram replays its own record of the task, so do the same and keep the
+        // attachments and model pin a local text resend would drop
+        val taskId = messages.lastOrNull {
+            it.role == ChatMessage.Role.ASSISTANT &&
+                it.taskId != null &&
+                (it.status == "failed" || it.status == "cancelled")
+        }?.taskId
+        if (taskId != null) {
+            retryTask(taskId)
+            return
+        }
         val lastUser = messages.lastOrNull { it.role == ChatMessage.Role.USER }
         if (lastUser == null || lastUser.text.isBlank()) {
             toast = "没有可重试的任务"
@@ -1577,6 +1897,57 @@ class AppViewModel(
         }
     }
 
+    /** 把每日报告文本交给系统分享面板（发给联系人、邮件或剪贴板均可）。 */
+    fun shareReport() {
+        val report = dailyReport ?: run {
+            toast = "报告尚未加载，请先打开状态页"
+            return
+        }
+        val text = report.text.ifBlank {
+            listOf(
+                "每日报告 · ${report.day}",
+                "今日任务：${report.totals.tasks} 次",
+                "近 7 天合计：${report.trendTasks} 次",
+            ).joinToString("\n")
+        }
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TITLE, "Agent Bot 每日报告")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        appContext.startActivity(
+            Intent.createChooser(send, "分享每日报告").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
+
+    /** 下载服务端数据备份（data 目录各 JSON 状态的 tar.gz）并交给系统分享面板保存。 */
+    fun shareBackup() {
+        viewModelScope.launch {
+            try {
+                val bytes = api.backupData(conn())
+                val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmssSSS", java.util.Locale.US).format(java.util.Date())
+                val dir = java.io.File(appContext.cacheDir, "backup").apply { mkdirs() }
+                val file = java.io.File(dir, "agentbot-backup-$stamp.tar.gz")
+                file.writeBytes(bytes)
+                // 分享面板只读最新一份；旧归档留给系统回收，最多保留 3 份防止缓存膨胀
+                dir.listFiles { f -> f.name.startsWith("agentbot-backup-") }
+                    ?.sortedByDescending { it.name }
+                    ?.drop(3)
+                    ?.forEach { it.delete() }
+                val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", file)
+                val share = Intent(Intent.ACTION_SEND).setType("application/gzip")
+                    .putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                appContext.startActivity(
+                    Intent.createChooser(share, "数据备份").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                toast = "备份已生成（${bytes.size / 1024} KB），请在分享面板选择保存位置"
+            } catch (err: Exception) {
+                connectionError = "备份失败：${err.message}"
+            }
+        }
+    }
+
     /** Hands one reply media item to an external viewer; falls back to the share sheet. */
     fun openMedia(taskId: String, media: TaskMedia) {
         viewModelScope.launch {
@@ -1620,6 +1991,15 @@ class AppViewModel(
         guarded("删除提醒") {
             api.deleteReminder(conn(), id)
             refreshReminders()
+        }
+    }
+
+    /** 延后一条待触发提醒，并立即同步刷新列表时间。 */
+    fun snoozeReminder(id: Long, minutes: Int) {
+        guarded("延后提醒") {
+            api.snoozeReminder(conn(), id, minutes)
+            refreshReminders()
+            toast = "已延后 $minutes 分钟，列表已同步"
         }
     }
 

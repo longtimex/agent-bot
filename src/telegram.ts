@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto"
 import QRCode from "qrcode"
 import { readFileSync, statSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
-import { relative, resolve, sep } from "node:path"
+import { resolve } from "node:path"
 import { Agent, fetch as undiciFetch } from "undici"
 import { Bot, InlineKeyboard, InputFile } from "grammy"
 import type { Context } from "grammy"
@@ -17,11 +17,11 @@ import {
   type SavedAttachment,
 } from "./attachments.js"
 import type { BotConfig, ModelRef } from "./config.js"
-import { CcSwitchService, redactSecrets, CcSwitchProviderDraft } from "./ccswitch.js"
+import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
 import { formatHistoryMarkdown, TaskHistoryStore } from "./history.js"
-import { CC_HELP, HELP, HELP_FULL } from "./help.js"
+import { BOT_MENU_COMMANDS, CC_HELP, HELP, HELP_FULL, isBotCommand } from "./help.js"
 import type { Logger } from "./logger.js"
 
 export { HELP_FULL }
@@ -32,6 +32,7 @@ export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { AgentCliService, normalizeWorkDirInput, type AgentCliProfile } from "./agentCli.js"
 import { buildAttachmentSections } from "./attachmentInput.js"
+import { applyStt } from "./stt.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import { appVersion } from "./version.js"
 import {
@@ -43,6 +44,7 @@ import {
 import { callEngine, resolveOpencodeModel, type EngineCallDeps } from "./engineCall.js"
 import { resolveApiToken } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
+import { resolveEncKey } from "./api.js"
 import { OPS_ENV_KEYS, OPS_ENV_RULES, OpsService, type OpsDiagnostics, type OpsResult } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
 import { maskProxyUrl, ProxyService } from "./proxy.js"
@@ -56,7 +58,6 @@ const MAX_PENDING = 4
 const MAX_ATTACHMENTS = 4
 const MAX_ATTACH_FILE_BYTES = 10 * 1024 * 1024
 const MAX_ATTACH_TOTAL_BYTES = 15 * 1024 * 1024
-const MAX_INLINE_TEXT_TOTAL = 100_000
 const CHUNK_DELAY_MS = 250
 const TELEGRAM_MAX_TEXT = 4000
 const SHUTDOWN_DRAIN_MS = 3_000
@@ -89,22 +90,6 @@ const SCHEDULE_USAGE = `🗓 *定时 AI 任务*
 时间格式与 \`/remind\` 相同；提示词上限 2000 字，每个会话最多 20 个任务。`
 
 
-const CC_SUB_ALIASES: Record<string, [string, string]> = {
-  "provider del": ["provider", "delete"],
-  "provider rm": ["provider", "delete"],
-  "mcp del": ["mcp", "delete"],
-  "mcp rm": ["mcp", "delete"],
-  "prompts use": ["prompts", "activate"],
-  "prompts off": ["prompts", "deactivate"],
-  "prompts stop": ["prompts", "deactivate"],
-  "prompts del": ["prompts", "delete"],
-  "prompts rm": ["prompts", "delete"],
-  "skills del": ["skills", "uninstall"],
-  "skills repo": ["skills", "repos"],
-  "sessions del": ["sessions", "delete"],
-  "auth del": ["auth", "remove"],
-}
-
 interface Job {
   key: string
   text: string
@@ -123,43 +108,6 @@ interface Job {
   retryOf?: { text: string; attachments?: AttachmentDescriptor[] }
   onOutcome?: (outcome: UsageOutcome) => void
 }
-
-/** Telegram's own "/" autocomplete menu; kept in sync with the help text by tests. */
-export const BOT_MENU_COMMANDS = [
-  { command: "start", description: "欢迎页与功能菜单入口" },
-  { command: "menu", description: "打开功能菜单" },
-  { command: "help", description: "分类帮助（/help full 查看全部）" },
-  { command: "status", description: "查看运行状态" },
-  { command: "new", description: "开启新会话（清空上下文）" },
-  { command: "agent", description: "查看或切换 Agent 引擎（推荐 OpenCode）" },
-  { command: "model", description: "查看或切换大模型" },
-  { command: "dir", description: "查看或切换本会话 CLI 工作目录" },
-  { command: "agents", description: "检测、安装或卸载 Agent CLI" },
-  { command: "schedule", description: "定时执行 AI 任务（查看/添加/暂停）" },
-  { command: "reminders", description: "查看待触发的提醒" },
-  { command: "remind", description: "设定定时提醒，如 /remind 30m 喝水" },
-  { command: "cancel", description: "取消指定编号的提醒" },
-  { command: "queue", description: "查看或清空排队消息" },
-  { command: "stop", description: "停止当前任务" },
-  { command: "retry", description: "重新发送上一条任务" },
-  { command: "usage", description: "查看任务量、成功率与耗时统计" },
-  { command: "history", description: "查看最近的任务执行历史" },
-  { command: "export", description: "导出任务历史为 Markdown/JSON 文件" },
-  { command: "proxy", description: "管理网络代理（添加/测试/启用/删除）" },
-  { command: "cc", description: "cc-switch：Provider、MCP、提示词与环境诊断" },
-  { command: "ops", description: "运维中心：诊断、日志、更新与服务管理" },
-  { command: "logs", description: "查看 Bot 或 OpenCode 日志" },
-  { command: "diag", description: "查看系统诊断信息" },
-  { command: "update", description: "更新项目代码并构建（需确认）" },
-  { command: "restart", description: "重启 Bot（需确认）" },
-  { command: "service", description: "管理 OpenCode 服务" },
-  { command: "env", description: "查看或修改非密钥配置" },
-  { command: "access", description: "管理 Telegram 访问白名单（立即生效）" },
-  { command: "api", description: "安卓 App 配对信息（HTTP API 地址与令牌）" },
-  { command: "alias", description: "自定义快捷指令（/alias add 名称 指令内容）" },
-  { command: "timezone", description: "查看或切换时区（立即生效）" },
-  { command: "id", description: "查看会话与配置信息" },
-]
 
 /** Text of the one-shot "Bot 已上线" ping sent to the owner chat after polling connects. */
 export function startupNoticeText(opts: {
@@ -648,14 +596,20 @@ export class TelegramBridge {
         await this.#handleUsage(chatId, key)
         return
       }
+      if (command === "/report") {
+        this.#offLoop(chatId, "每日报告", async () => {
+          await this.#sendTextMessage(chatId, escapeMarkdown(this.#usageReport.preview()), this.#reportKeyboard())
+        })
+        return
+      }
       if (command === "/export") {
         this.#offLoop(chatId, "导出", () => this.#handleExport(chatId, key, arg))
         return
       }
       if (command === "/history") {
         const requested = Number(arg)
-        const limit = Number.isInteger(requested) && requested > 0 ? Math.min(20, requested) : 10
-        await this.#sendPanel(chatId, this.#historyPanel(key, limit))
+        const count = Number.isInteger(requested) && requested > 0 ? Math.min(50, requested) : 10
+        await this.#sendPanel(chatId, this.#historyPanel(key, count))
         return
       }
       if (command === "/queue") {
@@ -687,7 +641,7 @@ export class TelegramBridge {
         )
         return
       }
-      if (command === "/ops" || command === "/maintenance") {
+      if (isBotCommand(command, "ops")) {
         this.#offLoop(chatId, "运维面板", async () => this.#sendPanel(chatId, await this.#opsPanel()))
         return
       }
@@ -707,7 +661,7 @@ export class TelegramBridge {
         await this.#confirmUpdate(chatId)
         return
       }
-      if (command === "/service" || command === "/svc") {
+      if (isBotCommand(command, "service")) {
         await this.#handleServiceCommand(chatId, arg)
         return
       }
@@ -719,7 +673,7 @@ export class TelegramBridge {
         await this.#handleAccessCommand(chatId, userId, arg)
         return
       }
-      if (command === "/timezone" || command === "/tz") {
+      if (isBotCommand(command, "timezone")) {
         await this.#handleTimeZone(chatId, arg)
         return
       }
@@ -821,6 +775,12 @@ export class TelegramBridge {
       const snoozeMatch = /^snooze:([0-9a-f]+):(\d+)$/.exec(data)
       if (snoozeMatch) {
         await this.#handleSnooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
+        return
+      }
+
+      // 纯展示按钮（如分页指示「2/3」）：点了只确认，不做任何事
+      if (data.startsWith("noop:")) {
+        await answer()
         return
       }
 
@@ -1174,6 +1134,20 @@ export class TelegramBridge {
         return
       }
 
+      // Panel snooze: one tap postpones a pending one-shot by an hour (the App
+      // offers 10 分钟/1 小时/明天; the delivery message keeps its own buttons)
+      if (data.startsWith("rpostpone:")) {
+        const id = Number(data.slice("rpostpone:".length))
+        try {
+          const postponed = this.#reminders.postpone(chatId, id, 60)
+          await answer(`已把 #${postponed.id} 延后 1 小时`)
+        } catch (err) {
+          await answer(err instanceof Error ? err.message : "无法延后该提醒")
+        }
+        await this.#editPanel(ctx, this.#remindersPanel(chatId))
+        return
+      }
+
       if (data.startsWith("sched:")) {
         const [action, rawId] = data.slice("sched:".length).split(":", 2)
         const id = Number(rawId)
@@ -1279,12 +1253,17 @@ export class TelegramBridge {
       ? "<你的服务器地址>"
       : bind
     let qrBuffer: Buffer | undefined
+    // 启用了消息级加密时,把配对密钥一起放进二维码(App 侧自动开启加密)
+    const encKey = resolveEncKey(this.#cfg)?.toString("base64")
     try {
-      qrBuffer = await QRCode.toBuffer(JSON.stringify({ url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token }), {
-        margin: 2,
-        width: 640,
-        color: { dark: "#0b0c0e", light: "#ffffff" },
-      })
+      qrBuffer = await QRCode.toBuffer(
+        JSON.stringify(encKey ? { url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token, enc: encKey } : { url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token }),
+        {
+          margin: 2,
+          width: 640,
+          color: { dark: "#0b0c0e", light: "#ffffff" },
+        },
+      )
     } catch (err) {
       this.#log.warn(`pairing QR generation failed: ${(err as Error).message}`)
     }
@@ -1293,6 +1272,9 @@ export class TelegramBridge {
       `📱 *安卓 App 配对信息*\n` +
       `• API 地址: \`http://${host}:${port}/api/v1\`\n` +
       `• 访问令牌: \`${token}\`\n\n` +
+      (encKey
+        ? "🔐 消息级加密已启用：二维码含配对密钥，扫码后请求与响应将自动加密。\n\n"
+        : "🔒 消息级加密：未启用。在 .env 设置 `API_ENCRYPTION=1` 并重启后，二维码会带上配对密钥，App 通信将自动加密。\n\n") +
       (wildcard
         ? "⚠️ 当前监听所有网卡。请配合反向代理 / SSH 隧道 / VPN 暴露给手机，并保持令牌鉴权。\n\n"
         : "") +
@@ -1552,13 +1534,20 @@ export class TelegramBridge {
       trend.length > 1
         ? `${trend[0]!.day.slice(5)} → ${trend[trend.length - 1]!.day.slice(5)}`
         : trend[0]!.day.slice(5)
+    // Cross-chat view: Telegram numbers gain meaning once the App (or another chat) also runs tasks
+    const globalToday = this.#usage.dayTotalsByChat(0)
+    const otherSources = globalToday.filter((row) => row.key !== key)
+    const globalLine =
+      otherSources.length > 0
+        ? `\n• 全局今日：${globalToday.reduce((sum, row) => sum + row.usage.tasks, 0)} 次（含 ${otherSources.length} 个其他来源，点「📩 每日报告」看明细）`
+        : ""
     return {
       text:
         `📈 *使用统计*\n\n` +
         `• 总任务：${usage.tasks}（成功 ${usage.ok} / 失败 ${usage.failed} / 取消 ${usage.cancelled}）\n` +
         `• 成功率：${rate}%\n` +
         `• 平均耗时：${formatDuration(avg)}\n` +
-        `• 今日任务：${usage.today.tasks}（成功 ${usage.today.ok} / 失败 ${usage.today.failed} / 取消 ${usage.today.cancelled}）\n` +
+        `• 今日任务：${usage.today.tasks}（成功 ${usage.today.ok} / 失败 ${usage.today.failed} / 取消 ${usage.today.cancelled}）${globalLine}\n` +
         `• 近 7 天：${week.tasks} 任务（成功 ${week.ok} / 失败 ${week.failed} / 取消 ${week.cancelled}）\n` +
         `  \`${spark}\` ${range}\n` +
         `• 引擎使用：${engineUsage}` +
@@ -1567,7 +1556,7 @@ export class TelegramBridge {
     }
   }
 
-  #historyPanel(key: string, limit = 10): Panel {
+  #historyPanel(key: string, count = 10): Panel {
     const total = this.#history.count(key)
     const keyboard = new InlineKeyboard().text("🔄 刷新", "show:history").text("⬅️ 主菜单", "show:menu")
     if (total === 0) {
@@ -1577,11 +1566,15 @@ export class TelegramBridge {
       }
     }
     keyboard.row().text("🧹 清空历史", "history:clear")
+    // 渐进加载：「更早」每次多看 10 条，最多到存储上限 50（到顶就不再显示按钮）
+    const wanted = Math.min(Math.max(10, count), 50)
+    if (wanted < total && wanted < 50) keyboard.row().text("⬇️ 更早 10 条", `show:history:${wanted + 10}`)
+    if (wanted > 10) keyboard.text("⬆️ 回到最新", "show:history:10")
 
     const lines: string[] = []
     let length = 0
     let shown = 0
-    for (const entry of this.#history.list(key, limit)) {
+    for (const entry of this.#history.list(key, wanted)) {
       const status =
         entry.outcome === "ok" ? "✅ 成功" : entry.outcome === "cancelled" ? "🛑 已取消" : "❌ 失败"
       const engine = this.#agents.registry.label(entry.engine)
@@ -1596,11 +1589,10 @@ export class TelegramBridge {
       length += line.length + 2
       shown += 1
     }
-    const more =
-      shown < total ? `\n\n_另有 ${total - shown} 条更早记录，可发送 \`/history ${Math.min(20, total)}\` 查看。_` : ""
+    const capped = shown < wanted ? `\n\n_消息过长，只渲染了前 ${shown} 条；可用 \`/export\` 导出完整历史。_` : ""
 
     return {
-      text: `🕘 *任务历史*（已显示 ${shown} / 共 ${total} 条）\n\n${lines.join("\n\n")}${more}`,
+      text: `🕘 *任务历史*（已显示 ${shown} / 共 ${total} 条）\n\n${lines.join("\n\n")}${capped}`,
       keyboard,
     }
   }
@@ -1629,6 +1621,9 @@ export class TelegramBridge {
       `• Agent CLI: ${detected} 个已安装\n` +
       `• 待触发提醒: ${reminders} 条\n• 定时任务: ${schedules} 个\n` +
       `• 网络代理: ${proxy ? `#${proxy.id} ${escapeMarkdown(proxy.name)}` : "未启用"}\n` +
+      `• 消息级加密: ${resolveEncKey(this.#cfg) ? "已启用" : "未启用（API_ENCRYPTION=1）"}\n` +
+      `• 语音转写: ${this.#cfg.stt ? `已启用（${escapeMarkdown(this.#cfg.stt.model)}，模型不支持音频时自动转写）` : "未配置（STT_BASE_URL）"}\n` +
+      `• 每日报告: ${this.#cfg.usageReport?.enabled ? `每天 ${this.#cfg.usageReport.time} 推送` : "未开启（USAGE_DAILY_REPORT）"}\n` +
       `• Bot 运行时长: ${formatDuration(Date.now() - this.#startedAt)}`
     )
   }
@@ -1856,10 +1851,10 @@ export class TelegramBridge {
     await this.#sendTextMessage(chatId, SCHEDULE_USAGE)
   }
 
-  #schedulePanel(chatId: number): Panel {
-    const items = this.#schedules.list(chatId)
+  #schedulePanel(chatId: number, page = 1): Panel {
+    const all = this.#schedules.list(chatId)
     const keyboard = new InlineKeyboard()
-    if (items.length === 0) {
+    if (all.length === 0) {
       return {
         text:
           "🗓 *定时任务*\n\n暂无定时任务。\n\n" +
@@ -1869,10 +1864,14 @@ export class TelegramBridge {
       }
     }
 
+    // 与 /reminders 面板同款分页：一页 4 个任务（每个占一整行按钮）
+    const PAGE_SIZE = 4
+    const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE))
+    const current = Math.min(Math.max(1, page), pages)
+    const items = all.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
+
     const now = Date.now()
     const lines: string[] = []
-    let length = 0
-    let shown = 0
     for (const item of items) {
       const state = item.paused ? "⏸" : "✅"
       const when = formatReminderTime(item.dueAt, this.#timezone)
@@ -1890,18 +1889,10 @@ export class TelegramBridge {
           }`
         : ""
       const promptText = `${clip(item.prompt, 200) ?? ""}${item.prompt.length > 200 ? "…" : ""}`
-      const line = `${state} #${item.id} ${whenText}${repeat}\n  ${scheduleTargetLabel(item, this.#agents.registry)}\n  ${escapeMarkdown(promptText)}${last}`
-      if (length + line.length > 3000) break
-      lines.push(line)
-      length += line.length + 2
-      shown += 1
+      lines.push(`${state} #${item.id} ${whenText}${repeat}\n  ${scheduleTargetLabel(item, this.#agents.registry)}\n  ${escapeMarkdown(promptText)}${last}`)
     }
-    const more =
-      shown < items.length
-        ? `\n\n_…另有 ${items.length - shown} 个未显示，可用 /schedule del 编号删除。_`
-        : ""
 
-    items.forEach((item, index) => {
+    items.forEach((item) => {
       keyboard
         .text(`▶️ 运行 #${item.id}`, `sched:run:${item.id}`)
         .text(
@@ -1909,13 +1900,18 @@ export class TelegramBridge {
           item.paused ? `sched:resume:${item.id}` : `sched:pause:${item.id}`,
         )
         .text(`🗑 删除 #${item.id}`, `sched:del:${item.id}`)
-      if (index < items.length - 1) keyboard.row()
+      keyboard.row()
     })
-    keyboard.row().text("🔄 刷新", "show:schedule").text("⬅️ 主菜单", "show:menu")
+    if (current > 1) keyboard.text("⬅️ 上一页", `show:schedule:${current - 1}`)
+    if (pages > 1) keyboard.text(`📄 ${current}/${pages}`, "noop:page")
+    if (current < pages) keyboard.text("➡️ 下一页", `show:schedule:${current + 1}`)
+    if (pages > 1) keyboard.row()
+    keyboard.text("🔄 刷新", "show:schedule").text("⬅️ 主菜单", "show:menu")
 
+    const heading = pages > 1 ? `🗓 *定时任务（${all.length}）· 第 ${current}/${pages} 页*` : `🗓 *定时任务（${all.length}）*`
     return {
       text:
-        `🗓 *定时任务（${items.length}）*\n\n${lines.join("\n\n")}${more}\n\n` +
+        `${heading}\n\n${lines.join("\n\n")}\n\n` +
         "到点后自动执行并把结果发到这里。发送 `/schedule add ...` 新建；「▶️ 运行」立即执行一次，不影响原定时间。",
       keyboard,
     }
@@ -2064,7 +2060,7 @@ export class TelegramBridge {
       return
     }
 
-    if (command === "/new" || command === "/reset") {
+    if (isBotCommand(command, "new")) {
       const engine = this.#store.getEngine(job.key)
       if (engine === "opencode") {
         const old = this.#store.get(job.key)
@@ -2351,7 +2347,9 @@ export class TelegramBridge {
     pruneInbox(this.#cfg.inboxDir)
 
     const caps = model ? await this.#oc.inputCapabilities(model) : undefined
-    return buildAttachmentSections(job.text, { saved, failed, modelCapabilities: caps })
+    const stt = await applyStt(saved, { stt: this.#cfg.stt, modelCapabilities: caps, maxBytes: MAX_ATTACH_FILE_BYTES })
+    failed.push(...stt.errors)
+    return buildAttachmentSections(job.text, { saved: stt.saved, failed, modelCapabilities: caps })
   }
 
   async #handleAgentCommand(job: Job, target?: string): Promise<void> {
@@ -2614,7 +2612,8 @@ export class TelegramBridge {
       `• Bot 日志：${formatBytes(diag.log.bytes)} · \`${escapeMarkdown(diag.log.path)}\`\n` +
       `• OpenCode 日志：${formatBytes(diag.opencodeLog.bytes)}\n` +
       `• 磁盘：${disk}\n` +
-      `• 内存：${memory}`
+      `• 内存：${memory}\n` +
+      `• 最近备份：${diag.lastBackupAt ? `${formatDateTime(diag.lastBackupAt, this.#timezone)}（📦 备份数据）` : "尚未备份"}`
     )
   }
 
@@ -2647,8 +2646,9 @@ export class TelegramBridge {
       .text("🔍 检查更新", "ops:checkup")
       .row()
       .text("⬆️ 更新项目", "ops:update")
-      .text("🔄 重启 Bot", "ops:restart")
+      .text("📦 备份数据", "ops:backup")
       .row()
+      .text("🔄 重启 Bot", "ops:restart")
       .text("🔄 刷新", "show:ops")
       .row()
       .text("⬅️ 主菜单", "show:menu")
@@ -2766,6 +2766,11 @@ export class TelegramBridge {
       void this.#runOpsAction(chatId, "检查更新", () => this.#ops.checkUpdate())
       return
     }
+    if (action === "backup") {
+      await answer("正在打包…")
+      void this.#runBackup(chatId)
+      return
+    }
     if (action === "cc") {
       await answer()
       await this.#confirmCcSwitch(chatId)
@@ -2850,6 +2855,33 @@ export class TelegramBridge {
         }
         void this.#runOpsAction(chatId, "重启 OpenCode", () => this.#ops.restartOpencode())
         return
+    }
+  }
+
+  /** Packs data/*.json and sends the archive into the chat; keeps ops-slot exclusivity. */
+  async #runBackup(chatId: number): Promise<void> {
+    if (this.#opsRunning) {
+      await this.#sendTextMessage(chatId, `⏳ 正在执行「${escapeMarkdown(this.#opsRunning)}」，请稍后再试。`)
+      return
+    }
+    this.#opsRunning = "备份数据"
+    try {
+      const result = await this.#ops.backupData()
+      if (result.ok && result.file) {
+        const name = result.file.split("/").pop() ?? "backup.tar.gz"
+        await this.#bot.api.sendDocument(chatId, new InputFile(readFileSync(result.file), name), {
+          caption: escapeMarkdown(result.message),
+        })
+      } else {
+        await this.#sendOpsResult(chatId, result)
+      }
+      await this.#sendPanel(chatId, await this.#opsPanel())
+    } catch (err) {
+      const detail = redactSecrets((err as Error).message)
+      this.#log.error(`ops 备份数据 failed:`, this.#maskToken(detail))
+      await this.#sendTextMessage(chatId, `❌ 备份数据失败：${escapeMarkdown(detail)}`)
+    } finally {
+      this.#opsRunning = ""
     }
   }
 
@@ -3521,7 +3553,8 @@ export class TelegramBridge {
       `💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务。\n` +
       `☰ 发送 \`/menu\` 打开功能菜单（含 Agent、模型、任务、cc-switch 与运维中心）。\n\n` +
       `*直接发消息即可对话：*\n• 代码编写、分析与调试\n• 发送图片、文件、语音（文本文件会读取内容）\n` +
-      `• 发送 \`/remind 30m 喝水\` 设定提醒\n• 发送 \`/schedule add 30m 检查服务器\` 定时执行 AI 任务\n\n` +
+      `• 发送 \`/remind 30m 喝水\` 设定提醒\n• 发送 \`/schedule add 30m 检查服务器\` 定时执行 AI 任务\n` +
+      `• 发送 \`/report\` 看每日用量报告 · \`/export\` 导出任务历史\n\n` +
       `_仅响应私聊消息。发送 /help 查看帮助，或 /menu 打开功能菜单。_`
     )
   }
@@ -3784,43 +3817,47 @@ export class TelegramBridge {
   }
 
 
-  #remindersPanel(chatId: number): Panel {
-    const items = this.#reminders.list(chatId)
-    if (items.length === 0) {
+  #remindersPanel(chatId: number, page = 1): Panel {
+    const all = this.#reminders.list(chatId)
+    if (all.length === 0) {
       return {
         text: "📭 *暂无待触发的提醒*\n\n发送 `/remind 30m 喝水` 即可创建。",
         keyboard: new InlineKeyboard().text("🔄 刷新", "show:reminders").text("⬅️ 主菜单", "show:menu"),
       }
     }
 
+    // 一页 8 条（2 列 × 4 行按钮刚好放下）；超出部分用翻页按钮浏览
+    const PAGE_SIZE = 8
+    const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE))
+    const current = Math.min(Math.max(1, page), pages)
+    const items = all.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
+
     const now = Date.now()
     const lines: string[] = []
-    let length = 0
-    let shown = 0
     for (const item of items) {
       const when = formatReminderTime(item.dueAt, this.#timezone)
       const remaining = formatRemaining(item.dueAt - now)
       const repeat = item.repeat ? ` 🔁 ${describeRepeat(item.repeat)}` : ""
-      const line = `• #${item.id} ${when}（${remaining}后）${repeat}\n  ${escapeMarkdown(item.text)}`
-      if (length + line.length > 3000) break
-      lines.push(line)
-      length += line.length + 2
-      shown += 1
+      lines.push(`• #${item.id} ${when}（${remaining}后）${repeat}\n  ${escapeMarkdown(item.text)}`)
     }
-    const more =
-      shown < items.length
-        ? `\n\n_…另有 ${items.length - shown} 条未显示，可用 \`/cancel 编号\` 取消。_`
-        : ""
 
     const keyboard = new InlineKeyboard()
     items.forEach((item, index) => {
+      // Only one-shots can be postponed; repeating reminders keep their schedule
+      if (!item.repeat) keyboard.text(`⏰+1h #${item.id}`, `rpostpone:${item.id}`)
       keyboard.text(`❌ 取消 #${item.id}`, `rcancel:${item.id}`)
       if (index % 2 === 1 && index < items.length - 1) keyboard.row()
     })
-    keyboard.row().text("🔄 刷新", "show:reminders").text("⬅️ 主菜单", "show:menu")
+    keyboard.row()
+    if (current > 1) keyboard.text("⬅️ 上一页", `show:reminders:${current - 1}`)
+    if (pages > 1) keyboard.text(`📄 ${current}/${pages}`, "noop:page")
+    if (current < pages) keyboard.text("➡️ 下一页", `show:reminders:${current + 1}`)
+    if (current > 1 || current < pages) keyboard.row()
+    keyboard.text("🔄 刷新", "show:reminders").text("⬅️ 主菜单", "show:menu")
 
+    const heading = pages > 1 ? `⏰ *待触发的提醒（${all.length}）· 第 ${current}/${pages} 页*` : `⏰ *待触发的提醒（${items.length}）*`
     return {
-      text: `⏰ *待触发的提醒（${items.length}）*\n\n${lines.join("\n\n")}${more}\n\n点击按钮取消，或发送 \`/cancel 编号\`。`,
+      text: `${heading}\n\n${lines.join("\n\n")}\n\n一次性提醒可「⏰+1h」一键延后；点击按钮取消，或发送 \`/cancel 编号\`。`,
       keyboard,
     }
   }
@@ -3834,12 +3871,21 @@ export class TelegramBridge {
       case "model": return this.#modelPanel(key)
       case "dir": return this.#dirPanel(key)
       case "access": return this.#accessPanel()
-      case "reminders": return this.#remindersPanel(chatId)
-      case "schedule": return this.#schedulePanel(chatId)
+      case "reminders": {
+        const rawPage = Number(which.split(":")[1])
+        return this.#remindersPanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
+      }
+      case "schedule": {
+        const rawPage = Number(which.split(":")[1])
+        return this.#schedulePanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
+      }
       case "queue": return this.#queuePanel(key)
       case "proxy": return this.#proxyPanel()
       case "usage": return this.#usagePanel(key)
-      case "history": return this.#historyPanel(key)
+      case "history": {
+        const rawCount = Number(which.split(":")[1])
+        return this.#historyPanel(key, Number.isInteger(rawCount) && rawCount > 0 ? rawCount : 10)
+      }
       case "cc": return await this.#ccCommands.panel(chatId)
       case "ops": return await this.#opsPanel()
       case "service": return await this.#servicePanel()

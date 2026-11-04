@@ -110,30 +110,56 @@ fun HistoryScreen(vm: AppViewModel) {
             Text("任务历史", style = MaterialTheme.typography.titleLarge)
             Row {
                 var exporting by remember { mutableStateOf(false) }
+                var exportMenu by remember { mutableStateOf(false) }
                 val context = androidx.compose.ui.platform.LocalContext.current
                 val scope = androidx.compose.runtime.rememberCoroutineScope()
-                TextButton(
-                    onClick = {
-                        if (exporting) return@TextButton
-                        exporting = true
-                        scope.launch {
-                            runCatching { vm.historyExport() }
-                                .onSuccess { markdown ->
-                                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                        type = "text/markdown"
-                                        putExtra(android.content.Intent.EXTRA_TITLE, "Agent Bot 任务历史")
-                                        putExtra(android.content.Intent.EXTRA_TEXT, markdown)
-                                    }
-                                    context.startActivity(
-                                        android.content.Intent.createChooser(send, "分享任务历史"),
-                                    )
+                // Telegram's /export accepts md or json, so the sheet offers both
+                fun share(format: String) {
+                    if (exporting) return
+                    exporting = true
+                    scope.launch {
+                        runCatching { vm.historyExport(format) }
+                            .onSuccess { text ->
+                                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = if (format == "json") "application/json" else "text/markdown"
+                                    putExtra(android.content.Intent.EXTRA_TITLE, "Agent Bot 任务历史")
+                                    putExtra(android.content.Intent.EXTRA_TEXT, text)
                                 }
-                                .onFailure { vm.connectionError = "导出失败：${it.message}" }
-                            exporting = false
-                        }
-                    },
-                ) {
-                    Text(if (exporting) "导出中…" else "分享")
+                                context.startActivity(
+                                    android.content.Intent.createChooser(send, "分享任务历史"),
+                                )
+                            }
+                            .onFailure { vm.connectionError = "导出失败：${it.message}" }
+                        exporting = false
+                    }
+                }
+                // A `/export json` typed in the chat box arrives here
+                LaunchedEffect(vm.exportRequested) {
+                    vm.exportRequested?.let {
+                        vm.clearExportRequest()
+                        share(it)
+                    }
+                }
+                Box {
+                    TextButton(onClick = { exportMenu = true }, enabled = !exporting) {
+                        Text(if (exporting) "导出中…" else "分享")
+                    }
+                    DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Markdown（默认）") },
+                            onClick = {
+                                exportMenu = false
+                                share("markdown")
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("JSON") },
+                            onClick = {
+                                exportMenu = false
+                                share("json")
+                            },
+                        )
+                    }
                 }
                 TextButton(onClick = { vm.clearHistory() }) { Text("清空", color = MaterialTheme.colorScheme.error) }
             }
@@ -243,6 +269,7 @@ fun HistoryScreen(vm: AppViewModel) {
 @Composable
 fun RemindersScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
+    var snoozeTarget by remember { mutableStateOf<com.agentbot.app.data.Reminder?>(null) }
     val now = rememberClock()
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Text(
@@ -282,6 +309,10 @@ fun RemindersScreen(vm: AppViewModel) {
                                     style = MaterialTheme.typography.labelMedium,
                                 )
                             }
+                            // 一次性提醒可延后（与 Telegram 投递按钮同款时长）；重复提醒保持周期
+                            if (reminder.repeat == null) {
+                                TextButton(onClick = { snoozeTarget = reminder }) { Text("延后") }
+                            }
                             IconButton(onClick = { vm.deleteReminder(reminder.id) }) {
                                 Icon(Icons.Filled.Delete, contentDescription = "删除", tint = TextSecondary)
                             }
@@ -299,6 +330,28 @@ fun RemindersScreen(vm: AppViewModel) {
             onConfirm = { text ->
                 vm.addReminder(text)
                 showAdd = false
+            },
+        )
+    }
+    snoozeTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { snoozeTarget = null },
+            title = { Text("延后提醒") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(target.text, style = MaterialTheme.typography.bodyMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("10 分钟" to 10, "1 小时" to 60, "明天" to 1440).forEach { (label, minutes) ->
+                            TextButton(onClick = {
+                                vm.snoozeReminder(target.id, minutes)
+                                snoozeTarget = null
+                            }) { Text(label) }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { snoozeTarget = null }) { Text("取消") }
             },
         )
     }

@@ -33,6 +33,7 @@ import com.agentbot.app.ui.theme.TextSecondary
 fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRepository) {
     var baseUrl by remember { mutableStateOf(settings.baseUrl) }
     var token by remember { mutableStateOf(settings.token) }
+    var encKey by remember { mutableStateOf(settings.encKey) }
     var message by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
 
@@ -43,10 +44,12 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             val scannedUrl = obj["url"]?.jsonPrimitive?.content.orEmpty()
             val scannedToken = obj["token"]?.jsonPrimitive?.content.orEmpty()
             if (scannedUrl.isBlank() || scannedToken.isBlank()) throw IllegalStateException("二维码缺少 url/token")
+            val scannedEnc = obj["enc"]?.jsonPrimitive?.content.orEmpty()
             val normalized = ApiFormat.normalizeBaseUrl(scannedUrl)
             baseUrl = normalized
             token = scannedToken
-            vm.saveConnection(normalized, scannedToken)
+            encKey = scannedEnc
+            vm.saveConnection(normalized, scannedToken, scannedEnc.ifBlank { null })
         }.onFailure { message = "二维码无效：${it.message}" }
     }
 
@@ -81,6 +84,15 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                 .padding(top = 12.dp),
             singleLine = true,
         )
+        OutlinedTextField(
+            value = encKey,
+            onValueChange = { encKey = it },
+            label = { Text("加密密钥（可选，服务器 API_ENCRYPTION=1 时由 /api 二维码下发）") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            singleLine = true,
+        )
 
         Row(modifier = Modifier.padding(top = 20.dp)) {
             Button(
@@ -89,7 +101,7 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                     message = null
                     val normalized = ApiFormat.normalizeBaseUrl(baseUrl)
                     baseUrl = normalized
-                    vm.saveConnection(normalized, token.trim())
+                    vm.saveConnection(normalized, token.trim(), encKey.trim().ifBlank { null })
                     testing = false
                 },
                 enabled = baseUrl.isNotBlank() && token.isNotBlank(),
@@ -125,6 +137,11 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                 color = com.agentbot.app.ui.theme.OkGreen,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 16.dp),
+            )
+            Text(
+                if (health.encryption) "🔐 消息级加密：已启用（请求与响应自动加密）" else "🔒 消息级加密：服务器未开启（API_ENCRYPTION=1 可启用）",
+                color = if (health.encryption) com.agentbot.app.ui.theme.OkGreen else TextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
         vm.connectionError?.let {

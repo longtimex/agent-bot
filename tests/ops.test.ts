@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -583,3 +583,63 @@ test(
     }
   },
 )
+
+test("ops backupData packs the JSON stores and never the pairing token", async () => {
+  const dir = tempDir()
+  const dataDir = join(dir, "data")
+  mkdirSync(dataDir, { recursive: true })
+  for (const name of ["usage.json", "reminders.json", "api-token.json", "api-enc-key.json"]) {
+    writeFileSync(join(dataDir, name), "{}")
+  }
+  const { ops, calls } = makeService(
+    dir,
+    (_command, args) => {
+      // 模拟 tar 真正落盘,让 existsSync/体积断言有据可依
+      if (args[0] === "-czf" && args[1]) writeFileSync(args[1], "tarball-bytes")
+      return { code: 0, stdout: "", stderr: "" }
+    },
+    { dataDir },
+  )
+  try {
+    const result = await ops.backupData()
+    assert.equal(result.ok, true)
+    assert.ok(result.file, "the backup reports the archive path")
+    assert.match(result.file!, /backups\/backup-\d{8}-\d{9}\.tar\.gz$/)
+    assert.ok(existsSync(result.file!))
+    // tar 收到的就是 data/ 下的状态文件,且不含配对令牌
+    const tarCall = calls.find((call) => call.command === "tar")
+    assert.ok(tarCall, "backup runs tar")
+    assert.deepEqual(tarCall!.args.slice(0, 4), ["-czf", result.file, "-C", dataDir])
+    assert.ok(tarCall!.args.includes("usage.json"))
+    assert.ok(tarCall!.args.includes("reminders.json"))
+    assert.ok(!tarCall!.args.includes("api-token.json"), "the pairing token stays out of backups")
+    assert.ok(!tarCall!.args.includes("api-enc-key.json"), "the encryption pairing key stays out of backups")
+
+    // 只保留最近 5 份:预置 7 份更旧的归档(名字排序在今天之前),再备份一次应剩 5
+    for (let i = 0; i < 7; i++) {
+      writeFileSync(join(dataDir, "backups", `backup-2026010${i}-000000000.tar.gz`), "old")
+    }
+    await ops.backupData()
+    const kept = readdirSync(join(dataDir, "backups")).filter((name) => name.endsWith(".tar.gz"))
+    assert.equal(kept.length, 5)
+    assert.ok(!kept.some((name) => name.startsWith("backup-20260100")), "the oldest archives get pruned first")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ops backupData fails cleanly without data or tar", async () => {
+  const empty = makeService(tempDir(), () => ({ code: 0, stdout: "", stderr: "" }), { dataDir: join(tempDir(), "missing") })
+  {
+    const result = await empty.ops.backupData()
+    assert.equal(result.ok, false)
+    assert.match(result.message, /没有可备份/)
+  }
+
+  const noTar = makeService(tempDir(), () => ({ code: 0, stdout: "", stderr: "" }), { which: (bin) => (bin === "tar" ? undefined : `/usr/bin/${bin}`) })
+  {
+    const result = await noTar.ops.backupData()
+    assert.equal(result.ok, false)
+    assert.match(result.message, /未找到 tar/)
+  }
+})

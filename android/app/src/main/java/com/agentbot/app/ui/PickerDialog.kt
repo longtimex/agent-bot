@@ -70,7 +70,7 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                 items(vm.models, key = { "model:" + it.value }) { model ->
                     PickerRow(
                         primary = model.label,
-                        secondary = model.desc ?: model.value,
+                        secondary = model.desc ?: model.detail,
                         selected = model.label == vm.session?.model,
                         onClick = {
                             vm.setModel(model)
@@ -79,7 +79,13 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                 }
                 if (vm.models.isEmpty()) {
                     item {
-                        Text("该引擎没有可列出的模型", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                        // Telegram says so in words instead of showing an empty panel
+                        Text(
+                            vm.modelHint?.let { "该引擎的模型由 CLI 自身配置，可用提示：$it" }
+                                ?: "该引擎不支持通过 Bot 切换模型，请在 CLI 配置中设置。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
                     }
                 }
                 item {

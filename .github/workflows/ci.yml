@@ -23,3 +23,18 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Run checks (typecheck + tests + build)
         run: npm run check
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # 构建即验证:Dockerfile、.dockerignore 与入口脚本的破坏(如 COPY 掉进
+      # .dockerignore)在这里暴露,不需要推送镜像
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
