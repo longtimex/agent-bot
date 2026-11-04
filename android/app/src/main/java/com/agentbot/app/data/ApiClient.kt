@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,6 +42,9 @@ class ApiClient {
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        // Four queued prompts plus the running one each hold an SSE stream: the default
+        // five-per-host would put every ordinary call behind them until a task finished.
+        .dispatcher(Dispatcher().apply { maxRequestsPerHost = 16 })
         .build()
 
     /** Agent installs, git pulls and builds can take many minutes; only those calls use this client. */
@@ -288,6 +292,15 @@ class ApiClient {
         return parseList(res, "tasks", Task.serializer())
     }
 
+    /**
+     * Recent task records, newest first — including the settled ones `/queue` drops, which is
+     * what lets the queue screen re-run any of them instead of only the last message.
+     */
+    suspend fun tasks(connection: Connection, limit: Int = 20): List<Task> {
+        val res = getBody(connection, "/tasks?limit=$limit")
+        return parseList(res, "tasks", Task.serializer())
+    }
+
     /** Telegram's 「清空排队」: cancels queued tasks only and returns their ids. */
     suspend fun clearQueue(connection: Connection): List<String> {
         val res = send(connection, "POST", "/queue/clear")
@@ -302,6 +315,16 @@ class ApiClient {
 
     suspend fun dir(connection: Connection): DirInfo =
         json.decodeFromJsonElement(DirInfo.serializer(), getBody(connection, "/dir"))
+
+    /**
+     * One level of the server's directory tree. Typing an absolute path is the awkward part
+     * of setting a working directory from a phone, so the picker walks it instead.
+     */
+    suspend fun dirBrowse(connection: Connection, path: String): DirListing =
+        json.decodeFromJsonElement(
+            DirListing.serializer(),
+            getBody(connection, "/dir/browse?path=" + Uri.encode(path)),
+        )
 
     private suspend fun dirAction(connection: Connection, body: JsonObject): DirInfo {
         val res = send(connection, "POST", "/dir", body)
@@ -331,10 +354,9 @@ class ApiClient {
         return parseList(res, "agents", AgentInfo.serializer())
     }
 
-    suspend fun switchAgent(connection: Connection, engine: String): Session {
+    suspend fun switchAgent(connection: Connection, engine: String): EngineSwitch {
         val res = send(connection, "POST", "/agent", buildJsonObject { put("engine", engine) })
-        val session = res["session"]?.jsonObject ?: return Session()
-        return json.decodeFromJsonElement(Session.serializer(), session)
+        return json.decodeFromJsonElement(EngineSwitch.serializer(), res)
     }
 
     /** Switchable models for an engine; defaults to the session engine like `/model`. */
@@ -462,12 +484,18 @@ class ApiClient {
         providerID: String,
         modelID: String,
         label: String?,
+        attachment: Boolean? = null,
+        contextWindow: Int? = null,
+        outputLimit: Int? = null,
     ): CustomModelResult {
         val body = buildJsonObject {
             put("key", key)
             put("providerID", providerID)
             put("modelID", modelID)
             label?.takeIf { it.isNotBlank() }?.let { put("label", it) }
+            attachment?.let { put("attachment", it) }
+            contextWindow?.let { put("contextWindow", it) }
+            outputLimit?.let { put("outputLimit", it) }
         }
         val res = send(connection, "POST", "/models/custom", body)
         return json.decodeFromJsonElement(CustomModelResult.serializer(), res)
@@ -640,6 +668,45 @@ class ApiClient {
         return json.decodeFromJsonElement(CcExecResult.serializer(), json.parseToJsonElement(text))
     }
 
+    /**
+     * Telegram's `/cc run <argv>`: one non-interactive cc-switch command as the words the
+     * server's guard accepts. `confirm` answers the guard's own request for confirmation.
+     */
+    suspend fun ccRun(connection: Connection, args: List<String>, confirm: Boolean): CcRunResult {
+        val body = buildJsonObject {
+            putJsonArray("args") { args.forEach { put(it) } }
+            if (confirm) put("confirm", true)
+        }
+        val text = execute(request(connection, "POST", "/cc/run", body), longHttp)
+        return json.decodeFromJsonElement(CcRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
+    /** Both Hermes memory blobs plus cc-switch's limits summary, in one read. */
+    suspend fun hermes(connection: Connection): HermesMemory =
+        json.decodeFromJsonElement(HermesMemory.serializer(), getBody(connection, "/cc/hermes"))
+
+    /**
+     * `set` and `clear` overwrite the blob and `enable`/`disable` decide whether Hermes loads
+     * it, so the first two only post once the screen has confirmed. The reply carries the
+     * stored text, which is what the editor shows again.
+     */
+    suspend fun hermesAction(
+        connection: Connection,
+        kind: String,
+        action: String,
+        content: String? = null,
+        confirm: Boolean = false,
+    ): HermesResult {
+        val body = buildJsonObject {
+            put("kind", kind)
+            put("action", action)
+            content?.let { put("content", it) }
+            if (confirm) put("confirm", true)
+        }
+        val text = execute(request(connection, "POST", "/cc/hermes", body), longHttp)
+        return json.decodeFromJsonElement(HermesResult.serializer(), json.parseToJsonElement(text))
+    }
+
     // ---- env config ----
 
     suspend fun config(connection: Connection): ConfigView =
@@ -655,8 +722,15 @@ class ApiClient {
         return json.decodeFromJsonElement(ConfigResult.serializer(), res)
     }
 
-    suspend fun setModel(connection: Connection, model: String): String {
-        val res = send(connection, "POST", "/model", buildJsonObject { put("model", model) })
+    /**
+     * [reset] is the button's meaning: drop the session's own pick whatever the word spells,
+     * so an engine that lists a model named `default` cannot hijack the recovery action.
+     */
+    suspend fun setModel(connection: Connection, model: String, reset: Boolean = false): String {
+        val res = send(connection, "POST", "/model", buildJsonObject {
+            put("model", model)
+            if (reset) put("reset", true)
+        })
         return res["message"]?.jsonPrimitive?.content ?: "已切换"
     }
 

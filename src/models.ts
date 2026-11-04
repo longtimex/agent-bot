@@ -187,6 +187,16 @@ const MODEL_ALIASES: Record<string, string> = {
   "beam-free": "beam",
 }
 
+/**
+ * Words that mean "drop this session's own model pick". Both surfaces read this one set, so
+ * `/model reset` typed in the App behaves as it does in Telegram.
+ */
+export const MODEL_DEFAULT_WORDS = new Set(["default", "reset", "clear", "auto", "默认", "恢复默认"])
+
+export function isModelResetWord(raw: string): boolean {
+  return MODEL_DEFAULT_WORDS.has(raw.trim().toLowerCase())
+}
+
 export function resolveQoderModel(raw: string): string | undefined {
   const norm = raw.trim().toLowerCase()
   if (!norm) return undefined
@@ -309,15 +319,15 @@ export function resolveModelKey(rawArg: string): string | undefined {
   if (Object.hasOwn(MODEL_ALIASES, norm)) return MODEL_ALIASES[norm]
   if (Object.hasOwn(AVAILABLE_MODELS, norm)) return norm
 
-  const stripped = norm.replace(/[\s_\-\.\/]+/g, "")
+  const stripped = norm.replace(/[\s_./]+/g, "")
   for (const [alias, key] of Object.entries(MODEL_ALIASES)) {
-    if (alias.replace(/[\s_\-\.\/]+/g, "") === stripped) return key
+    if (alias.replace(/[\s_./]+/g, "") === stripped) return key
   }
   for (const key of Object.keys(AVAILABLE_MODELS)) {
-    if (key.replace(/[\s_\-\.\/]+/g, "") === stripped) return key
+    if (key.replace(/[\s_./]+/g, "") === stripped) return key
   }
   for (const [key, info] of Object.entries(AVAILABLE_MODELS)) {
-    if (info.modelID.toLowerCase().replace(/[\s_\-\.\/]+/g, "") === stripped) return key
+    if (info.modelID.toLowerCase().replace(/[\s_./]+/g, "") === stripped) return key
   }
   return undefined
 }

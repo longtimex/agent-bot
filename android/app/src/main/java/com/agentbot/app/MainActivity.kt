@@ -33,6 +33,7 @@ import com.agentbot.app.ui.AppViewModel
 import com.agentbot.app.ui.AppVisibility
 import com.agentbot.app.ui.ChatScreen
 import com.agentbot.app.ui.HistoryScreen
+import com.agentbot.app.ui.HermesScreen
 import com.agentbot.app.ui.QueueScreen
 import com.agentbot.app.ui.RemindersScreen
 import com.agentbot.app.ui.Screen
@@ -174,6 +175,7 @@ class MainActivity : ComponentActivity() {
                                     Screen.Access -> AccessScreen(vm)
                                     Screen.Models -> ModelsScreen(vm)
                                     Screen.Cc -> CcScreen(vm)
+                                    Screen.Hermes -> HermesScreen(vm)
                                     Screen.Config -> ConfigScreen(vm)
                                     Screen.Status -> StatusScreen(vm)
                                     Screen.Help -> HelpScreen(vm)

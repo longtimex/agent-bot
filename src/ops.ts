@@ -988,7 +988,7 @@ export class OpsService {
   }
 
   #env(): NodeJS.ProcessEnv {
-    return childEnv({ ...process.env, ...(this.#proxyEnv?.() ?? {}) })
+    return childEnv({ ...process.env, ...this.#proxyEnv?.() })
   }
 
   /**
@@ -996,7 +996,7 @@ export class OpsService {
    * same credential-free environment as `/agents install`; opencode itself keeps its keys.
    */
   #installerEnv(): NodeJS.ProcessEnv {
-    return installerChildEnv({ ...process.env, ...(this.#proxyEnv?.() ?? {}) })
+    return installerChildEnv({ ...process.env, ...this.#proxyEnv?.() })
   }
 
   #spawnDetached(command: string, args: string[]): number | undefined {

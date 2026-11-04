@@ -1,9 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { statSync } from "node:fs"
+import { statSync, readdirSync, type Dirent } from "node:fs"
+import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import type { AgentCliProfile, AgentCliRegistry } from "./agentCli.js"
 import { normalizeWorkDirInput } from "./agentCli.js"
-import { ApiError, type ApiRequestContext } from "./api.js"
+import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
@@ -243,6 +244,8 @@ export async function routePeers(deps: PersonalRouteDeps, ctx: ApiRequestContext
     const scope = typeof body.scope === "string" && body.scope.trim() ? body.scope.trim() : "telegram"
     const peer = peers.find((entry) => entry.scope === scope && entry.key !== deps.appKey)
     if (!peer) throw new ApiError(409, "没有可跟随的对端会话：请先在 Telegram 里与 Bot 对话一次")
+    // Following swaps engine/model/directory at once, which a running task must not be replayed under
+    if (deps.hasActiveTask()) throw new ApiError(409, "任务执行中，请先停止当前任务再跟随对端会话")
     const changed = deps.adoptSession(peer.key)
     deps.json(ctx.res, 200, {
       ok: true,
@@ -268,13 +271,81 @@ export function dirView(deps: PersonalRouteDeps): Record<string, unknown> {
   return view
 }
 
-export async function routeDir(deps: PersonalRouteDeps, ctx: ApiRequestContext): Promise<void> {
+/** Subdirectories one browse listing shows; a huge repo root is not worth paging. */
+const DIR_BROWSE_LIMIT = 200
+
+/** Symlinked directories are selectable too, but only once the target really is one. */
+function isBrowseableDir(path: string, entry: Dirent): boolean {
+  if (entry.isDirectory()) return true
+  if (!entry.isSymbolicLink()) return false
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    // dangling link, or a link into a tree this account cannot stat
+    return false
+  }
+}
+
+/**
+ * One level of the server's directory tree, for a client that cannot type an absolute path
+ * comfortably. `POST /dir` already accepts any path this account reaches, so the listing only
+ * shows what could be selected and never changes the session. Hidden entries are skipped:
+ * `~/.cache` and friends are not where a task should run.
+ */
+function dirListing(deps: PersonalRouteDeps, raw: string): Record<string, unknown> {
+  const target = normalizeWorkDirInput(raw.trim() || deps.defaultWorkDir, deps.defaultWorkDir, homedir())
+  if (!target) throw new ApiError(400, "路径无效：不能为空、含控制字符、超过 512 字符，或指向文件系统根目录")
+  try {
+    if (!statSync(target).isDirectory()) throw new ApiError(400, `不是目录：${target}`)
+  } catch (err) {
+    if (err instanceof ApiError) throw err
+    throw new ApiError(400, `目录不存在或不可访问：${target}`)
+  }
+  let entries
+  try {
+    entries = readdirSync(target, { withFileTypes: true })
+  } catch {
+    throw new ApiError(409, `没有权限读取该目录：${target}`)
+  }
+  const all: { name: string; path: string }[] = []
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue
+    const path = join(target, entry.name)
+    if (isBrowseableDir(path, entry)) all.push({ name: entry.name, path })
+  }
+  all.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+  const parent = dirname(target) === target ? null : dirname(target)
+  return {
+    path: target,
+    parent,
+    home: homedir(),
+    cwd: process.cwd(),
+    defaultWorkDir: deps.defaultWorkDir,
+    sessionDir: deps.workDir(deps.appKey),
+    dirs: all.slice(0, DIR_BROWSE_LIMIT),
+    truncated: all.length > DIR_BROWSE_LIMIT,
+  }
+}
+
+export async function routeDir(
+  deps: PersonalRouteDeps,
+  ctx: ApiRequestContext,
+  sub?: string,
+): Promise<void> {
+  if (sub === "browse") {
+    if (ctx.method !== "GET") throw new ApiError(405, "浏览目录只支持 GET")
+    deps.json(ctx.res, 200, dirListing(deps, ctx.url.searchParams.get("path") ?? ""))
+    return
+  }
+  if (sub) throw new ApiError(404, `未知的目录接口：/dir/${sub}`)
   if (ctx.method === "GET") {
     deps.json(ctx.res, 200, dirView(deps))
     return
   }
   if (ctx.method !== "POST") throw new ApiError(405, "只支持 GET 或 POST")
   const body = await deps.readJsonBody(ctx.req)
+  // Either change resets the CLI session, which would split a running task across two projects
+  if (deps.hasActiveTask()) throw new ApiError(409, "任务执行中，请先停止当前任务再切换工作目录")
 
   if (body.reset === true) {
     const cleared = deps.store.clearDir(deps.appKey)
@@ -289,8 +360,6 @@ export async function routeDir(deps: PersonalRouteDeps, ctx: ApiRequestContext):
 
   const raw = typeof body.dir === "string" ? body.dir.trim() : ""
   if (!raw) throw new ApiError(400, "缺少 dir 字段（或传 reset: true 恢复默认目录）")
-  // Switching directories under a running task would split one session across projects
-  if (deps.hasActiveTask()) throw new ApiError(409, "任务执行中，请先停止当前任务再切换工作目录")
   const dir = normalizeWorkDirInput(raw, deps.defaultWorkDir, homedir())
   if (!dir) {
     throw new ApiError(400, "路径无效：不能为空、含控制字符、超过 512 字符，或指向文件系统根目录")

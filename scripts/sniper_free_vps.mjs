@@ -25,7 +25,7 @@ function log(msg) {
   console.log(line);
   try {
     fs.appendFileSync(LOG_FILE, line + "\n");
-  } catch (e) {}
+  } catch {}
 }
 
 let cachedToken = null;
@@ -73,7 +73,7 @@ async function requestCheckout(token) {
   let data;
   try {
     data = JSON.parse(text);
-  } catch (e) {
+  } catch {
     data = { raw: text };
   }
   return { status: res.status, data };

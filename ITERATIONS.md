@@ -88,4 +88,79 @@
 - 新增 Telegram 命令时:help.ts 菜单 + HELP_FULL + 分发 + SlashCommands.kt 四处缺一不可
 - 大版本依赖升级(types/node 26、TypeScript 7)留待专门评估,不建议顺手做
 
-(完成后按序追加)
+## 续目标记录(安卓控制面 parity)
+
+**模型关键词三端统一**:Telegram 的 `/model` 复位语义原先只活在 telegram.ts 里——API 只认 `default`/`默认`,非 strict 的 CLI 引擎还会把 `reset`/`auto` 当字面模型 ID 存下来,App 的按钮和打字输入走同一条本地判定且不看「声明优先」规则。本轮:
+
+- 服务端:复位词表迁到 `src/models.ts`(`MODEL_DEFAULT_WORDS` + `isModelResetWord`),telegram.ts 改为导入;`AgentCliRegistry.declaresModel(engine, word)` 承载「模型声明优先于复位词」的判定,telegram.ts 的内联副本删除;`#applyModel` 重写为异步,两种引擎都走完整词集 + 声明优先 + `reset:true` 强制复位,并且换模型/复位都清掉上一个模型的上下文(OpenCode 删会话、CLI 清 cliSession),重复选中当前模型则保持上下文——与 Telegram 的三种回复措辞一一对应。
+- 安卓端:`POST /model` 新增 `reset` 字段,`ApiClient.setModel(..., reset =)`;「恢复默认模型」按钮强制复位,打字 `/model <词>` 经新的 `applyModelWord` 原样交给服务器判定,`/model! <词>` 的一次性指定保留本地声明优先判断。
+- 契约:`tests/api.test.ts` 新增「api model switch matches Telegram's reset-word and context rules」,覆盖声明了 `auto` 模型的自定义引擎、`reset:true`、三种复位词在 CLI 上生效、OpenCode 复位清上下文、重复选择保持上下文(此前 `POST /model` 无任何测试)。
+- 文档:README 的 `POST /model` 行与 android README 的「引擎与模型切换」条目同步。
+
+**引擎切换的回执**:Telegram 点按钮会回答`已切换至 X`/`已经是当前引擎`,CLI 不在 PATH 时还会警告;`POST /agent` 此前只回 `{ok, session}`,App 自己拼一句「已切换到 X」,把未安装的引擎切过去后用户毫不知情。本轮 `POST /agent` 复用同一套判定(重复选择直接回`当前已经是 X，无需切换`,选中缺失 CLI 附`但未检测到命令 <bin>`),App 新增 `EngineSwitch {ok, session, message}` 模型并直接把这个 `message` 当轻提示;契约 sweep 也首次支持 POST 型用例(`postBody`),把 `POST /agent` 的响应纳入比对。
+
+`npm run check` 493/493 全绿(安卓静态门禁 29 个 Kotlin 文件、契约 sweep、命令 parity)。
+
+**cc-switch 白名单补口 + `/retry` 不分成败**:对照 Telegram 逐条排查剩余 parity 缺口,选定 cc-switch 与重试两处。用 `/data/workspace/cc-switch-cli/cc-switch <组> <子> --help` 核实了每条真实语法(`failover move <ID> <up|down>`、`mcp set-apps --apps <APP[,APP]> <ID>`、`prompts rename <ID> [--name|位置]`、`proxy config --listen-address/--listen-port`、`mcp validate <COMMAND>`、`skills repos list`),不靠 help.ts 猜。本轮:
+
+- 视图:`CC_VIEWS` 加 `skills-repos`、`mcp-validate`。`provider export` 先加后撤——它的 `-o` 默认写 `{cwd}/.claude/settings.local.json`,是副作用不是只读视图,这条判断写进了 CC_VIEWS 的注释免得后来人再放回去。
+- 命令:`CC_EXEC_COMMANDS` 加 `failover-move`、`mcp-set-apps`、`prompt-rename`、`proxy-listen-address|port`、`cc-update-check`、`cc-update`(cc-switch 自升级,和运维中心的安装脚本是两条路;`CC_UPDATE_TIMEOUT_MS` 从 ccCommands.ts 提到 ccswitch.ts 导出,两端共用 180 秒);确认门槛严格照抄 Telegram 的清单(这几条 Telegram 不确认,App 也不加)。
+- 两个值走一个 `arg`:App 每个命令只弹一次输入框,所以服务器按空格拆——前段 `assertSafeId`,后段按 `extra` 类型验(`direction`/`apps`/`name`/`number`/`host`,应用列表复用 `CC_SWITCH_APPS`)。`GET /cc/exec` 的 `needsTarget` 在响应里含义是「需要 arg」(`spec.needsTarget || spec.extra !== undefined`),否则纯 extra 的代理命令在 App 里不会弹框。
+- 词组:`ccPhrases` 只看 argv 前两个非 flag 词,`update` 与 `proxy config` 各自撞车(`provider export` 撤了,`proxy config` 两条撞在一起),给 `CcViewSpec`/`CcExecSpec` 加 `phrases` 覆盖;`skills-repos` 视图与 `skills-repos-add` 命令抢 `skills repos` 这一对词,被「视图不能压住写命令」的门禁逮到,视图改为只声明三词 `skills repos list`。
+- 安卓端:零改动即拿到上述全部新项(清单与 `targetLabel` 都是服务器下发);唯一行为修正是 `retryLastFailed` → `retryLastTask`,按 Telegram 的 `/retry` 重发上一条任务而不筛失败/取消,上一条仍在排队/执行时提示,本地纯文本补发退化为「服务器已清理该任务」的兜底(三处调用点同步改名)。
+
+`npm run check` 497/497 全绿。剩余已知缺口(下一轮候选):`/cc run <任意参数>` 通用透传、`config export/import <文件>`(涉及服务器路径,需单独设计)、`hermes memory`。
+
+**cc-switch 通用透传(`/cc run` 三端同一条通道)**:白名单只能覆盖想到的写法,Telegram 用户还能 `/cc run <任意参数>`,App 遇到表外词组只会「未识别」。把这条通道搬到 API 前,先解决「判定只能写一遍」:
+
+- 新模块 `src/ccGuards.ts`:`ccBlockedReason(args, surface)`、`ccConfirmPlan(args)`、`isLongCcCommand(args)`、`CcActionPlan` 从 `CcCommands` 的私有方法整段搬出(`PendingCcAction extends CcActionPlan`),telegram.ts 改为导入;`surface` 参数让同一份文案在 App 里说「无法在 App 中运行」。
+- 搬的过程逮到两个真 bug:① `--app` 的紧凑写法 `-acodex` 通不过旧的 `^(-a|--app)(=|$)`,而 cc-switch 照样读它——等于聊天里能改写别的应用配置;新增 `ccAppFlagToken()` 统一拦 `-a`/`-a=`/`-aX`/`--app`/`--app=`,同时放过 `--apps`。② 新写的门禁「白名单每条 argv 必须活过共用的判定」一连抓到 5 条 App 标了 `confirm` 而 Telegram 不确认的命令(`provider set-default`、`provider import-live`、`provider remove-from-config`、`auth default`、`daemon stop`)——都是写全局配置的动作,选择把确认加到 Telegram 侧而不是把 App 放宽,门禁同时校验 `pty` 一致。
+- `POST /cc/run {args, confirm?}`:`parseCcRunArgs` 限 16 段/单段 240 字/总长 2000 字/无控制字符;`deeplink` 明确指回 `POST /cc/deeplink`(它的 URL 会带 Provider 密钥,专用端点不回显);`provider use|switch` 走 `cc.useProvider()` 而不是裸 argv(与按钮同一条路径,带 opencode.json 优先的提示);确认后按 plan 补 `--yes`/`--confirm` 并用 `pty`/`timeoutMs`。响应 `{ok, code, command, message, text}` 的 `command` 只取前三段、逐段截 80 字、过 `redactSecrets`——用户在 argv 里打的密钥不会经响应回到 App 的历史里。
+- 安卓端:`CcRunResult` 模型 + `ApiClient.ccRun`;聊天框 `/cc <表外词组>` 不再只是提示,`ccRawArgv()` 剥掉 Telegram 自己消费的 `run` 词后原样发出。是否要确认由服务器说了算:400 里带「需要确认」就弹与 Telegram 同款的确认框,确认后同一 argv 带 `confirm` 重发——App 不必复制一份判定表,以后服务器加门槛也不用发版。单词(`/cc provider`)落到 cc-switch 自己的分组帮助,是发现命令的入口而不是报错。
+- 测试:新增三条(raw run 行为、`-a/--app` 写法矩阵、白名单 argv × 共用判定门禁),并把 `CcRunResult` 纳入契约 sweep(`postBody` 用例)。`CC_VIEWS`/`CC_EXEC_COMMANDS` 改为导出,门禁才能读到真实 argv。
+
+`npm run check` 503/503 全绿。剩余已知缺口:`config export/import <文件>`(涉及服务器路径,需单独设计)、`hermes memory`(需在 cc-switch 里确认可用子命令后再决定是视图还是命令)。
+
+**会话级改动与任务共存(409 拒绝 + 排队深度)**:审计把「HTTP 端能在任务执行时改会话状态」列为最高优先级,逐条核对后确认 Telegram 的按钮路径一律先拒绝(`telegram.ts:996/1037/1075/1113/3320` 的 `#runningSince.has(key)` → 「任务执行中，请先停止」),而 HTTP 端只有「换目录」有守卫。本轮:
+
+- `src/api.ts` 新增 `#requireIdle(what)`(复用已有 `#hasActiveTask()`),`POST /new`、`#applyModel`(即 `POST /model` 与 `POST /models/assign` 的会话侧)都先过这道门;守卫放在函数开头而不是各个改动分支前——照抄 Telegram:执行中连「已经是当前模型」这种空操作也拒绝,免得 App 以为改了。`src/apiPersonal.ts` 的 `routeDir` 把守卫上移到读 body 之后,`{reset:true}` 分支(此前绕过守卫直接清目录并重置 CLI 会话)与换目录共用一条 409;`POST /peers/follow` 补同样一句(它一次改引擎+模型+目录)。
+- 区分是必要的而不是图省事:`POST /agent` 只写 `store.setEngine`,正在跑的任务早在 `#submitTask` 里固化了 `task.engine`,切引擎不会碰到它的会话 ID——所以它**不加**守卫,保持比 Telegram 的排队更即时。这条判断写进代码注释,第一次尝试时我给它加了守卫,契约 sweep 立刻把「执行中不能切引擎」当成回归报了回来。
+- 排队深度:`POST /task` 此前不限长度(Telegram 的 `#ensureCapacity` 卡 `MAX_PENDING = 4` 条待处理),新增 `#waitingCount()` + `MAX_API_QUEUE = 4`,文案照抄「待处理消息过多(最多排队 4 条)……/stop」。放在 `#submitTask` 里,`POST /task/:id/retry` 一起受约束。
+- `POST /models/assign` 原来 `catch { sessionMessage = undefined }`,会话没跟上时用户完全不知道;改为把原因写进 `sessionMessage`(模型表已写成功,仍回 200)。
+- 安卓端:拒绝的原因走 `guarded` 的 `connectionError` 横幅,所以旧 APK 也能看懂 409;本轮仍做了四处改动——① `ApiClient` 把 OkHttp 每主机并发从默认 5 提到 16,因为队列允许 1 跑 + 4 排队、每条任务各占一个 SSE 长连接,默认值会把普通请求挡在队列后面;② `AppViewModel.hasLiveTask`(由聊天里 queued/running 的气泡派生,重启后 init 会重新 poll 这些任务所以不会长期误报)+ 会话设置卡片的「任务执行中……切换引擎不受影响」提示与「停止」按钮,免得用户先撞一次 409 才知道规则;③ 顺着这条线逮到一个本地 bug:`newChat()` 先清空 `messages` 再发 `POST /new`,执行中点「新建会话」会把还在跑的那条气泡一起抹掉(回复再也贴不回来),现在先挡一道并给同一句话;④ `/history <N>` 的本地 clamp 从 200 改为服务器的真实窗口 50 并提示,自定义模型添加框接受 Telegram 的 `--attachment/--vision/-a`、`--context[=N]`、`--output[=N]`/`--max-output`(服务器端点本就收这些字段,`POST /models/custom` 补正整数校验并把「能力写没写进 opencode.json」照 Telegram 句式回进 `message`)。
+- 测试:新增「api waits for the live task before it rewires the session」——挂起一条任务后逐条断言 `/new`、`/model`、`/dir`(reset 与 set)、`/peers/follow` 回 409 且 `cliSession`/`dir`/`engine` 一字未动,`/agent` 仍 200,第 5 条排队被拒,放行后同几条端点恢复 200;`api manages custom models` 补 `contextWindow` 的 `-5/0/1.5/"200000"/2e9` 全部 400 且注册表没被写、带能力参数的添加回显能力句。
+
+`npm run check` 505/505 全绿。剩余已知缺口:`config export/import <文件>`(涉及服务器路径,需单独设计)、`hermes memory`(可只读目录项)、带附件的 `/retry` 会话级重放(两端都要改)。
+
+**Hermes 记忆两端共管(共享守卫 + App 编辑器页)**:上一轮把 `hermes memory` 记为「可只读目录项」,但真实子命令决定它不该做成视图。用 `/data/workspace/cc-switch-cli/cc-switch hermes memory --help` 与逐条试跑核实:`limits`/`show [memory|user]`/`set <kind> --content <文本>`/`clear <kind>`/`enable|disable <kind>`/`open-dir`,两份记忆是 `MEMORY.md`(工作记忆)与 `USER.md`(用户画像)。本轮:
+
+- 先否掉「塞进白名单」的方案:exec 通道的 `arg` 按 `/\s+/` 拆词,一份多行记忆会被拆成半截命令;而 `show` 的输出是整篇自由文本,放进「只读视图」面板既不可编辑也不能滚动。选择新增专用端点 `GET`/`POST /cc/hermes` + App 一整页编辑器,服务器不再制造「两种做法做同一件事」。
+- 守卫仍要共享(聊天里手打 `/cc hermes memory clear user` 也得受同一套规矩):`ccBlockedReason` 补三词判定拦 `open-dir`(它在服务器上拉起文件管理器,手机与聊天都没处显示);`ccConfirmPlan` 在两位数 `key` 的 switch **之前**处理 `hermes memory`,因为「覆盖哪一份」写在第三个词上,而 `provider use` 这类两位词的形状表达不了它。
+- cc-switch 的一个真坑:`hermes memory clear` 不带 `--yes` 时只打印一句拒绝却 **exit 0**——照 Telegram 的「确认后执行」原样搬过去会显示「已清空」而文件纹丝不动。方案是 `appendArgs: ["--yes"]`(与 `sessions delete`、`failover clear` 同一机制),API 侧 `clear` 也固定补 `--yes`。
+- 状态一次回齐 `{limits, memory, user, memoryEnabled, userEnabled}`:`GET` 里 `show` 两份 + `limits` 一次。空记忆文件 CLI 打印的是 `Hermes user memory is empty (file not created yet)`(kind 在 "memory" **前面**,与另一份的措辞顺序不同),必须识别成空串,否则这句 CLI 提示会进编辑器再被用户「保存」成正式内容。开关状态从 `limits` 原文用宽容正则 `hermesLimit()` 解析,措辞一变就回 `null`/不警告,而不是猜。
+- 写入侧的门禁都在落盘前:`kind`/`action` 白名单、`set` 与 `clear` 需 `confirm: true`、空内容(要它请走 clear)、>20000 字、除换行与制表符外的控制字符全部 400 且 cc-switch 一次都不调用(测试逐条断言 `ccCalls` 长度没变);内容按**一个 argv 词**交给 CLI,多行与空格原样保留(实测)。写完比对 `limits` 的字数预算,超了就回截断警告——预算是 Hermes 加载时的行为,不是硬门槛,超了照样写。
+- 安卓端:`Screen.Hermes` + `HermesScreen.kt`(第 30 个 Kotlin 源文件),两份记忆各一张卡片(多行 `OutlinedTextField`,6–14 行),显示字数、「有未保存的改动」、启用/停用开关、「保存」「清空」,覆盖/清空前弹与 Telegram 同义的确认框;`limits` 原文单独一张可选中、等宽字体的卡片。草稿用 `remember(state?.memory)` 承接服务器值,所以切开关/刷新不会抹掉正在写的长文本。有意**不**加进 `onForeground()` 的每页刷新——它会把用户改了半截的内容刷回服务器版本;页内「刷新」按钮承担这件事。cc-switch 页底部加「Hermes 记忆 …」入口(它不是服务器下发的视图,入口写死在 App 里)。
+- 测试:契约 sweep 加 `HermesMemory` 与 `HermesResult`(`postBody` 用例);`api.test.ts` 的 cc 桩改为忠实回显(`limits` 两行预算、`show user` 的空句语序、`set` 回字数);新增两条用例——一条走 GET 状态、六个必 400 的 POST(断言 CLI 一次没被调)、多行 `set` 的 argv 原文、超预算警告、`clear` 补 `--yes`、`enable` 后回新状态,一条走 `ccGuards`(三词形状的封禁/确认/`appendArgs`)。`/cc help` 补出这些形状并把 `open-dir` 列进「只能由 TUI 完成」清单。
+
+`npm run check` 509/509 全绿。剩余已知缺口:`config export/import <文件>`(涉及服务器路径,需单独设计)、带附件的 `/retry` 会话级重放(两端都要改)、`GET /cc/views` 与 `GET /cc/exec` 在 `x-enc: v1` 下仍是明文清单(内容不含密钥,但可考虑一并加密)。
+
+**工作目录可点选(`GET /dir/browse` + App 目录浏览器)**:App 的会话设置页此前只有一个输入框让人手打绝对路径——手机上这是最难受的一次操作,而 Telegram 用户在桌面键盘上并没有这个负担。本轮把这个「只有聊天端不难、移动端很痛」的缺口补掉:
+
+- 先定安全边界:浏览目录**不新增权限**。`POST /dir` 本来就接受该账号能到达的任何路径(`normalizeWorkDirInput` 之后 `statSync` 验证),所以列举只是把「已经能设的东西」显示出来。据此复用同一个解析器而不是再写一套:同样的 `~`/相对路径/控制字符/512 字上限/文件系统根目录拒绝,错误文案一字不差。列出的内容刻意收窄到**只有目录名与路径**——不列文件、不给大小、不读符号链接目标的内容,隐藏项(`.cache`/`.env` 这类)整类跳过。
+- 服务器:`src/apiPersonal.ts` 新增 `dirListing()` 与 `routeDir(…, sub)`;`api.ts` 把路由段 `id` 透进去。软链接只在真实指向目录时列出(悬空链接与指向文件的链接丢弃),排序用 `localeCompare(…, {sensitivity:"base"})` 让 `Alpha`/`zeta` 按名字而不是按码位排,超过 200 条截断并回 `truncated`。`POST /dir/browse` 405、其它 `/dir/<子路径>` 404——此前 `routeDir` 根本不读路由段,`POST /dir/whatever` 会照样把目录设进去(看起来像子接口在改设置),这条收紧把它关掉。
+- 安卓端:`DirEntry`/`DirListing` 模型、`ApiClient.dirBrowse`、`AppViewModel.openDirBrowser/loadDir/closeDirBrowser/chooseDir` 与会话设置页的「浏览服务器目录…」。对话框里「默认 / 主目录 / 运行目录 / 上一级」四个快捷跳转 + 可滚动的子目录列表,「选择此目录」调的还是 `setWorkDir`,所以两条路径永远不会分叉。列表为空/被截断各有明确一句话,截断时提示改用「修改目录」手打。
+- 门禁逮到自己写的 bug:`appParity` 的「ViewModel 成员必须真实存在」扫描发现 SessionScreen 引用了 `vm.loadDir`,而 ViewModel 里叫 `loadDirList`——沙箱里没有 Kotlin 编译器,这一条正是替编译器干活,改名后通过。
+- 测试:新增「api lists server directories for the App picker without touching the session」——建一棵真树(两个目录、一个隐藏目录、一个文件、一个有效软链接、一个悬空软链接),断言只有四个目录按序出现、`lstatSync` 证明悬空链接确实存在过所以是被过滤而不是缺失、`parent/home/defaultWorkDir/sessionDir` 全对、**连续两次浏览后 `store.getDir()` 仍为空且 `cliSession` 未被重置**、无 `path` 与 `~` 都落到预期目录、文件/不存在/控制字符/`/` 各自 400、`POST /dir/browse` 405、`/dir/nope` 404、205 个目录时截断成 200 且 `truncated` 为真。契约 sweep 加 `dir/browse` 与嵌套 `DirListing.dirs → DirEntry`,并在 sweep 的种子阶段建一个子目录,免得空列表把 `DirEntry` 的比较悄悄跳过。
+
+`npm run check` 511/511 全绿。剩余已知缺口:`config export/import <文件>`(现在有了安全的目录列举,可在此基础上让用户挑导出位置)、Telegram `/dir` 面板的目录浏览按钮、带附件的 `/retry` 会话级重放(两端都要改)、`GET /cc/views` 与 `GET /cc/exec` 在 `x-enc: v1` 下仍是明文清单。
+
+**队列页可重跑已结束的任务(App「最近任务」+ `GET /tasks` 的定位)**:Telegram 的 `/retry` 能重放服务器自己存的那条任务(原文本、临时模型、附件),App 此前只有在聊天页里对**最后一条**用得上这条通道;已结束一段时间、或想重跑更早一条时,手机没有任何入口。本轮把这个入口做进任务队列页,顺带把 `/tasks` 这条一直没消费者端点的作用写清楚:
+
+- 先确认数据源只能是 `GET /tasks`:`GET /queue` 只回 queued/running,已结束的行一条不给;`/history` 的记录虽然跨重启还在,但 `cleanPrompt()` 会把提示压缩成一行摘要、也没有任务 ID,拿它「重试」等于发一条不同的消息。`#tasks` 里的记录保留 200 条(`MAX_TASK_RECORDS` + `#pruneTasks`),`#view()` 已剥掉 `controller`/`key` 并补上 `attachmentCount`/`media`,所以服务器**什么都不用改**——这条能力早就在,缺的是消费它的那一端。
+- 因此 `tests/appParity.test.ts` 的 `NOT_IN_APP = ["tasks"]` 清空了。那条注释写的是「App 用 queue + history 看同样的东西」,现在看是错的;改成空数组也意味着以后新增服务器资源必须同时给 App 调用方,或者在这里写明理由。
+- 中途否掉自己的一个改动:先给 `/tasks` 加了「按 `task.key === appKey` 过滤 + `scope=all` 看全部」,写完才发现 `#submitTask` 永远写 `key: this.appKey`,这个进程里不存在别的键的记录,`GET /queue` 上那句同样的过滤也一直是恒真——为一个不会发生的场景加参数是纯粹的复杂度,回退成一行注释说明 `/tasks` 与 `/queue` 的分工(是否包含已结束的)。`#tasks` 若哪天真的接住别的来源,再按那时的事实写过滤。
+- 安卓端:`ApiClient.tasks(limit=20)`(与 `queue()` 同一批 `Task` 模型,不加新 schema)、`AppViewModel.recentTasks` 由 `refreshQueue()`/`pollQueue()` 一起拉(过滤掉 `isRunning`,所以与实时列表按 ID 天然互斥,`items(key = { it.id })` 不会撞),`retryRecord(id)` 只发 `POST /task/:id/retry` 然后把新任务贴回聊天并接着轮询——与 `retryTask()` 走同一条服务器路径,区别只是 ID 来自记录而不是本地气泡。队列页空态条件从 `vm.queue.isEmpty()` 改为 `queue.isEmpty() && recentTasks.isEmpty()`,否则「没有正在跑的任务」时整段记录列表根本渲染不到(LazyColumn 提前 return)。`taskStatusLabel` 补 `done/failed/cancelled` 的中文,记录卡片显示「状态 · 耗时 · 完成时刻 · 引擎 · 模型 · 附件数」和失败原因。
+- 测试:新增「api tasks keeps the settled records the App re-runs from and /queue drops」——两条任务先后 settle(先 settle 再提交下一条,让时间戳差开,排序断言才是在测响应而不是测种子速度),断言两条都在 `/tasks` 里、按 `createdAt` 倒序、老记录带原文与 `reply`、`finishedAt >= createdAt`、`key`/`controller` 不是自身属性,`/queue` 回空,`?limit=1`→1 条、`?limit=0`→1 条(clamp 到 1 而不是回落默认)、`?limit=abc`→默认窗口而不是空列表(`clampLimit` 的 NaN 分支),最后用列表里读到的 ID 直接 `retry` 拿 202。契约 sweep 加 `{url:"tasks", pick:"tasks", model:"Task", list:true}`——App 手写的 `Task` 模型现在同时被两个端点检验。
+- 顺手更正一条挂了很久的「已知缺口」:`/retry` 的附件重放早就是服务端行为(`POST /task/:id/retry` 用 `failed.attachments`,测试「api task retry replays the stored prompt, engine, model pin and attachments」已在断言 `attachmentCount`),两端都不用改,App 的 `retryRecord` 也直接受益。
+
+`npm run check` 513/513 全绿。剩余已知缺口:`config export/import <文件>`(现在有了安全的目录列举,可在此基础上让用户挑导出位置;`import` 会覆盖在用的 cc-switch 库,探测时不要真跑)、Telegram `/dir` 面板的目录浏览按钮、`GET /cc/views` 与 `GET /cc/exec` 在 `x-enc: v1` 下仍是明文清单(内容不含密钥,但可考虑一并加密)、跨端(Telegram ↔ App)任务记录与历史互不可见:`/tasks` 与 `/history` 都只覆盖 `api:app` 这一个键,手机看不到 Telegram 聊天的运行。

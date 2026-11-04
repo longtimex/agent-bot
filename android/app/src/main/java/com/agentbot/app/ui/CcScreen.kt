@@ -78,7 +78,9 @@ fun CcScreen(vm: AppViewModel) {
         if (vm.ccViews.isEmpty() || vm.ccCommands.isEmpty()) return@LaunchedEffect
         vm.clearCcRunRequest()
         when (val match = matchCcQuery(query, vm.ccViews, vm.ccCommands)) {
-            null -> vm.showToast("未识别的 cc-switch 指令：「$query」，可在面板中选择")
+            // Words the server's tables do not name are still what Telegram runs: cc-switch
+            // answers them itself, and the bot's guard decides whether a tap is needed first
+            null -> vm.runCcRaw(query, false)
             is CcQuery.View -> {
                 if (match.view.needsTarget && match.target == null) awaitingView = match.view
                 else vm.ccShowView(match.view, match.target)
@@ -383,6 +385,25 @@ fun CcScreen(vm: AppViewModel) {
                 }) { Text("确认执行") }
             },
             dismissButton = { TextButton(onClick = { confirmExec = null }) { Text("取消") } },
+        )
+    }
+
+    // The bot's guard asks for this one; the words are exactly what cc-switch will receive
+    vm.ccRawConfirmation?.let { words ->
+        AlertDialog(
+            onDismissRequest = vm::dismissCcRaw,
+            title = { Text("确认执行", style = MaterialTheme.typography.titleMedium) },
+            text = {
+                Text(
+                    "即将执行「/cc $words」。\n" +
+                        "cc-switch 认为这条命令会改动配置（删除、切换 Provider 或写全局设置），确认后才运行。",
+                    color = TextSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = vm::confirmCcRaw) { Text("确认执行") }
+            },
+            dismissButton = { TextButton(onClick = vm::dismissCcRaw) { Text("取消") } },
         )
     }
 }
@@ -717,6 +738,13 @@ private fun ViewsCard(vm: AppViewModel, onOpen: (CcViewSpec) -> Unit) {
                     }
                     repeat(2 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
                 }
+            }
+            // Not one of the server's read-only views: the memory blobs are edited, not just printed
+            TextButton(
+                onClick = { vm.navigate(Screen.Hermes) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Hermes 记忆 …", style = MaterialTheme.typography.bodyMedium)
             }
         }
     }

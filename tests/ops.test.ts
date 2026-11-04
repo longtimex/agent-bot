@@ -371,7 +371,7 @@ test("ops installs cc-switch only with a valid version", async () => {
 
     const { ops, calls } = makeService(
       dir,
-      (command, args) => {
+      (command, _args) => {
         if (command === ccBin) return { code: 0, stdout: "cc-switch 2.0.0\n", stderr: "" }
         if (command === "bash") return { code: 0, stdout: "Installed\n", stderr: "" }
         return undefined

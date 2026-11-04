@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts",
+    "src/setup-cli.ts",
+    "src/model-cli.ts",
+    "scripts/**/*.{js,mjs}",
+    "tests/**/*.test.ts"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "scripts/**/*.{js,mjs}",
+    "tests/**/*.ts"
+  ],
+  "ignore": [
+    ".opencode/**",
+    "android/**",
+    "dist/**"
+  ]
+}

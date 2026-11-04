@@ -8,7 +8,111 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 安卓 App        ⇄ HTTP API(/api/v1) ⇄ └──────────┘
 ```
 
-> 📖 新用户请从下方「[使用说明](#使用说明)」开始，5 步跑通；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)。
+> 📖 新用户可直接使用「[一键安装（推荐）](#一键安装推荐)」，或从下方 5 步流程开始；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)。
+
+## 一键安装（推荐）
+
+`install.sh` 会完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env`」，适合新服务器首次部署，也适合本地已经克隆仓库后直接安装。
+
+### 前置条件
+
+- Linux / macOS
+- **Node.js ≥ 20.12**、`npm`、`git`
+- 一个 Telegram Bot Token（在 [@BotFather](https://t.me/BotFather) 发送 `/newbot` 获取）
+- 可选：`opencode` CLI。脚本默认会尝试 `npm install -g opencode-ai`，失败时只提示，不阻断安装
+
+### 方式一：新机器一键克隆安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/longtimex/agent-bot/main/install.sh | sh
+```
+
+默认安装到 `~/.agent-bot`，使用 `main` 分支。安装完成后执行：
+
+```bash
+cd ~/.agent-bot
+npm run setup      # 按提示粘贴 Bot Token 与你的 Telegram 用户 ID
+npm run serve      # 终端 1：启动 opencode（127.0.0.1:4096）
+npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
+```
+
+> `curl | sh` 的 stdin 不是终端，脚本不会自动进入配置向导，因此需要手动执行一次 `npm run setup`。
+
+### 方式二：已经克隆仓库
+
+```bash
+git clone https://github.com/longtimex/agent-bot.git
+cd agent-bot
+./install.sh
+```
+
+脚本会自动识别当前 checkout，不会重复克隆。交互式终端下，如果 `.env` 还没有 Token，会直接进入 `npm run setup`。
+
+### 方式三：指定目录并安装后启动
+
+```bash
+./install.sh --dir /opt/agent-bot --start
+```
+
+`--start` 会在安装成功后执行 `npm run restart`。如果还没有配置 Token，脚本会拒绝启动并提示先运行 `npm run setup`。
+
+### 常用参数
+
+```text
+--dir DIR          安装目录（默认：当前 checkout 或 ~/.agent-bot）
+--repo URL         git 仓库地址（默认：https://github.com/longtimex/agent-bot.git）
+--branch NAME      安装分支（默认：main）
+--local            强制使用当前 checkout
+--no-opencode      不安装 opencode CLI
+--no-setup         不运行 Telegram 配置向导
+--start            安装完成后启动 Bot
+--dry-run          只打印将执行的步骤，不修改文件
+-h, --help         查看帮助
+```
+
+对应环境变量：
+
+```text
+AGENT_BOT_DIR
+AGENT_BOT_REPO
+AGENT_BOT_BRANCH
+AGENT_BOT_OPENCODE=0
+AGENT_BOT_SETUP=0
+```
+
+例如安装到自定义目录并跳过 opencode：
+
+```bash
+./install.sh --dir /opt/agent-bot --no-opencode
+```
+
+或者：
+
+```bash
+AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
+```
+
+### 脚本会做什么
+
+1. 检查 `git`、`node`、`npm`，并校验 Node.js ≥ 20.12
+2. 使用当前 checkout，或按 `--repo` / `--branch` 克隆到安装目录
+3. 执行 `npm ci`（没有 lockfile 时执行 `npm install`）
+4. 执行 `npm run build`
+5. 创建 `data/`、`data/inbox/`、`data/outbox/`
+6. 缺少 `.env` 时从 `.env.example` 生成，并设置为 `600` 权限
+7. 可选安装 `opencode-ai`
+8. 可选执行 `npm run setup`
+9. 可选执行 `npm run restart`
+
+### 安全与幂等说明
+
+- 不会写入、读取或回显任何 Token / API Key
+- 已存在的 `.env` 不会被覆盖
+- 已有 git 工作区存在未提交改动时，不会强制更新或重置
+- 重复执行安装脚本是安全的：依赖会重新安装、构建会重新执行，但 `.env` 与 `data/` 会保留
+- 安装目录需要写权限；脚本不会自动使用 `sudo`
+
+安装完成后，Telegram 里给 Bot 发送 `/start` 即可开始使用；长期运行建议参考「systemd 常驻（可选）」。
 
 ## 功能
 
@@ -63,6 +167,8 @@ npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
 ```
 
 首次启动且 `.env` 缺少配置时会自动进入连接向导：粘贴 Bot Token → 给 Bot 随便发一条消息让向导识别你的用户 ID → 确认后自动写入 `.env` 并继续启动。也可以手动复制 `.env.example` 为 `.env` 填写；重新配置随时运行 `npm run setup`。详见「运行」与「首次连接引导」。
+
+也可以直接使用仓库根目录的 `install.sh` 一键完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env`」。完整用法、参数与注意事项见上方「[一键安装（推荐）](#一键安装推荐)」。
 
 > 更喜欢容器部署？见「运行 → Docker 部署（可选）」，`docker compose up -d --build` 一条命令拉起全部服务。
 
@@ -169,20 +275,20 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `GET /health` | 存活检查：版本、当前引擎、时区 |
 | `GET /info` | 会话与配对信息（同 `/id` + `/api`）：引擎/模型、会话 ID、工作目录、推送聊天 ID、API 监听地址；令牌不会回传 |
 | `GET /help` | 与 Telegram 共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记，供 App 直接展示）；`commands` 是 Bot 菜单里的全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`），App 的 `/` 面板与带参数命令解析都以这两份列表为准 |
-| `GET /session` | 当前引擎/模型/工作目录；OpenCode 会话额外给出 `modelRef`（`providerID`/`modelID`/`label`），CLI 会话只有模型名；`POST /agent {engine}` 切换（接受 id、标签、`bin` 或别名）、`POST /model {model}` 切模型（`default` 恢复默认）、`POST /new` 重置会话 |
+| `GET /session` | 当前引擎/模型/工作目录；OpenCode 会话额外给出 `modelRef`（`providerID`/`modelID`/`label`），CLI 会话只有模型名；`POST /agent {engine}` 切换（接受 id、标签、`bin` 或别名，回 `message`：`已切换至 X`／`当前已经是 X，无需切换`，CLI 不在 PATH 时附「未检测到命令」，与 Telegram 的按钮提示同源）、`POST /model {model}` 切模型（复位词 `default`/`reset`/`clear`/`auto`/`默认`/`恢复默认` 与 Telegram 同规则：引擎真的声明了同名模型时切换该模型，否则恢复默认；`{model, reset: true}` 强制恢复）、`POST /new` 重置会话。切换与恢复默认都会同时丢弃上一个模型的会话上下文（OpenCode 删会话、CLI 清 cliSession），重复选中当前模型则保持上下文；`POST /model`、`POST /new`、`POST /dir` 与 `POST /peers/follow` 在有任务排队/执行时返回 409「任务执行中，请先停止当前任务再…」，与 Telegram 的按钮拒绝一致（`POST /agent` 不重置上下文，仍可随时切换，只影响下一条任务） |
 | `GET /peers` · `POST /peers/follow {scope}` | Bot 的全部活动会话（本机 App 与主人的 Telegram 聊天）及其引擎/模型/工作目录与用量（最近活动时间、今日成功/总数、累计数，取自两端共用的 usage 记录），用于回答「Telegram 现在用的是什么」；响应只给 `scope`/`label`、设置与计数，不回传内部会话键（Telegram 的键就是聊天 ID），也不下发任何聊天正文；排队/执行深度只在 App 自己的队列里报告，因为这个进程看不到 Telegram 的队列。`follow` 只对 App 生效：把 App 的引擎、模型与工作目录对齐到该会话并重置 App 侧 CLI 上下文，不会反向改动 Telegram；跟随自己返回 409 |
-| `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；附件为 `{name, mime, data(base64)}` 数组，最多 4 个共 15MB，文本内联、图片/音频/PDF 直连模型；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；返回 202 与 taskId |
-| `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`POST /stop` 停止全部 |
+| `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；附件为 `{name, mime, data(base64)}` 数组，最多 4 个共 15MB，文本内联、图片/音频/PDF 直连模型；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；队列与 Telegram 同深度（最多 4 条待处理，超出返回 409「待处理消息过多…」）；返回 202 与 taskId |
+| `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`GET /tasks` 按时间倒序返回内存里保留的任务记录（默认 50 条、上限 200，含已结束的任务，`limit` 非法时回落到默认而不是空列表），App 的「最近任务」就靠它拿到可重试的旧任务 ID；`POST /stop` 停止全部 |
 | `POST /task/:id/stop` · `GET /queue` · `POST /queue/clear` | 停止单个任务（排队中直接丢弃、执行中中止）；查看当前排队/执行中的任务；一键清空排队（仅取消 queued，不影响执行中的任务） |
 | `GET /task/:id/events` | SSE 事件流：实时推送任务进度行与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
 | `POST /task/:id/retry` | 重放已结束的任务：服务端用自己的记录复原原始文本、引擎、临时模型与附件，返回 202 与新任务（`retriedFrom` 为旧 ID）。排队/执行中返回 409（请先停止），已被清理或不属于本会话返回 404。App 的「重试」按钮与 Telegram `/retry` 走同一条路径，不再从本地聊天记录拼文本 |
 | `GET /task/:id/media/:index` | 下载回复中的第 `index` 个媒体（任务视图 `media[]` 给出 kind/label/name/size/remote）；本地文件限 `data/outbox`，远程链接沿用与 Telegram 相同的 SSRF/代理防护 |
-| `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话 |
+| `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话。`GET /dir/browse?path=` 列出该层的子目录供 App 的目录选择器使用：只回目录（隐藏项与文件不列，软链接只有指向真实目录才列出，悬空链接丢弃），名称按不区分大小写排序、最多 200 条并标 `truncated`，回 `{path, parent, home, cwd, defaultWorkDir, sessionDir, dirs:[{name,path}], truncated}`；路径走与 `POST /dir` 同一个解析器（`~`、相对路径、控制字符/超长/文件系统根目录的拒绝完全一致），非目录 400、无权限 409、`POST /dir/browse` 405、其它 `/dir/<子路径>` 404。它只读取，绝不改动会话（不会写 `dir`，也不会重置 CLI 上下文） |
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
 | `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：与 Telegram `/alias` 共享同一份列表；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
-| `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID`）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
+| `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
 | `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |
 | `GET /cc` | cc-switch 状态：是否安装、版本、应用、Provider 列表与当前项（与 `/cc` 面板一致） |
 | `POST /cc/use` · `POST /cc/test` | 切换 Provider（body `{id}`）与测速（省略 `id` 时测当前项）；同一时间只允许一个 cc-switch 变更操作 |
@@ -190,10 +296,12 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `GET /cc/proxy` · `GET /cc/mcp` · `POST /cc/mcp/sync` | cc-switch 代理状态、MCP 列表与同步 |
 | `GET /cc/prompts` · `POST /cc/prompts/activate` · `POST /cc/prompts/deactivate` | 提示词列表、启用（body `{id}`）与停用 |
 | `GET /cc/env?mode=tools\|check` | cc-switch 环境工具与检查输出 |
-| `GET /cc/views` · `GET /cc/view?name=&target=` | cc-switch 只读视图清单与实际输出。清单由服务端下发（名称/中文标题/是否需要参数/参数名/可用词组 `tokens`），App 直接渲染，新增视图不需要发版；`tokens` 由参数表推导（含 `provider rm` 这类别名，也含 `skills repos add` 这类三词形状），所以聊天框里输入的 `/cc provider current` 在 App 内也能解析；`target` 走 `assertSafeId`（不得以 `-` 开头），缺参数返回 400 而不是执行半截命令。视图含 `config`、`config-path`、`sessions`、`session-show`、`session-messages`、`provider-current`、`auth`、`auth-list`、`skills`、`skill-info`、`skills-discover`、`skills-updates`、`failover`、`failover-list`、`failover-available`、`prompt-current`、`prompt-live`、`prompt-show`、`daemon`、`daemon-logs`、`settings`，网络类视图用 90 秒长超时，输出脱敏 |
+| `GET /cc/views` · `GET /cc/view?name=&target=` | cc-switch 只读视图清单与实际输出。清单由服务端下发（名称/中文标题/是否需要参数/参数名/可用词组 `tokens`），App 直接渲染，新增视图不需要发版；`tokens` 由参数表推导（含 `provider rm` 这类别名，也含 `skills repos add` 这类三词形状），所以聊天框里输入的 `/cc provider current` 在 App 内也能解析；`target` 走 `assertSafeId`（不得以 `-` 开头），缺参数返回 400 而不是执行半截命令。视图含 `config`、`config-path`、`sessions`、`session-show`、`session-messages`、`provider-current`、`auth`、`auth-list`、`skills`、`skill-info`、`skills-discover`、`skills-updates`、`skills-repos`、`mcp-validate`、`failover`、`failover-list`、`failover-available`、`prompt-current`、`prompt-live`、`prompt-show`、`daemon`、`daemon-logs`、`settings`，网络类视图用 90 秒长超时，输出脱敏；`provider export` 不在此表——不带 `-o` 时它会写出 `{cwd}/.claude/settings.local.json`，属于副作用不是查看 |
 | `GET /cc/stream?id=` · `GET /cc/models?id=` · `GET /cc/quota?id=` | 对应 `/cc stream`、`/cc models`、`/cc quota`：流式连通性、Provider 模型列表与配额（只读，不含烧额度的 `--reset`） |
 | `POST /cc/mcp/import` · `POST /cc/prompts/create` | 对应 `/cc mcp import`（body `{json}`）与 `/cc prompt new`（body `{name, content}`），上限 20000 字 |
-| `GET /cc/exec` · `POST /cc/exec` | cc-switch 危险命令白名单：`GET` 下发可执行项（名称/说明/是否需要目标 ID/是否需确认/可用词组 `tokens`），含 `prompt-activate|deactivate`（`/cc prompts use|off` 的同一条命令），`POST` body `{name, arg?, confirm?}` 只跑表内固定参数；未知名称、缺 `confirm`、非法目标 ID 一律 400。表内含 `skill-install`（`owner/name`，90 秒长超时）、`mcp-enable|disable`、`provider-duplicate|set-default|import-live|remove-from-config`、`proxy-enable|disable`、`failover-add|remove`、`config-validate`、`sessions-sync-usage`、`skills-sync|update|update-all`、`prompt-activate|deactivate`、`skills-repos-add`、`settings-language`、`daemon-start|stop`、`config-backup`、`auth-default` |
+| `GET /cc/hermes` · `POST /cc/hermes` | Hermes 的两份记忆文件（`MEMORY.md` / `USER.md`）：`GET` 一次回 `{limits, memory, user, memoryEnabled, userEnabled}`（limits 是 cc-switch `hermes memory limits` 的原文，两份开关从其中的 `enabled: true/false` 读出，措辞变了就是 `null` 而不是猜）；`POST` body `{kind, action, content?, confirm?}`，`action` 只认 `set/clear/enable/disable`，`kind` 只认 `memory/user`。`set` 与 `clear` 覆盖整份文件，因此与 Telegram 一样要先 `confirm: true`，`clear` 由服务端补 cc-switch 自己要的 `--yes`（不带它时 cc-switch 只打印拒绝并以 0 退出，会「清空成功」但什么都没做）。内容按一个 argv 词交给 CLI，换行与空格原样保留；空内容、超 20000 字、含换行/制表符以外的控制字符都 400 且不落盘；写入后如果字数超过 Hermes 的加载预算，`message` 会给出截断警告（预算不是硬门槛，超了照样写）。每次写操作都回新状态，App 编辑器因此显示服务器内容而不是本地草稿 |
+| `GET /cc/exec` · `POST /cc/exec` | cc-switch 危险命令白名单：`GET` 下发可执行项（名称/说明/是否需要参数/参数名/是否需确认/可用词组 `tokens`），含 `prompt-activate|deactivate`（`/cc prompts use|off` 的同一条命令），`POST` body `{name, arg?, confirm?}` 只跑表内固定参数；未知名称、缺 `confirm`、非法目标 ID 一律 400。App 每个命令只弹一次输入框，因此 Telegram 里写成两个词的命令用一个 `arg` 传（`failover move p1 up`、`mcp set-apps fs open-code,codex`、`prompts rename review 新名称`、`proxy config address 127.0.0.1`、`proxy config port 8787`）：服务器按空格拆开，前一段走 `assertSafeId`，后一段按命令各自校验（方向只认 `up/down`，应用列表只认 cc-switch 的 `--apps` 词表，端口须是数字，名称不得以 `-` 开头且 ≤80 字），拆开前不会执行半截命令。表内含 `skill-install`（`owner/name`，90 秒长超时）、`mcp-enable|disable|set-apps`、`provider-duplicate|set-default|import-live|remove-from-config`、`proxy-enable|disable`、`proxy-listen-address|listen-port`、`failover-add|remove|move`、`config-validate`、`sessions-sync-usage`、`skills-sync|update|update-all`、`prompt-activate|deactivate|rename`、`skills-repos-add`、`settings-language`、`daemon-start|stop`、`config-backup`、`auth-default`、`cc-update-check|cc-update`（后者是 cc-switch 自升级二进制，与运维中心的安装脚本是两条不同路径，需确认） |
+| `POST /cc/run` | Telegram 的 `/cc run <任意参数>` 在服务端的同一入口：body `{args: ["mcp","enable","fs","--apps","opencode"], confirm?}`，最多 16 段、单段 ≤240 字、总长 ≤2000 字、不得含控制字符。判定与聊天共用一个模块 `src/ccGuards.ts`（交互式/常驻命令一律 400 并给出聊天里能用的替代写法；`-a/--app` 的任何写法都拒绝，`--apps` 不受影响；需要确认的形状先回 400「需要确认」，带 `confirm: true` 重发才真正执行，并按 cc-switch 的要求补上它自己的 `--yes`/`--confirm`）。`provider use\|switch` 走与按钮相同的切换路径（不是裸 argv），`deeplink` 明确指向 `POST /cc/deeplink`。响应 `{ok, code, command, message, text}`，`command` 只回显前三段且已脱敏 |
 | `GET /cc/sessions?q=` · `POST /cc/deeplink` | 对应 `/cc sessions search`（关键词上限 128 字、不得以 `-` 开头或含控制字符，90 秒超时）与 `/cc deeplink`：仅接受 `ccswitch://v1/import?...`（上限 8192 字）、需 `confirm: true`，响应不回显链接本身 |
 | `GET /config` · `PUT /config/:key` · `DELETE /config/:key` | `.env` 配置项：查看（密钥值不下发）、修改、删除；仅允许规则内的键，`TELEGRAM_ALLOW_USERS` 仍须走 `/access`，`REMINDER_TIMEZONE` 立即生效 |
 | `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性，并带 `aliases`、`bin`、`sessionMode`、`supportsModel`、`models`，客户端可用与 Telegram 相同的别名输入命中同一引擎）与模型列表；引擎列表第一项是内置的 `opencode`（`installed: true`，不可安装/更新/卸载），与 `POST /agent` 可接受的取值一致，客户端因此总能切回内置引擎；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400，`models` 里每个条目带 `aliases`，CLI 不列模型时改由 `modelHint` 给出可输入的写法 |
@@ -317,13 +425,29 @@ bot/
 │   ├── config.ts     .env 解析、白名单与超时配置
 │   ├── lock.ts       PID 锁文件（单实例 + 陈旧锁回收）
 │   ├── telegram.ts   Telegram 消息、命令、附件发送
+│   ├── telegramSupport.ts Telegram 顶部通知与时间/ID/格式化辅助
+│   ├── telegramStats.ts 使用统计、任务历史、运行状态面板
+│   ├── telegramPersonalPanels.ts 代理、队列、快捷指令、提醒、定时任务、白名单、时区面板
+│   ├── telegramCorePanels.ts 欢迎页、主菜单、Agent/模型/目录/安装面板
+│   ├── telegramPersonalCommands.ts 提醒、快捷指令、定时任务命令
+│   ├── telegramModelCommands.ts 模型切换、恢复默认与 CLI 工作目录命令
+│   ├── telegramOpsCommands.ts 诊断、日志、检查/更新、备份、OpenCode 服务、配置项与重启
+│   ├── api.ts        HTTP API `/api/v1`：任务、配置、运维与鉴权
+│   ├── apiCore.ts    API 基础类型、错误与路径前缀
+│   ├── apiTaskTypes.ts 任务视图/附件类型
+│   ├── apiTasks.ts   任务队列、SSE、重试、停止与附件校验
+│   ├── apiPersonal.ts 个人数据路由：提醒、定时、目录、时区、白名单
+│   ├── apiCc.ts      cc-switch 路由
+│   ├── apiCcSpecs.ts cc-switch 只读视图与危险操作白名单
+│   ├── apiRateLimit.ts 失败 Bearer 认证的按地址限流
 │   ├── models.ts     模型表、别名解析与自定义模型热加载
 │   ├── modelAdmin.ts 自定义模型注册、opencode.json 同步、agent 模型绑定
 │   ├── model-cli.ts  `npm run models` 命令行入口
 │   ├── ccswitch.ts   cc-switch CLI 封装：Provider/测速/MCP/提示词/环境/代理
 │   ├── progress.ts   进度卡片
 │   ├── opencode.ts   opencode HTTP/SSE 客户端
-│   ├── agentCli.ts   通用 Agent CLI 适配层：内置档案、PATH 检测、子进程、会话与输出解析
+│   ├── agentCli.ts   通用 Agent CLI 适配层：PATH 检测、子进程、会话与输出解析
+│   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Qwen…）
 │   ├── agentInstaller.ts npm/pip 安装、更新、卸载与 Bot 托管清单
 │   ├── ops.ts        运维：诊断、日志、更新、重启、OpenCode 服务与 .env 编辑
 │   ├── media.ts      [[image:...]] 指令解析、outbox 校验与清理
@@ -337,6 +461,7 @@ bot/
 │   ├── store.ts      会话持久化
 │   └── logger.ts
 ├── tests/            单元测试（node:test）
+├── install.sh        安装脚本：检查环境、克隆/更新、安装依赖、构建、准备 .env
 ├── deploy/           systemd 单元示例
 ├── scripts/          邮件、X、搜图、免费服务器扫描/抢注、重启、cc-switch 安装与安卓源码检查脚本
 ├── bin/              可选：`npm run cc-switch:install` 下载的 cc-switch 二进制（已 gitignore）
@@ -420,7 +545,7 @@ Token 在向导输出中只显示掩码；输入行仍由终端回显，请留�
 它还通过 `BOT_LOG_FILE` 告知 Bot 日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
 重复启动会被 `data/bot.lock` 拒绝，提示已有实例的 PID；锁文件同时记录进程启动时间，PID 被系统复用后不会误判为仍在运行。
 
-开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
+开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + lint + 无用文件/依赖检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
 
 ### systemd 常驻（可选）
 
@@ -472,7 +597,7 @@ journalctl -u telegram-bot -f
 
 Telegram Token、API Key、密码、账号凭据等永远不会在 `/env`、`/logs`、`/diag` 中显示，也不能通过 Telegram 修改。配置修改后需要 `/restart` 生效；OpenCode 相关变量还需要重启 OpenCode 服务。
 
-**运行检查**：`/ops` 中的「运行检查」执行 `npm run check`（类型检查 + 单元测试 + 构建），适合在修改自定义 agent 档案或模型配置后验证。所有运维操作均为固定命令，不接受任意 shell 输入，并有并发锁避免同时执行多个重任务。
+**运行检查**：`/ops` 中的「运行检查」执行 `npm run check`（android 静态检查 + lint + knip + 类型检查 + 单元测试 + 构建），适合在修改自定义 agent 档案或模型配置后验证。所有运维操作均为固定命令，不接受任意 shell 输入，并有并发锁避免同时执行多个重任务。
 
 **一次性确认**：更新项目、重启 Bot、停止/重启 OpenCode、cc-switch 安装/更新、`/agents` 安装/更新/卸载的确认按钮使用随机一次性令牌，点击「✅ 确认」后立即失效；「取消」按钮同样携带该令牌，点击即**撤销**这次请求（不会留下一个 5 分钟内仍可按下的确认按钮），再点确认会提示「已过期或已被使用」。超过 5 分钟未点击也会自动过期。执行前还会重新检查前置条件（是否 systemd 托管、是否有任务正在跑），因此确认时的状态比弹出提示时更新。
 
@@ -615,11 +740,12 @@ npm run cc-switch:install -- --force # 覆盖已有二进制
 /cc env list|check|tools
 /cc deeplink <ccswitch://v1/import?...>
 /cc update [--check]
-/cc hermes memory ...
+/cc hermes memory limits|show|set|clear|enable|disable ...
 /cc run <任意非交互参数>
 ```
 
 - `/cc mcp add '<JSON>'` 通过 Deep Link 导入 MCP（可省略 `mcpServers` 外层）；`/cc prompts new <名称> <内容>` 通过 Deep Link 创建提示词，绕开交互式编辑器。
+- `/cc hermes memory set <memory|user> --content '<内容>'` 与 `clear <memory|user>` 都是整份覆盖，走确认按钮；确认后的 `clear` 由服务端补上 cc-switch 自己要的 `--yes`（不带它时 CLI 只打印拒绝并以 0 退出，看起来成功实则什么都没做）。`enable|disable` 只决定 Hermes 加载记忆时是否跳过该文件，不删内容；`open-dir` 会打开服务器上的文件管理器，在聊天与 App 中一律拒绝。App 端对应的是一整页编辑器（`GET`/`POST /cc/hermes`），不用在聊天里拼一行参数。
 - 删除 Provider/MCP/提示词、卸载技能、登出账号、导入/重置配置、导入 `ccswitch://` Deep Link（`/cc deeplink`、`/cc run deeplink`）、清空故障转移、消费配额重置额度、升级二进制等操作会先发送确认按钮；确认后通过伪终端自动回应 CLI 的安全提示（依赖 **util-linux** 的 `script` 命令，BusyBox 版本不支持 `-qec`，执行前会检测并直接给出提示而不是挂到超时）。
 - 所有确认按钮（cc-switch、运维中心、Agent CLI 安装/更新/卸载）都使用一次性随机令牌：点击即失效、5 分钟未点击自动过期，历史记录里的旧按钮再按会提示已过期，执行前还会重新校验前置条件。
 - 输出中的 API Key、Token、URL 凭据会自动打码（`key: '值'`、`key="值"` 这类带引号、用 `;` 分隔的写法同样会被遮盖），`config show` 也会脱敏后再发送。需要导入含密钥的配置时，建议先上传到 `data/inbox/`，再用 `--config-file` 引用。

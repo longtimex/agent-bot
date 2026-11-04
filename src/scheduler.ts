@@ -513,7 +513,7 @@ export class ScheduleService {
 
   async idle(): Promise<void> {
     while (this.#inflight.size > 0) {
-      await Promise.allSettled([...this.#inflight])
+      await Promise.allSettled(this.#inflight)
     }
   }
 

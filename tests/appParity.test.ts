@@ -109,10 +109,11 @@ const API_SOURCE = "src/api.ts"
 const CLIENT_SOURCE = "android/app/src/main/java/com/agentbot/app/data/ApiClient.kt"
 
 /**
- * Routes kept for other API consumers, not the App: `tasks` lists the bot's whole in-memory
- * task log, which the App shows per-session through `queue` and `history` instead.
+ * Routes kept for other API consumers, not the App. `tasks` used to be one of them: the phone
+ * had `queue` and `history`, but only `tasks` hands back a settled run with its real prompt and
+ * an id, which is what the queue screen's 重试 needs to replay attachments like Telegram's /retry.
  */
-const NOT_IN_APP = ["tasks"]
+const NOT_IN_APP: string[] = []
 
 function serverResources(): string[] {
   const source = readFileSync(API_SOURCE, "utf8")

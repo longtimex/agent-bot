@@ -184,7 +184,7 @@ test("a flood error keeps the card id and backs off instead of hammering it", as
     await settle()
     const edits = h.calls.filter((call) => call.method === "editMessageText")
     assert.equal(edits.length, 2)
-    assert.equal((edits[1]?.args as unknown[])[0], 5, "a rate-limited card still exists and must be reused")
+    assert.equal((edits[1]?.args as unknown[] | undefined)?.[0], 5, "a rate-limited card still exists and must be reused")
   } finally {
     h.restore()
     await h.tracker.finish()
@@ -214,7 +214,7 @@ test("an unchanged card is only refreshed on the elapsed-clock cadence", async (
     await settle()
     const edits = h.calls.filter((call) => call.method === "editMessageText")
     assert.equal(edits.length, 1, "the card must still refresh its elapsed time periodically")
-    assert.match(String((edits[0]?.args as unknown[])[1]), /1m/)
+    assert.match(String((edits[0]?.args as unknown[] | undefined)?.[1]), /1m/)
 
     h.tracker.update("writing the answer")
     t.mock.timers.tick(2000)

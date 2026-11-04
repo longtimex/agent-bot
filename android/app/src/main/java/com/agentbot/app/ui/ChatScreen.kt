@@ -287,7 +287,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
                 onDismiss = { vm.connectionError = null },
                 onRetry = {
                     vm.connectionError = null
-                    vm.retryLastFailed()
+                    vm.retryLastTask()
                 },
             )
 
@@ -1130,7 +1130,7 @@ private fun ChatInputBar(
     val commands = listOf(
         SlashCommand("/new", "新建会话，清空上下文") { vm.newChat() },
         SlashCommand("/stop", "停止当前任务") { vm.stop() },
-        SlashCommand("/retry", "重新发送上一条任务") { vm.retryLastFailed() },
+        SlashCommand("/retry", "重新发送上一条任务") { vm.retryLastTask() },
         SlashCommand("/queue", "查看任务队列") { vm.navigate(Screen.Queue) },
         SlashCommand("/history", "查看任务历史") { vm.navigate(Screen.History) },
         SlashCommand("/reminders", "查看提醒") { vm.navigate(Screen.Reminders) },

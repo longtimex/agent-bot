@@ -1,14 +1,12 @@
 import { randomBytes } from "node:crypto"
 import QRCode from "qrcode"
-import { readFileSync, statSync, unlinkSync } from "node:fs"
-import { homedir } from "node:os"
+import { unlinkSync } from "node:fs"
 import { resolve } from "node:path"
 import { Agent, fetch as undiciFetch } from "undici"
 import { Bot, InlineKeyboard, InputFile } from "grammy"
 import type { Context } from "grammy"
 import type { Message } from "grammy/types"
 import {
-  formatBytes,
   isTextAttachment,
   pruneInbox,
   readTextAttachment,
@@ -30,29 +28,36 @@ import { clip, escapeMarkdown, pruneChatState, splitMessage, type Panel } from "
 export { pruneChatState }
 export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
-import { AgentCliService, normalizeWorkDirInput, type AgentCliProfile } from "./agentCli.js"
+import { AgentCliService } from "./agentCli.js"
 import { buildAttachmentSections } from "./attachmentInput.js"
 import { applyStt } from "./stt.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import { appVersion } from "./version.js"
 import {
   AVAILABLE_MODELS,
-  reloadCustomModels,
   resolveModelKey,
   type ModelInfo,
 } from "./models.js"
-import { callEngine, resolveOpencodeModel, type EngineCallDeps } from "./engineCall.js"
+import { callEngine, type EngineCallDeps } from "./engineCall.js"
 import { resolveApiToken } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
 import { resolveEncKey } from "./api.js"
-import { OPS_ENV_KEYS, OPS_ENV_RULES, OpsService, type OpsDiagnostics, type OpsResult } from "./ops.js"
+import { OpsService } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
 import { maskProxyUrl, ProxyService } from "./proxy.js"
-import { describeRepeat, formatRemaining, formatReminderTime, MAX_PER_CHAT, ReminderService, type Reminder, zonedParts } from "./reminders.js"
-import { scheduleTargetLabel, ScheduleService, type ScheduleDefaults, type ScheduledTask } from "./scheduler.js"
+import { describeRepeat, ReminderService, type Reminder } from "./reminders.js"
+import { scheduleTargetLabel, ScheduleService, type ScheduledTask } from "./scheduler.js"
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
 import { DailyReportService } from "./usageReport.js"
+import { USER_ID_RE, TIMEZONE_PRESETS, describeRemainingLabel, extensionFromMime, isMessageNotModified, parseAllowUsers, sleep, sortUserIds, startupNoticeText } from "./telegramSupport.js"
+import { TelegramStatsPanels } from "./telegramStats.js"
+import { TelegramPersonalPanels } from "./telegramPersonalPanels.js"
+import { TelegramCorePanels } from "./telegramCorePanels.js"
+import { TelegramPersonalCommands } from "./telegramPersonalCommands.js"
+import { TelegramModelCommands } from "./telegramModelCommands.js"
+import { TelegramOpsCommands } from "./telegramOpsCommands.js"
+export { startupNoticeText } from "./telegramSupport.js"
 const MAX_INPUT_LENGTH = 12_000
 const MAX_PENDING = 4
 const MAX_ATTACHMENTS = 4
@@ -75,22 +80,9 @@ const QUEUED_COMMANDS = new Set(["/agent", "/new", "/reset", "/id", "/model", "/
 /** Monotonic queue-entry ids, because a plain index would shift under a button press. */
 let jobSequence = 0
 
-/** `/model <word>` spellings that drop the chat's own selection and fall back to the configured default. */
-const MODEL_DEFAULT_WORDS = new Set(["default", "reset", "clear", "auto", "默认", "恢复默认"])
-
-const SCHEDULE_USAGE = `🗓 *定时 AI 任务*
-
-• \`/schedule\` - 打开任务面板
-• \`/schedule add 30m 检查服务器\` - 到点自动执行
-• \`/schedule add --engine claude --model sonnet 2h 汇总日志\` - 指定引擎与模型
-• \`/schedule add every 2h 汇总日志\` / \`/schedule add 每天 09:00 生成日报\` - 重复执行（也支持 \`每2小时\`、\`下午6点\`）
-• \`/schedule pause 编号\` / \`/schedule resume 编号\` / \`/schedule del 编号\` - 管理任务
-• \`/schedule run 编号\` - 立即执行一次（不影响原定时间）
-
-时间格式与 \`/remind\` 相同；提示词上限 2000 字，每个会话最多 20 个任务。`
 
 
-interface Job {
+export interface Job {
   key: string
   text: string
   chatId: number
@@ -109,121 +101,10 @@ interface Job {
   onOutcome?: (outcome: UsageOutcome) => void
 }
 
-/** Text of the one-shot "Bot 已上线" ping sent to the owner chat after polling connects. */
-export function startupNoticeText(opts: {
-  username?: string
-  version: string
-  opencodeOk: boolean
-  timezone: string
-}): string {
-  const who = opts.username ? ` @${opts.username}` : ""
-  const opencode = opts.opencodeOk
-    ? "OpenCode 服务：✅ 可达"
-    : "OpenCode 服务：❌ 不可达（运行 npm run serve，或在 Telegram 里发送 /service opencode start）"
-  return [
-    `✅ Bot 已上线${who} · v${opts.version}`,
-    opencode,
-    `时区 ${opts.timezone} · 发送 /menu 打开功能菜单`,
-  ].join("\n")
-}
-
-/** Buttons for /timezone; anything else can still be typed as /timezone <IANA 名称>. */
-const TIMEZONE_PRESETS = [
-  "Asia/Shanghai",
-  "Asia/Hong_Kong",
-  "Asia/Taipei",
-  "Asia/Singapore",
-  "Asia/Tokyo",
-  "Asia/Kolkata",
-  "Europe/London",
-  "Europe/Berlin",
-  "Europe/Moscow",
-  "America/New_York",
-  "America/Los_Angeles",
-  "America/Sao_Paulo",
-  "Australia/Sydney",
-  "Pacific/Auckland",
-  "UTC",
-]
-
-function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000))
-  if (seconds < 60) return `${seconds} 秒`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时 ${minutes % 60} 分`
-  return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`
-}
-
-function formatDateTime(timestamp: number, timeZone: string): string {
-  const parts = zonedParts(timestamp, timeZone)
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return `${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}`
-}
-
-
-function describeRemainingLabel(minutes: number): string {
-  if (minutes >= 1440) return `${Math.round(minutes / 1440)} 天`
-  if (minutes >= 60) return `${Math.round(minutes / 60)} 小时`
-  return `${minutes} 分钟`
-}
-
-function isMessageNotModified(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err)
-  const description = (err as { description?: string } | undefined)?.description ?? ""
-  return /message is not modified/i.test(`${message} ${description}`)
-}
-
-
-
-/**
- * `/cc provider add 名称 键=值…` → the same validated draft the HTTP form sends.
- * Returns an error string for the chat instead of throwing, so a typo stays advice.
- */
-
 const AGENT_CONFIRM_TTL_MS = 5 * 60_000
-
-const OPS_CONFIRM_TTL_MS = 5 * 60_000
-
-type OpsConfirmKind = "restart" | "update" | "cc-install" | "cc-update" | "svc-stop" | "svc-restart"
 
 type AgentAction = "install" | "update" | "uninstall"
 const AGENT_ACTION_VERB: Record<AgentAction, string> = { install: "安装", update: "更新", uninstall: "卸载" }
-
-function extensionFromMime(mime: string | undefined): string {
-  switch (mime) {
-    case "application/pdf": return ".pdf"
-    case "image/png": return ".png"
-    case "image/jpeg": return ".jpg"
-    case "image/gif": return ".gif"
-    case "image/webp": return ".webp"
-    case "audio/mpeg": return ".mp3"
-    case "audio/ogg": return ".ogg"
-    case "audio/wav": return ".wav"
-    case "audio/mp4": return ".m4a"
-    case "application/zip": return ".zip"
-    default: return ""
-  }
-}
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
-const USER_ID_RE = /^\d{1,20}$/
-
-/** Numeric Telegram IDs only, deduped and ascending, as stored in TELEGRAM_ALLOW_USERS. */
-function sortUserIds(ids: Iterable<string>): string[] {
-  const unique = new Set<string>()
-  for (const raw of ids) {
-    const id = raw.trim()
-    if (USER_ID_RE.test(id)) unique.add(id)
-  }
-  return [...unique].sort((a, b) => a.length - b.length || a.localeCompare(b))
-}
-
-function parseAllowUsers(value: string): string[] {
-  return sortUserIds(value.split(","))
-}
 
 export class TelegramBridge {
   readonly #cfg: BotConfig
@@ -252,7 +133,12 @@ export class TelegramBridge {
   readonly #models: ModelAdmin
   readonly #agentInstaller: AgentCliInstaller
   readonly #ops: OpsService
-  readonly #opsPending = new Map<string, { chatId: number; kind: OpsConfirmKind; createdAt: number }>()
+  readonly #stats: TelegramStatsPanels
+  readonly #personalPanels: TelegramPersonalPanels
+  readonly #corePanels: TelegramCorePanels
+  readonly #personalCommands: TelegramPersonalCommands
+  readonly #modelCommands: TelegramModelCommands
+  readonly #opsCommands: TelegramOpsCommands
   readonly #snoozePending = new Map<string, { chatId: number; userId: number; text: string; createdAt: number }>()
   readonly #agentPending = new Map<
     string,
@@ -260,7 +146,6 @@ export class TelegramBridge {
   >()
   #startedAt = Date.now()
   #running = false
-  #opsRunning = ""
   /** Live-overridable via /timezone; the reminder, schedule and usage stores all follow it. */
   #timezone: string
 
@@ -356,6 +241,89 @@ export class TelegramBridge {
       store: this.#store,
       cfg: this.#cfg,
     }
+    this.#stats = new TelegramStatsPanels({
+      cfg: this.#cfg,
+      store: this.#store,
+      agents: this.#agents,
+      usage: this.#usage,
+      history: this.#history,
+      reminders: this.#reminders,
+      schedules: this.#schedules,
+      proxies: this.#proxies,
+      timezone: () => this.#timezone,
+      startedAt: () => this.#startedAt,
+      pendingCount: (key) => this.#pending.get(key)?.length ?? 0,
+      currentModel: (key) => this.#getCurrentModel(key),
+      cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
+      encryptionEnabled: () => resolveEncKey(this.#cfg) !== undefined,
+      runningSince: this.#runningSince,
+    })
+    this.#personalPanels = new TelegramPersonalPanels({
+      cfg: this.#cfg,
+      agents: this.#agents,
+      proxies: this.#proxies,
+      aliases: this.#aliases,
+      schedules: this.#schedules,
+      reminders: this.#reminders,
+      timezone: () => this.#timezone,
+      pendingJobs: (key) => this.#pending.get(key) ?? [],
+      isRunning: (key) => this.#runningSince.has(key),
+    })
+    this.#corePanels = new TelegramCorePanels({
+      store: this.#store,
+      agents: this.#agents,
+      agentInstaller: this.#agentInstaller,
+      usage: this.#usage,
+      reminders: this.#reminders,
+      schedules: this.#schedules,
+      runningSince: this.#runningSince,
+      pendingCount: (key) => this.#pending.get(key)?.length ?? 0,
+      currentModel: (key) => this.#getCurrentModel(key),
+      cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
+    })
+    this.#personalCommands = new TelegramPersonalCommands({
+      reminders: this.#reminders,
+      aliases: this.#aliases,
+      schedules: this.#schedules,
+      store: this.#store,
+      agents: this.#agents,
+      timezone: () => this.#timezone,
+      currentModel: (key) => this.#getCurrentModel(key),
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      aliasPanel: (chatId) => this.#personalPanels.aliasPanel(chatId),
+      schedulePanel: (chatId, page) => this.#personalPanels.schedulePanel(chatId, page),
+      remindersPanel: (chatId, page) => this.#personalPanels.remindersPanel(chatId, page),
+    })
+    this.#modelCommands = new TelegramModelCommands({
+      store: this.#store,
+      agents: this.#agents,
+      oc: this.#oc,
+      cfg: this.#cfg,
+      log: this.#log,
+      runningSince: this.#runningSince,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      dirPanel: (key) => this.#corePanels.dirPanel(key),
+      modelPanel: (key) => this.#corePanels.modelPanel(key),
+    })
+    this.#opsCommands = new TelegramOpsCommands({
+      ops: this.#ops,
+      cfg: this.#cfg,
+      log: this.#log,
+      timezone: () => this.#timezone,
+      setTimezone: (zone) => { this.#timezone = zone },
+      reminders: this.#reminders,
+      schedules: this.#schedules,
+      usage: this.#usage,
+      runningSince: this.#runningSince,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      sendDocument: (chatId, data, filename, caption) =>
+        this.#bot.api.sendDocument(chatId, new InputFile(data, filename), { caption }),
+      offLoop: (chatId, label, run) => this.#offLoop(chatId, label, run),
+      maskToken: (text) => this.#maskToken(text),
+    })
     this.#ccCommands = new CcCommands(ccHost, this.#cc, this.#models, log)
   }
 
@@ -504,7 +472,7 @@ export class TelegramBridge {
     this.#pending.clear()
     // A restart must not leave live one-shot confirm tokens or cached prompts behind
     this.#ccCommands.clearPending()
-    this.#opsPending.clear()
+    this.#opsCommands.clearPending()
     this.#agentPending.clear()
     this.#lastPrompts.clear()
     this.#retryPrompts.clear()
@@ -1369,81 +1337,11 @@ export class TelegramBridge {
   }
 
   #proxyPanel(note?: string): Panel {
-    const active = this.#proxies.active()
-    const items = this.#proxies.list()
-    const keyboard = new InlineKeyboard()
-
-    if (items.length === 0) {
-      const text =
-        (note ? `${note}\n\n` : "") +
-        "🌐 *网络代理*\n\n当前：未启用\n\n尚未添加代理。\n" +
-        "发送 `/proxy add http://127.0.0.1:7890 本地代理` 添加，添加时会自动测试连通性。\n\n" +
-        "支持 `http://`、`https://`、`socks4://`、`socks5://`。"
-      return {
-        text,
-        keyboard: new InlineKeyboard().text("🔄 刷新", "show:proxy").text("⬅️ 主菜单", "show:menu"),
-      }
-    }
-
-    // Telegram caps inline keyboards at 100 buttons; three rows per proxy would break
-    // the whole panel once enough proxies pile up, so only the first few get buttons
-    const panelProxies = items.slice(0, 12)
-    const lines = panelProxies.map((proxy) => {
-      const current = active?.id === proxy.id ? " ✅" : ""
-      return `• #${proxy.id} *${escapeMarkdown(proxy.name)}*${current}\n  ${escapeMarkdown(maskProxyUrl(proxy.url))}`
-    })
-    const more =
-      items.length > panelProxies.length
-        ? `\n\n_…另有 ${items.length - panelProxies.length} 个未显示。可用 \`/proxy use <编号>\`、\`/proxy test <编号>\` 或 \`/proxy del <编号>\` 直接操作。_`
-        : ""
-    const status = active
-      ? `#${active.id} ${escapeMarkdown(active.name)}`
-      : "未启用"
-    const text =
-      (note ? `${note}\n\n` : "") +
-      `🌐 *网络代理*\n\n当前：${status}\n\n${lines.join("\n")}${more}\n\n` +
-      "启用后，远程媒体下载、Agent CLI 子进程以及 Agent 的网络命令会走该代理；Telegram 与本地 opencode 连接保持直连。"
-
-    panelProxies.forEach((proxy, index) => {
-      keyboard
-        .text(`${active?.id === proxy.id ? "✅" : "▶️"} 使用 #${proxy.id}`, `proxy:use:${proxy.id}`)
-        .text(`🧪 测试 #${proxy.id}`, `proxy:test:${proxy.id}`)
-        .row()
-        .text(`🗑 删除 #${proxy.id}`, `proxy:del:${proxy.id}`)
-      if (index < panelProxies.length - 1) keyboard.row()
-    })
-    if (active) keyboard.row().text("⏹ 停用代理", "proxy:off")
-    keyboard.row().text("🔄 刷新", "show:proxy").text("⬅️ 主菜单", "show:menu")
-    return { text, keyboard }
+    return this.#personalPanels.proxyPanel(note)
   }
 
   #queuePanel(key: string): Panel {
-    const items = this.#pending.get(key) ?? []
-    const running = this.#runningSince.has(key)
-    if (items.length === 0 && !running) {
-      return {
-        text: "📭 *队列为空*\n\n直接发送消息即可开始新的任务。",
-        keyboard: new InlineKeyboard().text("🔄 刷新", "show:queue").text("⬅️ 主菜单", "show:menu"),
-      }
-    }
-
-    const lines = items.map((job, index) => {
-      const preview = escapeMarkdown(clip(job.text.replace(/\s+/g, " ").trim(), 60) || "（无文字，仅附件）")
-      return `${index + 1}. ${preview}`
-    })
-    const head = running ? "⏳ 当前任务执行中。" : "✅ 当前没有运行中的任务。"
-    const body = lines.length > 0 ? `\n\n*排队中（${items.length}）*\n${lines.join("\n")}` : ""
-    const keyboard = new InlineKeyboard()
-    items.forEach((job, index) => {
-      if (!job.id) return
-      keyboard.text(`❌ 取消第 ${index + 1} 条`, `qdrop:${job.id}`).row()
-    })
-    if (items.length > 0) {
-      keyboard.text(`🧹 清空排队（${items.length}）`, "qclear")
-      keyboard.row()
-    }
-    keyboard.text("🔄 刷新队列", "show:queue").text("⬅️ 主菜单", "show:menu")
-    return { text: `📋 *任务队列*\n${head}${body}`, keyboard }
+    return this.#personalPanels.queuePanel(key)
   }
 
   /** Sends the chat's task history as a downloadable Markdown or JSON document. */
@@ -1483,438 +1381,51 @@ export class TelegramBridge {
   }
 
   #reportKeyboard(): InlineKeyboard {
-    return new InlineKeyboard().text("📈 使用统计", "show:usage").row().text("⬅️ 主菜单", "show:menu")
+    return this.#stats.reportKeyboard()
   }
 
   #usagePanel(key: string): Panel {
-    const usage = this.#usage.summary(key)
-    const keyboard = new InlineKeyboard().text("🔄 刷新统计", "show:usage").text("📊 运行状态", "show:status")
-    keyboard.row().text("📩 每日报告", "usage:report")
-    keyboard.row().text("⬅️ 主菜单", "show:menu")
-
-    if (usage.tasks === 0) {
-      return {
-        text: "📈 *使用统计*\n\n暂无任务记录。直接发送消息即可开始对话。",
-        keyboard,
-      }
-    }
-
-    const rate = Math.round((usage.ok / usage.tasks) * 100)
-    const avg = Math.round(usage.totalMs / usage.tasks)
-    const engine = usage.lastEngine ? this.#agents.registry.label(usage.lastEngine) : undefined
-    const last = usage.lastAt
-      ? `\n• 最近任务：${formatDateTime(usage.lastAt, this.#timezone)}` +
-        `（${engine ?? "未知"}${usage.lastModel ? ` / ${escapeMarkdown(usage.lastModel)}` : ""}）`
-      : ""
-    const engineUsage =
-      Object.entries(usage.engines)
-        .filter(([, count]) => count > 0)
-        .map(([id, count]) => `${this.#agents.registry.label(id)} ${count}`)
-        .join(" / ") || "无"
-    const trend = this.#usage.recentDays(key, 7)
-    const week = trend.reduce(
-      (acc, day) => ({
-        tasks: acc.tasks + day.tasks,
-        ok: acc.ok + day.ok,
-        failed: acc.failed + day.failed,
-        cancelled: acc.cancelled + day.cancelled,
-      }),
-      { tasks: 0, ok: 0, failed: 0, cancelled: 0 },
-    )
-    const blocks = "▁▂▃▄▅▆▇█"
-    const peak = Math.max(1, ...trend.map((day) => day.tasks))
-    const spark = trend
-      .map((day) =>
-        day.tasks === 0
-          ? "·"
-          : blocks[Math.min(blocks.length - 1, Math.max(0, Math.ceil((day.tasks / peak) * blocks.length) - 1))]!,
-      )
-      .join("")
-    const range =
-      trend.length > 1
-        ? `${trend[0]!.day.slice(5)} → ${trend[trend.length - 1]!.day.slice(5)}`
-        : trend[0]!.day.slice(5)
-    // Cross-chat view: Telegram numbers gain meaning once the App (or another chat) also runs tasks
-    const globalToday = this.#usage.dayTotalsByChat(0)
-    const otherSources = globalToday.filter((row) => row.key !== key)
-    const globalLine =
-      otherSources.length > 0
-        ? `\n• 全局今日：${globalToday.reduce((sum, row) => sum + row.usage.tasks, 0)} 次（含 ${otherSources.length} 个其他来源，点「📩 每日报告」看明细）`
-        : ""
-    return {
-      text:
-        `📈 *使用统计*\n\n` +
-        `• 总任务：${usage.tasks}（成功 ${usage.ok} / 失败 ${usage.failed} / 取消 ${usage.cancelled}）\n` +
-        `• 成功率：${rate}%\n` +
-        `• 平均耗时：${formatDuration(avg)}\n` +
-        `• 今日任务：${usage.today.tasks}（成功 ${usage.today.ok} / 失败 ${usage.today.failed} / 取消 ${usage.today.cancelled}）${globalLine}\n` +
-        `• 近 7 天：${week.tasks} 任务（成功 ${week.ok} / 失败 ${week.failed} / 取消 ${week.cancelled}）\n` +
-        `  \`${spark}\` ${range}\n` +
-        `• 引擎使用：${engineUsage}` +
-        last,
-      keyboard,
-    }
+    return this.#stats.usagePanel(key)
   }
 
   #historyPanel(key: string, count = 10): Panel {
-    const total = this.#history.count(key)
-    const keyboard = new InlineKeyboard().text("🔄 刷新", "show:history").text("⬅️ 主菜单", "show:menu")
-    if (total === 0) {
-      return {
-        text: "🕘 *任务历史*\n\n暂无任务记录。发送消息或触发定时任务后，这里会保留最近 50 条执行记录。",
-        keyboard,
-      }
-    }
-    keyboard.row().text("🧹 清空历史", "history:clear")
-    // 渐进加载：「更早」每次多看 10 条，最多到存储上限 50（到顶就不再显示按钮）
-    const wanted = Math.min(Math.max(10, count), 50)
-    if (wanted < total && wanted < 50) keyboard.row().text("⬇️ 更早 10 条", `show:history:${wanted + 10}`)
-    if (wanted > 10) keyboard.text("⬆️ 回到最新", "show:history:10")
-
-    const lines: string[] = []
-    let length = 0
-    let shown = 0
-    for (const entry of this.#history.list(key, wanted)) {
-      const status =
-        entry.outcome === "ok" ? "✅ 成功" : entry.outcome === "cancelled" ? "🛑 已取消" : "❌ 失败"
-      const engine = this.#agents.registry.label(entry.engine)
-      const target = entry.model ? `${engine} / ${entry.model}` : engine
-      const tag = entry.scheduled ? " · 🗓 定时" : ""
-      const prompt = entry.prompt ? `\n   _${escapeMarkdown(clip(entry.prompt, 100) ?? "")}_` : ""
-      const line =
-        `• ${formatDateTime(entry.at, this.#timezone)} · ${status} · ${formatDuration(entry.ms)}\n` +
-        `   ${escapeMarkdown(target)}${tag}${prompt}`
-      if (length + line.length > 3200) break
-      lines.push(line)
-      length += line.length + 2
-      shown += 1
-    }
-    const capped = shown < wanted ? `\n\n_消息过长，只渲染了前 ${shown} 条；可用 \`/export\` 导出完整历史。_` : ""
-
-    return {
-      text: `🕘 *任务历史*（已显示 ${shown} / 共 ${total} 条）\n\n${lines.join("\n\n")}${capped}`,
-      keyboard,
-    }
+    return this.#stats.historyPanel(key, count)
   }
 
   #statusText(chatId: number, key: string): string {
-    const engine = this.#store.getEngine(key)
-    const model =
-      engine === "opencode"
-        ? this.#getCurrentModel(key).label
-        : this.#cliModelLabel(engine, this.#store.getCliModel(key, engine))
-    // Tells the user whether the model came from this chat or from the config default
-    const ownSelection = engine === "opencode" ? this.#store.getModel(key) : this.#store.getCliModel(key, engine)
-    const since = this.#runningSince.get(key)
-    // #pending is what the queue panel shows, so status must not count cancelled-ahead slots
-    const pending = this.#pending.get(key)?.length ?? 0
-    const running = since ? `运行中（已 ${formatDuration(Date.now() - since)}）` : "空闲"
-    const reminders = this.#reminders.list(chatId).length
-    const schedules = this.#schedules.count(chatId)
-    const today = this.#usage.summary(key).today.tasks
-    const proxy = this.#proxies.active()
-    const detected = this.#agents.registry.list().filter((profile) => this.#agents.registry.binPath(profile)).length
-
-    return (
-      `📊 *运行状态*\n• 引擎: *${this.#agents.registry.label(engine)}*\n• 模型: *${model}*${ownSelection ? "" : "（默认）"}\n` +
-      `• 当前任务: ${running}\n• 待处理队列: ${pending} 条\n• 今日任务: ${today} 条\n` +
-      `• Agent CLI: ${detected} 个已安装\n` +
-      `• 待触发提醒: ${reminders} 条\n• 定时任务: ${schedules} 个\n` +
-      `• 网络代理: ${proxy ? `#${proxy.id} ${escapeMarkdown(proxy.name)}` : "未启用"}\n` +
-      `• 消息级加密: ${resolveEncKey(this.#cfg) ? "已启用" : "未启用（API_ENCRYPTION=1）"}\n` +
-      `• 语音转写: ${this.#cfg.stt ? `已启用（${escapeMarkdown(this.#cfg.stt.model)}，模型不支持音频时自动转写）` : "未配置（STT_BASE_URL）"}\n` +
-      `• 每日报告: ${this.#cfg.usageReport?.enabled ? `每天 ${this.#cfg.usageReport.time} 推送` : "未开启（USAGE_DAILY_REPORT）"}\n` +
-      `• Bot 运行时长: ${formatDuration(Date.now() - this.#startedAt)}`
-    )
+    return this.#stats.statusText(chatId, key)
   }
 
   #statusKeyboard(): InlineKeyboard {
-    return new InlineKeyboard()
-      .text("🔄 刷新状态", "show:status")
-      .text("📈 使用统计", "show:usage")
-      .row()
-      .text("🕘 任务历史", "show:history")
-      .text("📋 查看队列", "show:queue")
-      .text("🌐 网络代理", "show:proxy")
-      .row()
-      .text("🗓 定时任务", "show:schedule")
-      .text("⏰ 我的提醒", "show:reminders")
-      .row()
-      .text("📦 Agent 管理", "show:agents")
-      .text("🛠 运维中心", "show:ops")
-      .row()
-      .text("⬅️ 主菜单", "show:menu")
+    return this.#stats.statusKeyboard()
   }
 
   async #handleRemind(chatId: number, userId: number, arg: string): Promise<void> {
-    if (!arg) {
-      await this.#sendTextMessage(
-        chatId,
-        "⏰ *设置提醒*\n\n用法：`/remind 30m 喝水`\n\n支持的时间格式：\n" +
-        "• `30s` / `10m` / `2h` / `1d` / `1h30m`，也可写 `5分钟后` / `半小时后` / `1小时30分钟后`\n" +
-        "• `18:30` / `8点半` / `下午3点`（当天或次日）\n" +
-        "• `今天 18:30` / `明天 08:30` / `后天 09:00` / `今晚8点半`\n" +
-        "• `every 30m` / `每30m` / `每5分钟`（重复提醒）\n" +
-        "• `每天 08:30` / `每天8点半`（每天固定时间）\n\n" +
-          `当前时区：\`${this.#timezone}\`（\`/timezone\` 可修改），最多同时保留 ${MAX_PER_CHAT} 条。`,
-      )
-      return
-    }
-
-    try {
-      const reminder = this.#reminders.add(chatId, userId, arg)
-      const when = formatReminderTime(reminder.dueAt, this.#timezone)
-      const remaining = formatRemaining(reminder.dueAt - Date.now())
-      const repeat = reminder.repeat ? `\n• 重复：${describeRepeat(reminder.repeat)}` : ""
-      await this.#sendTextMessage(
-        chatId,
-        `⏰ *提醒已设置* #${reminder.id}\n• 时间：${when}（${this.#timezone}，约 ${remaining}后）${repeat}\n• 内容：${escapeMarkdown(reminder.text)}\n\n发送 \`/cancel ${reminder.id}\` 可取消。`,
-        new InlineKeyboard().text(`❌ 取消提醒 #${reminder.id}`, `rcancel:${reminder.id}`),
-      )
-    } catch (err) {
-      await this.#sendTextMessage(chatId, `⚠️ ${err instanceof Error ? err.message : String(err)}`)
-    }
+    return this.#personalCommands.handleRemind(chatId, userId, arg)
   }
 
   async #handleReminders(chatId: number): Promise<void> {
-    await this.#sendPanel(chatId, this.#remindersPanel(chatId))
+    return this.#personalCommands.handleReminders(chatId)
   }
 
   async #handleCancelReminder(chatId: number, arg: string): Promise<void> {
-    const id = Number(arg.trim())
-    if (!arg || !Number.isInteger(id) || id <= 0) {
-      await this.#sendTextMessage(chatId, "用法：`/cancel 编号`（编号见 `/reminders` 列表）。")
-      return
-    }
-
-    const removed = this.#reminders.cancel(chatId, id)
-    if (!removed) {
-      await this.#sendTextMessage(chatId, `⚠️ 未找到编号为 #${id} 的提醒，发送 \`/reminders\` 查看当前列表。`)
-      return
-    }
-    await this.#sendTextMessage(chatId, `✅ 已取消提醒 #${removed.id}：${removed.text}`)
+    return this.#personalCommands.handleCancelReminder(chatId, arg)
   }
 
   async #handleAliasCommand(chatId: number, arg: string): Promise<void> {
-    const [action = "", ...rest] = arg.split(/\s+/).filter(Boolean)
-    const norm = action.toLowerCase()
-
-    if (!norm || norm === "list" || norm === "面板") {
-      await this.#sendPanel(chatId, this.#aliasPanel(chatId))
-      return
-    }
-
-    if (norm === "add" || norm === "新增") {
-      const [name = "", ...words] = rest
-      if (!name || words.length === 0) {
-        await this.#sendTextMessage(
-          chatId,
-          "用法：`/alias add 名称 指令内容`\n例如：`/alias add code 审查当前目录的代码并给出改进清单`\n名称限小写字母/数字/下划线。",
-        )
-        return
-      }
-      try {
-        const entry = this.#aliases.add(chatId, name, words.join(" "))
-        await this.#sendTextMessage(
-          chatId,
-          `✅ 已保存快捷指令 \`/${entry.name}\`\n以后发送 \`/${entry.name}\` 即会执行：${escapeMarkdown(clip(entry.expansion, 300) ?? "")}`,
-        )
-      } catch (err) {
-        await this.#sendTextMessage(chatId, `⚠️ ${escapeMarkdown((err as Error).message)}`)
-      }
-      return
-    }
-
-    if (norm === "del" || norm === "rm" || norm === "delete" || norm === "删除") {
-      const name = rest[0] ?? ""
-      const removed = this.#aliases.remove(chatId, name)
-      if (!removed) {
-        await this.#sendTextMessage(chatId, `⚠️ 未找到快捷指令 \`/${escapeMarkdown(name)}\`，发送 \`/alias\` 查看当前列表。`)
-        return
-      }
-      await this.#sendTextMessage(chatId, `✅ 已删除快捷指令 \`/${removed.name}\``)
-      return
-    }
-
-    await this.#sendTextMessage(
-      chatId,
-      "用法：\n• `/alias` 查看快捷指令面板\n• `/alias add 名称 指令内容` 新增\n• `/alias del 名称` 删除",
-    )
-  }
-
-  #aliasPanel(chatId: number): Panel {
-    const aliases = this.#aliases.list(chatId)
-    const keyboard = new InlineKeyboard().text("➕ 用法见 /alias add", "noop:alias").row().text("⬅️ 主菜单", "show:menu")
-    if (aliases.length === 0) {
-      return {
-        text:
-          "⚡ *快捷指令*\n\n还没有自定义指令。用 `/alias add 名称 指令内容` 创建，例如：\n`/alias add code 审查当前目录的代码`\n之后发送 `/code` 即可触发。",
-        keyboard,
-      }
-    }
-    const lines = aliases.map((entry) => `• \`/${entry.name}\` → ${escapeMarkdown(clip(entry.expansion, 120) ?? "")}`)
-    for (const entry of aliases) {
-      keyboard.text(`🗑 /${entry.name}`, `aliasdel:${entry.name}`)
-    }
-    keyboard.row().text("⬅️ 主菜单", "show:menu")
-    return { text: `⚡ *快捷指令*（${aliases.length}）\n\n${lines.join("\n")}\n\n点按钮删除，或发送 /alias add 新增。`, keyboard }
+    return this.#personalCommands.handleAliasCommand(chatId, arg)
   }
 
   async #handleScheduleCommand(chatId: number, userId: number, key: string, arg: string): Promise<void> {
-    const [action = "", ...rest] = arg.split(/\s+/).filter(Boolean)
-    const norm = action.toLowerCase()
+    return this.#personalCommands.handleScheduleCommand(chatId, userId, key, arg)
+  }
 
-    if (!norm || norm === "list") {
-      await this.#sendPanel(chatId, this.#schedulePanel(chatId))
-      return
-    }
-
-    if (norm === "add") {
-      const input = rest.join(" ")
-      if (!input) {
-        await this.#sendTextMessage(chatId, SCHEDULE_USAGE)
-        return
-      }
-      try {
-        const engine = this.#store.getEngine(key)
-        const defaults: ScheduleDefaults =
-          engine === "opencode"
-            ? { engine, model: this.#getCurrentModel(key) }
-            : { engine, cliModel: this.#store.getCliModel(key, engine) ?? this.#agents.registry.defaultModel(engine) }
-        const task = this.#schedules.add(chatId, userId, input, defaults)
-        const when = formatReminderTime(task.dueAt, this.#timezone)
-        const remaining = formatRemaining(task.dueAt - Date.now())
-        const repeat = task.repeat
-          ? `\n• 重复：${describeRepeat(task.repeat)}`
-          : "\n• 重复：不重复（执行后自动删除）"
-        // Escaping Markdown can double the length; echoing a 2000-char prompt in full
-        // would push this confirmation past Telegram's 4096-char limit
-        const promptPreview = `${clip(task.prompt, 300) ?? ""}${task.prompt.length > 300 ? "…" : ""}`
-        await this.#sendTextMessage(
-          chatId,
-          `🗓 *定时任务已创建* #${task.id}\n• 时间：${when}（${this.#timezone}，约 ${remaining}后）${repeat}\n` +
-            `• 引擎：${escapeMarkdown(scheduleTargetLabel(task, this.#agents.registry))}\n• 提示词：${escapeMarkdown(promptPreview)}\n\n` +
-            "到点后会自动调用 AI 执行，并把结果发送到这里。",
-          new InlineKeyboard()
-            .text(`⏸ 暂停 #${task.id}`, `sched:pause:${task.id}`)
-            .text(`🗑 删除 #${task.id}`, `sched:del:${task.id}`),
-        )
-      } catch (err) {
-        await this.#sendTextMessage(chatId, `⚠️ ${err instanceof Error ? err.message : String(err)}`)
-      }
-      return
-    }
-
-    if (norm === "run" || norm === "now") {
-      const id = Number(rest[0])
-      if (!Number.isInteger(id)) {
-        await this.#sendTextMessage(chatId, "用法：`/schedule run 编号`（编号见 `/schedule` 面板）。")
-        return
-      }
-      try {
-        const task = this.#schedules.runNow(chatId, id)
-        if (!task) {
-          await this.#sendTextMessage(chatId, `⚠️ 定时任务 #${id} 不存在。`)
-          return
-        }
-        await this.#sendTextMessage(
-          chatId,
-          `▶️ 已立即执行定时任务 #${id}，结果会发送到这里（不影响原定的下一次执行时间）。`,
-        )
-      } catch (err) {
-        await this.#sendTextMessage(chatId, `⚠️ ${err instanceof Error ? err.message : String(err)}`)
-      }
-      return
-    }
-
-    if (norm === "pause" || norm === "resume" || norm === "del" || norm === "delete" || norm === "rm") {
-      const id = Number(rest[0])
-      if (!Number.isInteger(id)) {
-        await this.#sendTextMessage(chatId, `用法：\`/schedule ${norm} 编号\`（编号见 \`/schedule\` 面板）。`)
-        return
-      }
-      if (norm === "pause") {
-        const task = this.#schedules.pause(chatId, id)
-        await this.#sendTextMessage(chatId, task ? `⏸ 已暂停定时任务 #${id}。` : `⚠️ 定时任务 #${id} 不存在。`)
-        return
-      }
-      if (norm === "resume") {
-        const task = this.#schedules.resume(chatId, id)
-        await this.#sendTextMessage(chatId, task ? `▶️ 已恢复定时任务 #${id}。` : `⚠️ 定时任务 #${id} 不存在。`)
-        return
-      }
-      const removed = this.#schedules.remove(chatId, id)
-      await this.#sendTextMessage(chatId, removed ? `🗑 已删除定时任务 #${id}。` : `⚠️ 定时任务 #${id} 不存在。`)
-      return
-    }
-
-    await this.#sendTextMessage(chatId, SCHEDULE_USAGE)
+  #aliasPanel(chatId: number): Panel {
+    return this.#personalPanels.aliasPanel(chatId)
   }
 
   #schedulePanel(chatId: number, page = 1): Panel {
-    const all = this.#schedules.list(chatId)
-    const keyboard = new InlineKeyboard()
-    if (all.length === 0) {
-      return {
-        text:
-          "🗓 *定时任务*\n\n暂无定时任务。\n\n" +
-          "发送 `/schedule add 30m 检查服务器` 创建；支持 `every 2h`、`每天 09:00`、`每2小时`、`下午6点`，" +
-          "可加 `--engine claude --model sonnet` 指定执行引擎。",
-        keyboard: keyboard.text("🔄 刷新", "show:schedule").text("⬅️ 主菜单", "show:menu"),
-      }
-    }
-
-    // 与 /reminders 面板同款分页：一页 4 个任务（每个占一整行按钮）
-    const PAGE_SIZE = 4
-    const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE))
-    const current = Math.min(Math.max(1, page), pages)
-    const items = all.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
-
-    const now = Date.now()
-    const lines: string[] = []
-    for (const item of items) {
-      const state = item.paused ? "⏸" : "✅"
-      const when = formatReminderTime(item.dueAt, this.#timezone)
-      const whenText = item.paused ? when : `${when}（约 ${formatRemaining(item.dueAt - now)}后）`
-      const repeat = item.repeat ? ` 🔁 ${describeRepeat(item.repeat)}` : ""
-      const last = item.lastStatus
-        ? `\n  上次：${
-            item.lastStatus === "ok"
-              ? "成功"
-              : item.lastStatus === "cancelled"
-                ? "已取消"
-                : item.attempts
-                  ? `失败（第 ${item.attempts} 次重试中）`
-                  : "失败"
-          }`
-        : ""
-      const promptText = `${clip(item.prompt, 200) ?? ""}${item.prompt.length > 200 ? "…" : ""}`
-      lines.push(`${state} #${item.id} ${whenText}${repeat}\n  ${scheduleTargetLabel(item, this.#agents.registry)}\n  ${escapeMarkdown(promptText)}${last}`)
-    }
-
-    items.forEach((item) => {
-      keyboard
-        .text(`▶️ 运行 #${item.id}`, `sched:run:${item.id}`)
-        .text(
-          item.paused ? `▶️ 恢复 #${item.id}` : `⏸ 暂停 #${item.id}`,
-          item.paused ? `sched:resume:${item.id}` : `sched:pause:${item.id}`,
-        )
-        .text(`🗑 删除 #${item.id}`, `sched:del:${item.id}`)
-      keyboard.row()
-    })
-    if (current > 1) keyboard.text("⬅️ 上一页", `show:schedule:${current - 1}`)
-    if (pages > 1) keyboard.text(`📄 ${current}/${pages}`, "noop:page")
-    if (current < pages) keyboard.text("➡️ 下一页", `show:schedule:${current + 1}`)
-    if (pages > 1) keyboard.row()
-    keyboard.text("🔄 刷新", "show:schedule").text("⬅️ 主菜单", "show:menu")
-
-    const heading = pages > 1 ? `🗓 *定时任务（${all.length}）· 第 ${current}/${pages} 页*` : `🗓 *定时任务（${all.length}）*`
-    return {
-      text:
-        `${heading}\n\n${lines.join("\n\n")}\n\n` +
-        "到点后自动执行并把结果发到这里。发送 `/schedule add ...` 新建；「▶️ 运行」立即执行一次，不影响原定时间。",
-      keyboard,
-    }
+    return this.#personalPanels.schedulePanel(chatId, page)
   }
 
   async #ensureCapacity(chatId: number, key: string): Promise<boolean> {
@@ -2571,128 +2082,15 @@ export class TelegramBridge {
   }
 
   async #handleDiagnostics(chatId: number): Promise<void> {
-    try {
-      const diag = await this.#ops.diagnostics()
-      await this.#sendTextMessage(
-        chatId,
-        this.#diagnosticsText(diag),
-        new InlineKeyboard()
-          .text("🔄 刷新", "ops:diag")
-          .text("🛠 运维中心", "show:ops")
-          .row()
-          .text("⬅️ 主菜单", "show:menu"),
-      )
-    } catch (err) {
-      await this.#sendTextMessage(chatId, `❌ 诊断失败：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
-    }
-  }
-
-  #diagnosticsText(diag: OpsDiagnostics): string {
-    const git = diag.git
-      ? `${escapeMarkdown(diag.git.branch)} @ ${escapeMarkdown(diag.git.commit)}${diag.git.dirty ? "（有未提交改动）" : ""}`
-      : "不可用"
-    const ccSwitch = diag.ccSwitch
-      ? `已安装${diag.ccSwitch.version ? `（${escapeMarkdown(diag.ccSwitch.version)}）` : ""}`
-      : "未安装"
-    const opencode = diag.opencode.reachable ? "🟢 可访问" : "🔴 不可访问"
-    const disk = diag.disk
-      ? `${formatBytes(diag.disk.freeBytes)} 可用 / ${formatBytes(diag.disk.totalBytes)}`
-      : "未知"
-    const memory = `${formatBytes(diag.memory.freeBytes)} 可用 / ${formatBytes(diag.memory.totalBytes)}`
-    return (
-      `🩺 *系统诊断*\n\n` +
-      `• Node：${escapeMarkdown(diag.node)}（${escapeMarkdown(diag.platform)}）\n` +
-      `• Bot PID：${diag.pid} · 已运行 ${formatDuration(diag.uptimeSec * 1000)}\n` +
-      `• 部署方式：${diag.systemd ? "systemd" : "脚本 / 手动"}\n` +
-      `• 项目目录：\`${escapeMarkdown(diag.projectDir)}\`\n` +
-      `• Git：${git}\n` +
-      `• OpenCode：${opencode}${diag.opencode.pid ? `（PID ${diag.opencode.pid}）` : ""}\n` +
-      `• OpenCode URL：\`${escapeMarkdown(diag.opencode.url)}\`\n` +
-      `• cc-switch：${ccSwitch}\n` +
-      `• Bot 日志：${formatBytes(diag.log.bytes)} · \`${escapeMarkdown(diag.log.path)}\`\n` +
-      `• OpenCode 日志：${formatBytes(diag.opencodeLog.bytes)}\n` +
-      `• 磁盘：${disk}\n` +
-      `• 内存：${memory}\n` +
-      `• 最近备份：${diag.lastBackupAt ? `${formatDateTime(diag.lastBackupAt, this.#timezone)}（📦 备份数据）` : "尚未备份"}`
-    )
+    return this.#opsCommands.handleDiagnostics(chatId)
   }
 
   async #opsPanel(): Promise<Panel> {
-    let head = "🛠 *运维中心*\n\n诊断暂时不可用。"
-    try {
-      head = this.#diagnosticsText(await this.#ops.diagnostics())
-    } catch {
-      // keep fallback text
-    }
-    const busy = this.#opsRunning ? `\n\n⏳ 正在执行：${escapeMarkdown(this.#opsRunning)}` : ""
-    return {
-      text: `🛠 *运维中心*\n\n${head}${busy}\n\n⚠️ 更新、重启与停止服务需要确认；不会读取或输出 .env 中的密钥。`,
-      keyboard: this.#opsKeyboard(),
-    }
-  }
-
-  #opsKeyboard(): InlineKeyboard {
-    return new InlineKeyboard()
-      .text("🩺 诊断", "ops:diag")
-      .text("📜 Bot 日志", "ops:logs:bot:80")
-      .row()
-      .text("⚡ OpenCode 服务", "ops:svc")
-      .text("🧪 运行检查", "ops:check")
-      .row()
-      .text("🔌 cc-switch 安装/更新", "ops:cc")
-      .text("⚙️ 配置项", "ops:env")
-      .row()
-      .text("🔐 访问白名单", "show:access")
-      .text("🔍 检查更新", "ops:checkup")
-      .row()
-      .text("⬆️ 更新项目", "ops:update")
-      .text("📦 备份数据", "ops:backup")
-      .row()
-      .text("🔄 重启 Bot", "ops:restart")
-      .text("🔄 刷新", "show:ops")
-      .row()
-      .text("⬅️ 主菜单", "show:menu")
+    return this.#opsCommands.opsPanel()
   }
 
   async #handleLogs(chatId: number, arg: string): Promise<void> {
-    let source: "bot" | "opencode" = "bot"
-    let lines = 80
-    for (const token of arg.split(/\s+/).filter(Boolean)) {
-      if (token === "opencode" || token === "oc") source = "opencode"
-      else if (token === "bot") source = "bot"
-      else if (/^\d+$/.test(token)) lines = Math.min(400, Math.max(10, Number(token)))
-    }
-    const label = source === "opencode" ? "OpenCode" : "Bot"
-    const result = this.#ops.tailLogs(source, lines)
-    if (result.missing) {
-      await this.#sendTextMessage(
-        chatId,
-        `📜 ${label} 日志尚未生成：\`${escapeMarkdown(result.path)}\``,
-        new InlineKeyboard().text("🛠 运维中心", "show:ops"),
-      )
-      return
-    }
-    if (!result.ok) {
-      await this.#sendTextMessage(chatId, `❌ 读取日志失败：${escapeMarkdown(result.text)}`)
-      return
-    }
-    const body = result.text || "（日志为空）"
-    const text =
-      `📜 *${label} 日志（最近 ${lines} 行）*\n` +
-      `\`${escapeMarkdown(result.path)}\` · ${formatBytes(result.bytes)}\n\n` +
-      `\`\`\`\n${body.replace(/```/g, "'''")}\n\`\`\``
-    for (const chunk of splitMessage(text, 3800)) {
-      await this.#sendTextMessage(chatId, chunk)
-    }
-    await this.#sendTextMessage(
-      chatId,
-      "发送 `/logs opencode 200` 可查看 OpenCode 日志。",
-      new InlineKeyboard()
-        .text("🔄 刷新日志", `ops:logs:${source}:${lines}`)
-        .text("🛠 运维中心", "show:ops")
-        .row()
-        .text("⬅️ 主菜单", "show:menu"),
-    )
+    return this.#opsCommands.handleLogs(chatId, arg)
   }
 
   async #handleOpsCallback(
@@ -2700,455 +2098,36 @@ export class TelegramBridge {
     action: string,
     answer: (text?: string) => Promise<void>,
   ): Promise<void> {
-    if (action === "diag") {
-      await answer("正在诊断…")
-      this.#offLoop(chatId, "诊断", () => this.#handleDiagnostics(chatId))
-      return
-    }
-    if (action.startsWith("logs:")) {
-      const [, source = "bot", rawLines = "80"] = action.split(":")
-      await answer()
-      this.#offLoop(chatId, "日志", () => this.#handleLogs(chatId, `${source} ${rawLines}`))
-      return
-    }
-    if (action === "restart") {
-      await answer()
-      await this.#confirmRestart(chatId)
-      return
-    }
-    if (action.startsWith("cnl:")) {
-      const token = action.slice("cnl:".length)
-      const pending = this.#opsPending.get(token)
-      if (pending && pending.chatId !== chatId) {
-        await answer("该按钮不属于当前会话")
-        return
-      }
-      // A declined restart/update must not stay executable until its TTL expires
-      this.#opsPending.delete(token)
-      await answer("已取消")
-      await this.#sendTextMessage(
-        chatId,
-        "🚫 已取消，未执行任何操作。",
-        new InlineKeyboard().text("🛠 运维中心", "show:ops"),
-      )
-      return
-    }
-    if (action.startsWith("cfm:")) {
-      const token = action.slice("cfm:".length)
-      const pending = this.#opsPending.get(token)
-      if (!pending || Date.now() - pending.createdAt > OPS_CONFIRM_TTL_MS) {
-        this.#opsPending.delete(token)
-        await answer("操作已过期，请重新发起")
-        await this.#sendTextMessage(chatId, "⌛ 该确认按钮已过期或已被使用，请重新发起操作。")
-        return
-      }
-      if (pending.chatId !== chatId) {
-        await answer("该按钮不属于当前会话")
-        return
-      }
-      this.#opsPending.delete(token)
-      await answer()
-      await this.#runOpsConfirm(chatId, pending.kind)
-      return
-    }
-    if (action === "update") {
-      await answer()
-      await this.#confirmUpdate(chatId)
-      return
-    }
-    if (action === "check") {
-      await answer("开始检查…")
-      void this.#runOpsAction(chatId, "运行检查", () => this.#ops.runCheck())
-      return
-    }
-    if (action === "checkup") {
-      await answer("正在检查更新…")
-      void this.#runOpsAction(chatId, "检查更新", () => this.#ops.checkUpdate())
-      return
-    }
-    if (action === "backup") {
-      await answer("正在打包…")
-      void this.#runBackup(chatId)
-      return
-    }
-    if (action === "cc") {
-      await answer()
-      await this.#confirmCcSwitch(chatId)
-      return
-    }
-    if (action === "svc") {
-      await answer()
-      await this.#sendPanel(chatId, await this.#servicePanel())
-      return
-    }
-    if (action === "svc:start") {
-      await answer("正在启动…")
-      void this.#runOpsAction(chatId, "启动 OpenCode", () => this.#ops.startOpencode())
-      return
-    }
-    if (action === "svc:stop") {
-      await answer()
-      await this.#confirmServiceAction(chatId, "stop")
-      return
-    }
-    if (action === "svc:restart") {
-      await answer()
-      await this.#confirmServiceAction(chatId, "restart")
-      return
-    }
-    if (action === "env") {
-      await answer()
-      await this.#sendPanel(chatId, this.#envPanel())
-      return
-    }
-    await answer()
-  }
-
-  async #requestOpsConfirm(chatId: number, kind: OpsConfirmKind, body: string): Promise<void> {
-    const now = Date.now()
-    for (const [token, pending] of this.#opsPending) {
-      if (now - pending.createdAt > OPS_CONFIRM_TTL_MS) this.#opsPending.delete(token)
-    }
-    const token = randomBytes(6).toString("hex")
-    this.#opsPending.set(token, { chatId, kind, createdAt: now })
-    await this.#sendTextMessage(
-      chatId,
-      body,
-      new InlineKeyboard().text("✅ 确认执行", `ops:cfm:${token}`).text("取消", `ops:cnl:${token}`),
-    )
-  }
-
-  async #runOpsConfirm(chatId: number, kind: OpsConfirmKind): Promise<void> {
-    const blockedByTasks = "⚠️ 当前有任务正在执行，请先发送 `/stop` 再操作。"
-    switch (kind) {
-      case "restart":
-        if (this.#ops.systemd) {
-          await this.#confirmRestart(chatId)
-          return
-        }
-        if (this.#runningSince.size > 0) {
-          await this.#sendTextMessage(chatId, blockedByTasks)
-          return
-        }
-        void this.#runOpsAction(chatId, "重启 Bot", () => this.#ops.restartBot())
-        return
-      case "update":
-        void this.#runOpsAction(chatId, "更新项目", () => this.#ops.updateProject())
-        return
-      case "cc-install":
-        void this.#runOpsAction(chatId, "安装 cc-switch", () => this.#ops.installCcSwitch(false))
-        return
-      case "cc-update":
-        void this.#runOpsAction(chatId, "更新 cc-switch", () => this.#ops.installCcSwitch(true))
-        return
-      case "svc-stop":
-        if (this.#runningSince.size > 0) {
-          await this.#sendTextMessage(chatId, blockedByTasks)
-          return
-        }
-        void this.#runOpsAction(chatId, "停止 OpenCode", () => this.#ops.stopOpencode())
-        return
-      case "svc-restart":
-        if (this.#runningSince.size > 0) {
-          await this.#sendTextMessage(chatId, blockedByTasks)
-          return
-        }
-        void this.#runOpsAction(chatId, "重启 OpenCode", () => this.#ops.restartOpencode())
-        return
-    }
-  }
-
-  /** Packs data/*.json and sends the archive into the chat; keeps ops-slot exclusivity. */
-  async #runBackup(chatId: number): Promise<void> {
-    if (this.#opsRunning) {
-      await this.#sendTextMessage(chatId, `⏳ 正在执行「${escapeMarkdown(this.#opsRunning)}」，请稍后再试。`)
-      return
-    }
-    this.#opsRunning = "备份数据"
-    try {
-      const result = await this.#ops.backupData()
-      if (result.ok && result.file) {
-        const name = result.file.split("/").pop() ?? "backup.tar.gz"
-        await this.#bot.api.sendDocument(chatId, new InputFile(readFileSync(result.file), name), {
-          caption: escapeMarkdown(result.message),
-        })
-      } else {
-        await this.#sendOpsResult(chatId, result)
-      }
-      await this.#sendPanel(chatId, await this.#opsPanel())
-    } catch (err) {
-      const detail = redactSecrets((err as Error).message)
-      this.#log.error(`ops 备份数据 failed:`, this.#maskToken(detail))
-      await this.#sendTextMessage(chatId, `❌ 备份数据失败：${escapeMarkdown(detail)}`)
-    } finally {
-      this.#opsRunning = ""
-    }
-  }
-
-  async #runOpsAction(chatId: number, label: string, action: () => Promise<OpsResult>): Promise<void> {
-    if (this.#opsRunning) {
-      await this.#sendTextMessage(chatId, `⏳ 正在执行「${escapeMarkdown(this.#opsRunning)}」，请稍后再试。`)
-      return
-    }
-    this.#opsRunning = label
-    const restarting = label.includes("重启 Bot")
-    try {
-      await this.#sendTextMessage(chatId, `⏳ 正在${escapeMarkdown(label)}…`)
-      const result = await action()
-      this.#log.info(`ops ${label}: ${result.ok ? "ok" : "failed"}`)
-      await this.#sendOpsResult(chatId, result)
-      if (!restarting) await this.#sendPanel(chatId, await this.#opsPanel())
-    } catch (err) {
-      const detail = redactSecrets((err as Error).message)
-      this.#log.error(`ops ${label} failed:`, this.#maskToken(detail))
-      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(label)}失败：${escapeMarkdown(detail)}`)
-    } finally {
-      this.#opsRunning = ""
-    }
-  }
-
-  async #sendOpsResult(chatId: number, result: OpsResult): Promise<void> {
-    let text = `${result.ok ? "✅" : "❌"} ${escapeMarkdown(redactSecrets(result.message))}`
-    for (const step of result.steps) {
-      text += `\n\n${step.ok ? "✅" : "❌"} ${escapeMarkdown(step.label)}${
-        step.code !== null ? `（退出码 ${step.code}）` : ""
-      }`
-      if (step.output) {
-        // Command output can echo env vars (npm/git failures), so scrub it before sending
-        text += `\n\`\`\`\n${redactSecrets(step.output).replace(/```/g, "'''")}\n\`\`\``
-      }
-    }
-    for (const chunk of splitMessage(text, 3800)) {
-      await this.#sendTextMessage(chatId, chunk)
-    }
-  }
-
-  async #confirmRestart(chatId: number): Promise<void> {
-    if (this.#ops.systemd) {
-      await this.#sendTextMessage(
-        chatId,
-        "ℹ️ 当前 Bot 由 systemd 管理，Bot 不会执行脚本重启。\n请运行 `sudo systemctl restart telegram-bot`（或你的服务名）。",
-      )
-      return
-    }
-    if (this.#runningSince.size > 0) {
-      await this.#sendTextMessage(chatId, "⚠️ 当前有任务正在执行，请先发送 `/stop` 再重启，避免丢失回复。")
-      return
-    }
-    await this.#requestOpsConfirm(
-      chatId,
-      "restart",
-      "🔄 *确认重启 Bot？*\n\n会在数秒内完成构建产物重启，期间 Bot 短暂离线。\n" +
-        "如果正在执行任务，请先发送 `/stop`。\n\n_5 分钟内有效，点击确认后执行。_",
-    )
-  }
-
-  async #confirmUpdate(chatId: number): Promise<void> {
-    await this.#requestOpsConfirm(
-      chatId,
-      "update",
-      "⬆️ *确认更新项目？*\n\n将依次执行：\n" +
-        "1. `git status --porcelain`：工作区有未提交改动会直接中止\n" +
-        "2. `git pull --ff-only`\n" +
-        "3. `npm install --no-audit --no-fund`\n" +
-        "4. `npm run build`\n\n" +
-        "更新不会自动重启，完成后可点击「重启 Bot」。\n\n_5 分钟内有效，点击确认后执行。_",
-    )
-  }
-
-  async #confirmCcSwitch(chatId: number): Promise<void> {
-    let installed = false
-    try {
-      installed = Boolean((await this.#ops.diagnostics()).ccSwitch)
-    } catch {
-      installed = false
-    }
-    await this.#requestOpsConfirm(
-      chatId,
-      installed ? "cc-update" : "cc-install",
-      `🔌 *${installed ? "更新" : "安装"} cc-switch CLI？*\n\n` +
-        "将运行 `scripts/install-cc-switch.sh` 下载对应平台的二进制到 `./bin/cc-switch`。" +
-        (installed ? "\n已有版本会被覆盖（`--force`）。" : "") +
-        "\n下载需要网络；已启用的代理会自动生效。\n\n_5 分钟内有效，点击确认后执行。_",
-    )
-  }
-
-  async #servicePanel(): Promise<Panel> {
-    let status: { reachable: boolean; managed: boolean; pid?: number; url: string }
-    try {
-      status = await this.#ops.opencodeStatus()
-    } catch {
-      status = { reachable: false, managed: false, url: this.#cfg.opencode.url }
-    }
-    const state = status.reachable ? "🟢 运行中" : "🔴 未运行"
-    const managed = status.pid
-      ? `由 Bot 托管（PID ${status.pid}）`
-      : status.reachable
-        ? "运行中，但未由 Bot 托管"
-        : "未运行"
-    return {
-      text:
-        `⚡ *OpenCode 服务*\n\n• 状态：${state}\n• 托管：${managed}\n• URL：\`${escapeMarkdown(status.url)}\`\n\n` +
-        "Bot 只会停止由自己启动的 OpenCode（通过 `data/opencode.pid` 识别），不会误杀手动启动的进程。",
-      keyboard: new InlineKeyboard()
-        .text("▶️ 启动", "ops:svc:start")
-        .text("🔄 重启", "ops:svc:restart")
-        .row()
-        .text("⏹ 停止", "ops:svc:stop")
-        .text("📜 日志", "ops:logs:opencode:80")
-        .row()
-        .text("🔄 刷新", "ops:svc")
-        .text("🛠 运维中心", "show:ops")
-        .row()
-        .text("⬅️ 主菜单", "show:menu"),
-    }
+    return this.#opsCommands.handleOpsCallback(chatId, action, answer)
   }
 
   async #handleServiceCommand(chatId: number, arg: string): Promise<void> {
-    const tokens = arg.split(/\s+/).filter(Boolean)
-    let action = (tokens[0] ?? "").toLowerCase()
-    if (action === "opencode") action = (tokens[1] ?? "").toLowerCase()
-    if (!action || action === "status") {
-      await this.#sendPanel(chatId, await this.#servicePanel())
-      return
-    }
-    if (action === "start") {
-      void this.#runOpsAction(chatId, "启动 OpenCode", () => this.#ops.startOpencode())
-      return
-    }
-    if (action === "stop") {
-      await this.#confirmServiceAction(chatId, "stop")
-      return
-    }
-    if (action === "restart") {
-      await this.#confirmServiceAction(chatId, "restart")
-      return
-    }
-    await this.#sendTextMessage(
-      chatId,
-      "用法：`/service opencode start|stop|restart`，或发送 `/service` 打开面板。",
-    )
+    return this.#opsCommands.handleServiceCommand(chatId, arg)
   }
 
-  async #confirmServiceAction(chatId: number, action: "stop" | "restart"): Promise<void> {
-    if (this.#runningSince.size > 0) {
-      await this.#sendTextMessage(chatId, "⚠️ 当前有任务正在执行，请先发送 `/stop` 再操作 OpenCode 服务。")
-      return
-    }
-    const verb = action === "stop" ? "停止" : "重启"
-    await this.#requestOpsConfirm(
-      chatId,
-      action === "stop" ? "svc-stop" : "svc-restart",
-      `⚡ *确认${verb} OpenCode？*\n\n${verb}期间所有依赖 OpenCode 的任务都会失败。\n` +
-        "只会操作由 Bot 启动的实例；手动启动的实例会被拒绝。\n\n_5 分钟内有效，点击确认后执行。_",
-    )
+  async #servicePanel(): Promise<Panel> {
+    return this.#opsCommands.servicePanel()
   }
 
-  #envPanel(): Panel {
-    const list = this.#ops.envList()
-    const mapping = new Map(list.entries.map((entry) => [entry.key, entry]))
-    const hidden = list.entries.filter((entry) => entry.secret).length
-    const lines = OPS_ENV_KEYS.map((key) => {
-      const entry = mapping.get(key)
-      const shown = !entry ? "_未设置_" : entry.secret ? "***" : entry.value ? `\`${escapeMarkdown(entry.value)}\`` : "（空）"
-      return `• \`${key}\` = ${shown} — ${escapeMarkdown(OPS_ENV_RULES[key]?.hint ?? "")}`
-    })
-    return {
-      text:
-        "⚙️ *配置项*\n\n" +
-        `\`.env\`：${list.exists ? "已加载" : "不存在"}${hidden > 0 ? ` · 已隐藏 ${hidden} 个密钥类配置` : ""}\n\n` +
-        `${lines.join("\n")}\n\n` +
-        "修改：`/env set KEY VALUE`\n删除：`/env unset KEY`\n\n" +
-        "_只允许修改上表中的非密钥配置；Telegram Token、API Key、密码等永远不会显示或修改。重启 Bot 后生效。_",
-      keyboard: new InlineKeyboard()
-        .text("🔄 刷新", "ops:env")
-        .text("📜 日志", "ops:logs:bot:80")
-        .row()
-        .text("🛠 运维中心", "show:ops")
-        .text("⬅️ 主菜单", "show:menu"),
-    }
+  async #confirmRestart(chatId: number): Promise<void> {
+    return this.#opsCommands.confirmRestart(chatId)
+  }
+
+  async #confirmUpdate(chatId: number): Promise<void> {
+    return this.#opsCommands.confirmUpdate(chatId)
   }
 
   async #handleEnvCommand(chatId: number, arg: string): Promise<void> {
-    const [rawAction = "", rawKey = "", ...rest] = arg.split(/\s+/).filter(Boolean)
-    const action = rawAction.toLowerCase()
-    if (!action || action === "list" || action === "show") {
-      await this.#sendPanel(chatId, this.#envPanel())
-      return
-    }
-    if (action === "set") {
-      if (!rawKey || rest.length === 0) {
-        await this.#sendTextMessage(chatId, "用法：`/env set KEY VALUE`，例如 `/env set LOG_LEVEL debug`。")
-        return
-      }
-      const result = this.#ops.envSet(rawKey, rest.join(" "))
-      if (result.ok) this.#applyLiveEnv(rawKey.trim().toUpperCase(), rest.join(" ").trim())
-      await this.#sendTextMessage(chatId, `${result.ok ? "✅" : "❌"} ${escapeMarkdown(result.message)}`)
-      if (result.ok) await this.#sendPanel(chatId, this.#envPanel())
-      return
-    }
-    if (action === "unset" || action === "del" || action === "delete") {
-      if (!rawKey) {
-        await this.#sendTextMessage(chatId, "用法：`/env unset KEY`。")
-        return
-      }
-      const result = this.#ops.envUnset(rawKey)
-      await this.#sendTextMessage(chatId, `${result.ok ? "✅" : "❌"} ${escapeMarkdown(result.message)}`)
-      if (result.ok) await this.#sendPanel(chatId, this.#envPanel())
-      return
-    }
-    await this.#sendTextMessage(
-      chatId,
-      "用法：`/env` 查看配置；`/env set KEY VALUE` 修改；`/env unset KEY` 删除。",
-    )
+    return this.#opsCommands.handleEnvCommand(chatId, arg)
   }
 
-  /** Some .env keys can be honoured by the running process, so the user does not have to restart. */
   #applyLiveEnv(key: string, value: string): void {
-    if (key === "REMINDER_TIMEZONE") {
-      this.#timezone = value
-      this.#reminders.setTimeZone(value)
-      this.#schedules.setTimeZone(value)
-      this.#usage.setTimeZone(value)
-      return
-    }
-    if (key === "TELEGRAM_ALLOW_USERS") {
-      const ids = parseAllowUsers(value)
-      // An empty list would lock everyone out; config.ts refuses to start with one, so
-      // the running bot keeps its current gate instead of diverging from the file.
-      if (ids.length === 0 && !this.#cfg.telegram.allowAll) return
-      const users = this.#cfg.telegram.allowUsers
-      users.clear()
-      for (const id of ids) users.add(id)
-      this.#log.info(`access whitelist now ${users.size} user(s): ${[...users].join(",")}`)
-    }
+    this.#opsCommands.applyLiveEnv(key, value)
   }
 
   /** The Telegram user whitelist, editable from the chat instead of by editing `.env`. */
   #accessPanel(headline?: string): Panel {
-    const ids = parseAllowUsers([...this.#cfg.telegram.allowUsers].join(","))
-    const keyboard = new InlineKeyboard()
-    for (const id of ids.slice(0, 12)) {
-      keyboard.text(`❌ ${id}`, `access:del:${id}`).row()
-    }
-    keyboard.text("🔄 刷新", "show:access").row()
-    keyboard.text("🛠 运维中心", "show:ops").text("⬅️ 主菜单", "show:menu")
-
-    const listCap = 60
-    const list = ids.length > 0 ? ids.slice(0, listCap).map((id) => `• \`${escapeMarkdown(id)}\``).join("\n") : "_（空白名单）_"
-    const listMore = ids.length > listCap ? `\n_…另有 ${ids.length - listCap} 个未显示。_` : ""
-    const overflow = ids.length > 12 ? `\n_…另有 ${ids.length - 12} 个未显示按钮，可用 \`/access del <ID>\` 移除。_` : ""
-    const gate = this.#cfg.telegram.allowAll
-      ? "⚠️ `TELEGRAM_ALLOW_ALL_USERS` 已开启：任何 Telegram 用户都能驱动 Bot 与运维操作，建议尽快关闭。"
-      : "✅ 仅白名单用户可用，且只响应私聊。"
-
-    return {
-      text:
-        `${headline ? `${headline}\n\n` : ""}🔐 *访问白名单*（${ids.length}）\n\n${list}${listMore}${overflow}\n\n${gate}\n\n` +
-        "添加：`/access add <用户 ID>`\n移除：`/access del <用户 ID>` 或点击上方按钮\n\n" +
-        "_让对方发送 `/start` 给 Bot：被拒回复里会显示他的数字 ID。改动写入 `.env` 并立即生效，无需重启。_",
-      keyboard,
-    }
+    return this.#personalPanels.accessPanel(headline)
   }
 
   async #handleAccessCommand(chatId: number, userId: number, arg: string): Promise<void> {
@@ -3251,18 +2230,7 @@ export class TelegramBridge {
   }
 
   #timezonePanel(headline?: string): string {
-    const now = Date.now()
-    return [
-      headline,
-      `🕐 当前时区：\`${escapeMarkdown(this.#timezone)}\``,
-      `• 本地时间：${formatDateTime(now, this.#timezone)}`,
-      `• 世界标准时间：${formatDateTime(now, "UTC")}`,
-      "",
-      "提醒、定时任务和每日统计都按这个时区计算。切换后立即生效，无需重启，并会写入 `.env`。",
-      "点击下方按钮，或发送 `/timezone America/New_York`（IANA 时区名）。",
-    ]
-      .filter(Boolean)
-      .join("\n")
+    return this.#personalPanels.timezonePanel(headline)
   }
 
   async #handleTimeZone(chatId: number, arg: string): Promise<void> {
@@ -3293,573 +2261,71 @@ export class TelegramBridge {
 
   /** `/dir` — the working directory CLI engines start in for this chat. */
   async #handleDirCommand(job: Job, arg?: string): Promise<void> {
-    const key = job.key
-    const engine = this.#store.getEngine(key)
-    const cliNote =
-      engine === "opencode" ? "\n_当前引擎是 OpenCode，目录由其服务端决定；该设置只对 CLI 引擎生效。_" : ""
-
-    if (arg === undefined) {
-      const panel = this.#dirPanel(key)
-      await this.#sendTextMessage(job.chatId, panel.text, panel.keyboard)
-      return
-    }
-
-    if (/^(reset|default|clear|默认|恢复默认)$/i.test(arg.trim())) {
-      if (!this.#store.clearDir(key)) {
-        await this.#sendTextMessage(job.chatId, "ℹ️ 本会话没有单独指定工作目录，当前就是 Bot 默认目录。")
-        return
-      }
-      this.#resetCliSessions(key)
-      await this.#sendTextMessage(
-        job.chatId,
-        `↩️ 已恢复默认工作目录 \`${escapeMarkdown(this.#agents.defaultWorkDir)}\`（已重置 CLI 会话上下文）。`,
-      )
-      return
-    }
-
-    // Switching the directory under a running task would split one session across two projects
-    if (this.#runningSince.has(key)) {
-      await this.#sendTextMessage(job.chatId, "⚠️ 任务执行中，请先发送 `/stop`。")
-      return
-    }
-
-    const dir = normalizeWorkDirInput(arg, this.#agents.defaultWorkDir, homedir())
-    if (!dir) {
-      await this.#sendTextMessage(
-        job.chatId,
-        "❌ 路径无效：不能为空、含控制字符、超过 512 字符，或指向文件系统根目录。",
-      )
-      return
-    }
-    let isDirectory: boolean
-    try {
-      isDirectory = statSync(dir).isDirectory()
-    } catch {
-      await this.#sendTextMessage(job.chatId, `❌ 目录不存在：\`${escapeMarkdown(dir)}\``)
-      return
-    }
-    if (!isDirectory) {
-      await this.#sendTextMessage(job.chatId, `❌ 不是目录：\`${escapeMarkdown(dir)}\``)
-      return
-    }
-
-    this.#store.setDir(key, dir)
-    this.#resetCliSessions(key)
-    await this.#sendTextMessage(
-      job.chatId,
-      `📁 本会话的 CLI 工作目录已设为 \`${escapeMarkdown(dir)}\`（已重置 CLI 会话上下文）。${cliNote}`,
-    )
+    return this.#modelCommands.handleDirCommand(job, arg)
   }
 
-  /** A CLI session belongs to the directory it was created in, so both reset together. */
+  async #handleModelCommand(job: Job, arg?: string): Promise<void> {
+    return this.#modelCommands.handleModelCommand(job, arg)
+  }
+
+  #cliModelLabel(engine: string, model: string | undefined): string {
+    return this.#modelCommands.cliModelLabel(engine, model)
+  }
+
+  #getCurrentModel(key: string): { providerID: string; modelID: string; label: string } {
+    return this.#modelCommands.getCurrentModel(key)
+  }
+
+  #dirPanel(key: string): Panel {
+    return this.#corePanels.dirPanel(key)
+  }
+
+  #agentPanel(key: string): Panel {
+    return this.#corePanels.agentPanel(key)
+  }
+
+  #modelPanel(key: string): Panel {
+    return this.#corePanels.modelPanel(key)
+  }
+
+  #remindersPanel(chatId: number, page = 1): Panel {
+    return this.#personalPanels.remindersPanel(chatId, page)
+  }
+
+  #welcomeText(key: string, userId: number): string {
+    return this.#corePanels.welcomeText(key, userId)
+  }
+
+  #menuPanel(chatId: number, key: string): Panel {
+    return this.#corePanels.menuPanel(chatId, key)
+  }
+
+  #menuKeyboard(): InlineKeyboard {
+    return this.#corePanels.menuKeyboard()
+  }
+
+  #agentInstallerPanel(): Panel {
+    return this.#corePanels.agentInstallerPanel()
+  }
+
   #resetCliSessions(key: string): void {
     for (const profile of this.#agents.registry.list()) this.#store.clearCliSession(key, profile.id)
   }
 
-  async #handleModelCommand(job: Job, arg?: string): Promise<void> {
-    const engine = this.#store.getEngine(job.key)
-
-    if (engine !== "opencode") {
-      if (!arg) {
-        await this.#sendPanel(job.chatId, this.#modelPanel(job.key))
-        return
-      }
-
-      const profile = this.#agents.registry.get(engine)
-      if (!profile) {
-        await this.#sendTextMessage(job.chatId, `❌ 未知引擎：\`${engine}\``)
-        return
-      }
-      if (!profile.supportsModel) {
-        await this.#sendTextMessage(job.chatId, `ℹ️ ${escapeMarkdown(profile.label)} 的模型由 CLI 自身配置，Bot 不支持切换。`)
-        return
-      }
-
-      const word = arg.trim().toLowerCase()
-      // Only a model the profile actually declares may shadow the reset keyword:
-      // engines without `strictModels` pass any string through, which would make
-      // `/model default` set a model literally named "default" instead of resetting
-      const declared = (profile.models ?? []).some(
-        (model) =>
-          model.id.toLowerCase() === word ||
-          model.label.toLowerCase() === word ||
-          (model.aliases ?? []).some((alias) => alias.toLowerCase() === word),
-      )
-      const selectedModel = this.#agents.registry.resolveModel(engine, arg)
-      if (!declared && MODEL_DEFAULT_WORDS.has(word)) {
-        if (!this.#clearCliModelSelection(job.key, engine)) {
-          await this.#sendTextMessage(
-            job.chatId,
-            `ℹ️ 本会话没有独立的模型选择，当前就是 *${escapeMarkdown(profile.label)}* 的默认模型。`,
-          )
-          return
-        }
-        await this.#sendTextMessage(
-          job.chatId,
-          `↩️ 已取消本会话的模型选择，恢复 *${escapeMarkdown(profile.label)}* 默认模型（已重置会话上下文）。`,
-        )
-        return
-      }
-
-      if (!selectedModel) {
-        const hint = profile.models?.map((model) => `\`${model.id}\``).join("、") ?? profile.modelHint
-        await this.#sendTextMessage(
-          job.chatId,
-          `❌ 未识别的模型：\`${arg}\`${hint ? `\n\n可用：${hint}` : ""}`,
-        )
-        return
-      }
-
-      const current = this.#store.getCliModel(job.key, engine) ?? profile.defaultModel
-      if (current === selectedModel) {
-        await this.#sendTextMessage(
-          job.chatId,
-          `✅ 当前已经是 *${escapeMarkdown(this.#agents.registry.modelLabel(engine, selectedModel))}*，无需切换，会话上下文保持不变。`,
-        )
-        return
-      }
-
-      this.#applyCliModel(job.key, engine, selectedModel)
-      await this.#sendTextMessage(
-        job.chatId,
-        `✅ *${escapeMarkdown(profile.label)} 模型已切换为：${escapeMarkdown(this.#agents.registry.modelLabel(engine, selectedModel))}* (已开启新会话上下文)`,
-      )
-      return
-    }
-
-    // Handle OpenCode models
-    if (!arg) {
-      await this.#sendPanel(job.chatId, this.#modelPanel(job.key))
-      return
-    }
-
-    const targetKey = resolveModelKey(arg)
-    const targetModel = targetKey ? AVAILABLE_MODELS[targetKey] : undefined
-
-    // Same rule as the CLI branch: a model really named `auto` stays reachable
-    if (!targetModel && MODEL_DEFAULT_WORDS.has(arg.trim().toLowerCase())) {
-      await this.#resetOpenCodeModel(job.chatId, job.key)
-      return
-    }
-
-    if (!targetModel) {
-      const valid = Object.keys(AVAILABLE_MODELS).join(", ")
-      await this.#sendTextMessage(
-        job.chatId,
-        `❌ 未识别的模型名称：\`${arg}\`\n\n可选简称有：\`${valid}\`\n发送 \`/model\` 可查看详细列表。`,
-      )
-      return
-    }
-
-    const current = this.#getCurrentModel(job.key)
-    if (current.providerID === targetModel.providerID && current.modelID === targetModel.modelID) {
-      await this.#sendTextMessage(
-        job.chatId,
-        `✅ 当前已经是 *${escapeMarkdown(targetModel.label)}*，无需切换，会话上下文保持不变。`,
-      )
-      return
-    }
-
-    await this.#applyOpenCodeModel(job.key, targetModel)
-    await this.#sendTextMessage(
-      job.chatId,
-      `✅ *已成功切换模型！*\n\n当前模型：*${escapeMarkdown(targetModel.label)}*\n_${escapeMarkdown(targetModel.desc)}_\n\n已自动重置会话上下文，你可以直接开始向新模型提问了。`,
-    )
-  }
-
   async #applyOpenCodeModel(key: string, target: ModelInfo): Promise<void> {
-    this.#store.setModel(key, {
-      providerID: target.providerID,
-      modelID: target.modelID,
-      label: target.label,
-    })
-    this.#log.info(`model switched [${key}] -> ${target.label} (${target.providerID}/${target.modelID})`)
-    await this.#dropSessionForModel(key)
+    return this.#modelCommands.applyOpenCodeModel(key, target)
   }
 
-  /** A model change must not carry the previous model's context over. */
-  async #dropSessionForModel(key: string): Promise<void> {
-    const oldSession = this.#store.get(key)
-    if (!oldSession) return
-    await this.#oc.deleteSession(oldSession).catch(() => {})
-    this.#store.clearSession(key)
-  }
-
-  /** Drops the chat's own OpenCode selection and resets its context; false if there was nothing to drop. */
   async #clearOpenCodeModelSelection(key: string): Promise<boolean> {
-    const saved = this.#store.getModel(key)
-    if (!saved) return false
-    this.#store.clearModel(key)
-    await this.#dropSessionForModel(key)
-    this.#log.info(`model selection cleared [${key}] (was ${saved.providerID}/${saved.modelID})`)
-    return true
+    return this.#modelCommands.clearOpenCodeModelSelection(key)
   }
 
-  async #resetOpenCodeModel(chatId: number, key: string): Promise<void> {
-    if (!(await this.#clearOpenCodeModelSelection(key))) {
-      await this.#sendTextMessage(
-        chatId,
-        `ℹ️ 本会话没有独立的模型选择，当前就是默认模型 *${escapeMarkdown(this.#getCurrentModel(key).label)}*。`,
-      )
-      return
-    }
-    await this.#sendTextMessage(
-      chatId,
-      `↩️ 已取消本会话的模型选择，恢复默认模型：*${escapeMarkdown(this.#getCurrentModel(key).label)}*\n（已重置会话上下文，可直接继续提问）`,
-    )
+  #clearCliModelSelection(key: string, engine: string): boolean {
+    return this.#modelCommands.clearCliModelSelection(key, engine)
   }
 
   #applyCliModel(key: string, engine: string, model: string): void {
-    this.#store.setCliModel(key, engine, model)
-    this.#store.clearCliSession(key, engine)
-    this.#log.info(`${engine} model switched [${key}] -> ${model}`)
-  }
-
-  /** Drops the chat's own CLI model selection and resets its context; false if there was none. */
-  #clearCliModelSelection(key: string, engine: string): boolean {
-    const saved = this.#store.getCliModel(key, engine)
-    if (!saved) return false
-    this.#store.setCliModel(key, engine, "")
-    this.#store.clearCliSession(key, engine)
-    this.#log.info(`${engine} model selection cleared [${key}] (was ${saved})`)
-    return true
-  }
-
-  #cliModelLabel(engine: string, model: string | undefined): string {
-    if (model) return this.#agents.registry.modelLabel(engine, model)
-    const profile = this.#agents.registry.get(engine)
-    if (!profile) return "CLI 默认"
-    return profile.supportsModel ? "CLI 默认" : "CLI 固定"
-  }
-
-  #welcomeText(key: string, userId: number): string {
-    const engine = this.#store.getEngine(key)
-    const model =
-      engine === "opencode"
-        ? this.#getCurrentModel(key).label
-        : this.#cliModelLabel(engine, this.#store.getCliModel(key, engine))
-    const detected = this.#agents.registry
-      .list()
-      .filter((profile) => this.#agents.registry.binPath(profile))
-      .map((profile) => profile.label)
-    const detectedText =
-      detected.length > 0
-        ? `${detected.slice(0, 6).map((label) => escapeMarkdown(label)).join("、")}${detected.length > 6 ? ` 等 ${detected.length} 个` : ""}`
-        : "无（可使用 OpenCode，或发送 /agents 安装）"
-    return (
-      `👋 *欢迎使用 AI 私人助手*\n\n• 用户 ID：\`${userId}\`\n` +
-      `• 引擎：*${escapeMarkdown(this.#agents.registry.label(engine))}*\n• 模型：*${escapeMarkdown(model)}*\n` +
-      `• 本机 Agent CLI：${detectedText}\n\n` +
-      `💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务。\n` +
-      `☰ 发送 \`/menu\` 打开功能菜单（含 Agent、模型、任务、cc-switch 与运维中心）。\n\n` +
-      `*直接发消息即可对话：*\n• 代码编写、分析与调试\n• 发送图片、文件、语音（文本文件会读取内容）\n` +
-      `• 发送 \`/remind 30m 喝水\` 设定提醒\n• 发送 \`/schedule add 30m 检查服务器\` 定时执行 AI 任务\n` +
-      `• 发送 \`/report\` 看每日用量报告 · \`/export\` 导出任务历史\n\n` +
-      `_仅响应私聊消息。发送 /help 查看帮助，或 /menu 打开功能菜单。_`
-    )
-  }
-
-  #menuPanel(chatId: number, key: string): Panel {
-    const engine = this.#store.getEngine(key)
-    const model =
-      engine === "opencode"
-        ? this.#getCurrentModel(key).label
-        : this.#cliModelLabel(engine, this.#store.getCliModel(key, engine))
-    const since = this.#runningSince.get(key)
-    const pending = this.#pending.get(key)?.length ?? 0
-    const running = since ? `运行中 ${formatDuration(Date.now() - since)}` : "空闲"
-    const reminders = this.#reminders.list(chatId).length
-    const schedules = this.#schedules.count(chatId)
-    const today = this.#usage.summary(key).today.tasks
-    return {
-      text:
-        `🤖 *功能菜单*\n\n` +
-        `• 引擎：*${escapeMarkdown(this.#agents.registry.label(engine))}*\n` +
-        `• 模型：*${escapeMarkdown(model)}*\n` +
-        `• 状态：${running} · 今日 ${today} 条\n` +
-        `• 提醒 ${reminders} · 定时 ${schedules} · 队列 ${pending}\n\n` +
-        `直接发送消息即可对话，或点击下方按钮进入功能区。`,
-      keyboard: this.#menuKeyboard(),
-    }
-  }
-
-  #menuKeyboard(): InlineKeyboard {
-    return new InlineKeyboard()
-      .text("🤖 Agent 引擎", "show:agent")
-      .text("🧠 模型", "show:model")
-      .row()
-      .text("🗓 定时任务", "show:schedule")
-      .text("⏰ 提醒", "show:reminders")
-      .row()
-      .text("📊 运行状态", "show:status")
-      .text("📈 使用统计", "show:usage")
-      .row()
-      .text("📋 任务队列", "show:queue")
-      .text("🕘 任务历史", "show:history")
-      .row()
-      .text("📦 Agent CLI", "show:agents")
-      .text("🔌 cc-switch", "show:cc")
-      .row()
-      .text("🌐 网络代理", "show:proxy")
-      .text("🛠 运维中心", "show:ops")
-      .row()
-      .text("🕐 时区", "tz:")
-      .text("❓ 帮助", "show:help")
-  }
-
-  #agentInstallerPanel(): Panel {
-    const profiles = this.#agents.registry.list()
-    const installed = profiles.filter((profile) => this.#agents.registry.binPath(profile))
-    const installable = profiles.filter((profile) => profile.installSpec && !this.#agents.registry.binPath(profile))
-    const manual = profiles.filter((profile) => !profile.installSpec && !this.#agents.registry.binPath(profile))
-    const managed = this.#agentInstaller.managed()
-
-    const keyboard = new InlineKeyboard()
-    installable.slice(0, 10).forEach((profile, index) => {
-      keyboard.text(clip(`⬇️ ${profile.label}`, 60) ?? profile.label, `areq:install:${profile.id}`)
-      if (index % 2 === 1) keyboard.row()
-    })
-    if (installable.slice(0, 10).length % 2 === 1) keyboard.row()
-    managed.slice(0, 10).forEach((record) => {
-      const label = this.#agents.registry.get(record.engine)?.label ?? record.engine
-      keyboard.text(clip(`🔄 ${label}`, 60) ?? label, `areq:update:${record.engine}`)
-      keyboard.text(clip(`🗑 ${label}`, 60) ?? label, `areq:uninstall:${record.engine}`)
-      keyboard.row()
-    })
-    keyboard.text("🤖 选择引擎", "show:agent").text("🔄 刷新", "show:agents")
-    keyboard.row().text("⬅️ 主菜单", "show:menu")
-
-    const commandLines = installable
-      .slice(0, 6)
-      .map((profile) => `• ${escapeMarkdown(profile.label)}：\`${this.#agentInstaller.installCommand(profile) ?? ""}\``)
-      .join("\n")
-    const manualLabels = manual.slice(0, 8).map((profile) => escapeMarkdown(profile.label)).join("、")
-    const installedLine =
-      this.#joinLabels(installed.map((profile) => escapeMarkdown(profile.label))) || "无"
-    const managedLine =
-      managed.length > 0
-        ? `• 🔄 Bot 托管：${this.#joinLabels(
-            managed.map((record) => escapeMarkdown(this.#agents.registry.get(record.engine)?.label ?? record.engine)),
-          )}（可更新或卸载）\n`
-        : ""
-    return {
-      text:
-        `📦 *Agent CLI 管理*\n\n` +
-        `💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务能力最完整。\n\n` +
-        `🖥 *本机已检测到*：${installedLine}\n` +
-        managedLine +
-        (installable.length > 0
-          ? `\n⬇️ *可自动安装（npm/pip）*：\n${commandLines}${installable.length > 6 ? `\n_另有 ${installable.length - 6} 个，见下方按钮。_` : ""}\n`
-          : "\n✅ 所有内置 npm/pip CLI 均已安装。\n") +
-        (manualLabels ? `\n🛠 *需手动安装*：${manualLabels}${manual.length > 8 ? " 等" : ""}\n` : "") +
-        `\n_仅能卸载由 Bot 安装的 CLI；系统预装版本请手动管理。_`,
-      keyboard,
-    }
-  }
-
-  /** `/dir` view: where CLI engines start for this chat, with a one-tap reset. */
-  #dirPanel(key: string): Panel {
-    const engine = this.#store.getEngine(key)
-    const custom = this.#store.getDir(key)
-    const effective = this.#agents.workDir(key)
-    return {
-      text:
-        `📁 *CLI 工作目录*\n\n` +
-        `• 本会话：\`${escapeMarkdown(effective)}\`（${custom ? "已单独指定" : "Bot 默认"}）\n` +
-        `• Bot 默认：\`${escapeMarkdown(this.#agents.defaultWorkDir)}\`\n` +
-        (custom && effective !== custom ? "• ⚠️ 指定目录当前不可用，已回退到默认目录\n" : "") +
-        `• 当前引擎：*${escapeMarkdown(this.#agents.registry.label(engine))}*\n` +
-        (engine === "opencode" ? "\n_OpenCode 的目录由其服务端决定，该设置只对 CLI 引擎生效。_\n" : "") +
-        "\n_发送 `/dir <路径>` 切换（支持 `~` 与相对路径），切换会重置该会话的 CLI 上下文。_",
-      keyboard: new InlineKeyboard()
-        .text("↩️ 恢复默认目录", "dir:reset")
-        .text("🤖 切换引擎", "show:agent")
-        .row()
-        .text("⬅️ 主菜单", "show:menu"),
-    }
-  }
-
-  /** Joins escaped labels for one line, folding the rest into a count so the panel stays under the message limit. */
-  #joinLabels(labels: string[], budget = 400): string {
-    let text = ""
-    let shown = 0
-    for (const label of labels) {
-      const next = text ? `${text}、${label}` : label
-      if (next.length > budget) break
-      text = next
-      shown += 1
-    }
-    if (!text) return ""
-    return shown < labels.length ? `${text} 等 ${labels.length} 个` : text
-  }
-
-  #agentPanel(key: string): Panel {
-    const current = this.#store.getEngine(key)
-    const profiles = this.#agents.registry.list()
-    const entries = [
-      { id: "opencode", label: "OpenCode", desc: "多模型、工具调用、附件收发", installed: true, profile: undefined },
-      ...profiles.map((profile: AgentCliProfile) => ({
-        id: profile.id,
-        label: profile.label,
-        desc: profile.desc,
-        installed: Boolean(this.#agents.registry.binPath(profile)),
-        profile,
-      })),
-    ].sort((a, b) => Number(b.installed) - Number(a.installed))
-
-    const keyboard = new InlineKeyboard()
-    entries.slice(0, 30).forEach((entry, index) => {
-      const mark = entry.id === current ? "✅ " : entry.installed ? "" : "⚠️ "
-      keyboard.text(clip(`${mark}${entry.label}`, 60) ?? "", `agent:${entry.id}`)
-      if (index % 2 === 1) keyboard.row()
-    })
-    if (entries.slice(0, 30).length % 2 === 1) keyboard.row()
-    keyboard.text("🧠 选择模型", "show:model").text("📦 安装 / 卸载", "show:agents")
-    keyboard.row().text("📁 工作目录", "show:dir").text("🔄 刷新", "show:agent").text("⬅️ 主菜单", "show:menu")
-
-    const installed = entries.filter((entry) => entry.installed).map((entry) => escapeMarkdown(entry.label))
-    const installedLine = this.#joinLabels(installed)
-    const missing = entries.filter((entry) => !entry.installed).length
-    const currentLabel = this.#agents.registry.label(current)
-    const managed = this.#agentInstaller.managed().length
-    return {
-      text:
-        `🤖 *Agent 引擎*\n\n当前：*${escapeMarkdown(currentLabel)}*\n\n` +
-        `• 已检测到：${installedLine || "无"}\n` +
-        (current === "opencode"
-          ? ""
-          : `• 📁 工作目录：\`${escapeMarkdown(this.#agents.workDir(key))}\`（\`/dir\` 可修改）\n`) +
-        (missing > 0 ? `• ⚠️ ${missing} 个引擎未安装，可点「安装 / 卸载」或发送 \`/agents\`。\n` : "") +
-        (managed > 0 ? `• 📦 Bot 托管：${managed} 个（可在 \`/agents\` 中更新或卸载）\n` : "") +
-        (entries.length > 30 ? `• 另有 ${entries.length - 30} 个引擎可用 \`/agent <id>\` 切换。\n` : "") +
-        `\n💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务。\n` +
-        `\n点击下方按钮切换，或发送 \`/agent <id>\`。`,
-      keyboard,
-    }
-  }
-
-  #modelPanel(key: string): Panel {
-    const engine = this.#store.getEngine(key)
-    if (engine !== "opencode") {
-      const profile = this.#agents.registry.get(engine)
-      if (!profile) {
-        return {
-          text: `🧠 *模型*\n\n未知引擎：\`${escapeMarkdown(engine)}\``,
-          keyboard: new InlineKeyboard().text("🤖 切换引擎", "show:agent").text("⬅️ 主菜单", "show:menu"),
-        }
-      }
-
-      const current = this.#store.getCliModel(key, engine) ?? profile.defaultModel
-      const keyboard = new InlineKeyboard()
-      if (profile.supportsModel && profile.models?.length) {
-        profile.models.slice(0, 30).forEach((model, index) => {
-          const mark = current === model.id ? "✅ " : ""
-          keyboard.text(clip(`${mark}${model.label}`, 60) ?? "", `cmodel:${engine}:${index}`)
-          if (index % 2 === 1) keyboard.row()
-        })
-        if (profile.models.slice(0, 30).length % 2 === 1) keyboard.row()
-      }
-      if (this.#store.getCliModel(key, engine)) {
-        keyboard.text("↩️ 恢复默认模型", `cmodelreset:${engine}`).row()
-      }
-      keyboard.text("🤖 切换引擎", "show:agent").text("🔄 刷新", "show:model")
-      keyboard.row().text("⬅️ 主菜单", "show:menu")
-
-      const modelLine = profile.supportsModel
-        ? this.#cliModelLabel(engine, current)
-        : "由 CLI 自身配置"
-      const hint = profile.supportsModel
-        ? profile.models?.length
-          ? `\n\n也可发送 \`/model <模型ID>\` 直接指定${profile.modelHint ? `（如 \`${profile.modelHint}\`）` : ""}。`
-          : `\n\n该引擎支持任意模型 ID，发送 \`/model <模型ID>\` 切换。${profile.modelHint ? `\n示例：\`${profile.modelHint}\`` : ""}`
-        : "\n\n该引擎不支持通过 Bot 切换模型，请在 CLI 配置中设置。"
-      return {
-        text:
-          `🧠 *${escapeMarkdown(profile.label)} 模型*\n\n当前：*${escapeMarkdown(modelLine)}*\n` +
-          `\n切换后会重置当前引擎的会话上下文。${hint}`,
-        keyboard,
-      }
-    }
-
-    reloadCustomModels()
-    const current = this.#getCurrentModel(key)
-    const currentInfo = Object.values(AVAILABLE_MODELS).find(
-      (item) => item.providerID === current.providerID && item.modelID === current.modelID,
-    )
-    const keyboard = new InlineKeyboard()
-    const entries = Object.entries(AVAILABLE_MODELS)
-    const limit = 40
-    let models = entries.slice(0, limit)
-    if (entries.length > limit) {
-      const currentIndex = entries.findIndex(
-        ([, info]) => info.providerID === current.providerID && info.modelID === current.modelID,
-      )
-      if (currentIndex >= limit) models = [...entries.slice(0, limit - 1), entries[currentIndex]!]
-    }
-    models.forEach(([modelKey, info], index) => {
-      const isCurrent = info.providerID === current.providerID && info.modelID === current.modelID
-      keyboard.text(clip(`${isCurrent ? "✅ " : ""}${info.label}`, 60) ?? "", `model:${modelKey}`)
-      if (index % 2 === 1) keyboard.row()
-    })
-    if (models.length % 2 === 1) keyboard.row()
-    if (this.#store.getModel(key)) {
-      keyboard.text("↩️ 恢复默认模型", "model:reset").row()
-    }
-    keyboard.text("🔌 模型管理", "cc:model").text("🤖 切换引擎", "show:agent")
-    keyboard.row().text("🔄 刷新", "show:model").text("⬅️ 主菜单", "show:menu")
-    const hidden =
-      entries.length > models.length ? `\n_另有 ${entries.length - models.length} 个模型未显示，可用 \`/model 简称\` 直接切换。_` : ""
-    const text =
-      `🧠 *OpenCode 模型*\n\n当前：*${escapeMarkdown(current.label)}*` +
-      `${currentInfo ? `\n_${escapeMarkdown(currentInfo.desc)}_` : ""}\n\n` +
-      `点击下方按钮切换，或发送 \`/model 简称\`（\`/model default\` 恢复默认）。\n切换后会重置当前会话上下文。${hidden}`
-    return { text, keyboard }
-  }
-
-
-  #remindersPanel(chatId: number, page = 1): Panel {
-    const all = this.#reminders.list(chatId)
-    if (all.length === 0) {
-      return {
-        text: "📭 *暂无待触发的提醒*\n\n发送 `/remind 30m 喝水` 即可创建。",
-        keyboard: new InlineKeyboard().text("🔄 刷新", "show:reminders").text("⬅️ 主菜单", "show:menu"),
-      }
-    }
-
-    // 一页 8 条（2 列 × 4 行按钮刚好放下）；超出部分用翻页按钮浏览
-    const PAGE_SIZE = 8
-    const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE))
-    const current = Math.min(Math.max(1, page), pages)
-    const items = all.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
-
-    const now = Date.now()
-    const lines: string[] = []
-    for (const item of items) {
-      const when = formatReminderTime(item.dueAt, this.#timezone)
-      const remaining = formatRemaining(item.dueAt - now)
-      const repeat = item.repeat ? ` 🔁 ${describeRepeat(item.repeat)}` : ""
-      lines.push(`• #${item.id} ${when}（${remaining}后）${repeat}\n  ${escapeMarkdown(item.text)}`)
-    }
-
-    const keyboard = new InlineKeyboard()
-    items.forEach((item, index) => {
-      // Only one-shots can be postponed; repeating reminders keep their schedule
-      if (!item.repeat) keyboard.text(`⏰+1h #${item.id}`, `rpostpone:${item.id}`)
-      keyboard.text(`❌ 取消 #${item.id}`, `rcancel:${item.id}`)
-      if (index % 2 === 1 && index < items.length - 1) keyboard.row()
-    })
-    keyboard.row()
-    if (current > 1) keyboard.text("⬅️ 上一页", `show:reminders:${current - 1}`)
-    if (pages > 1) keyboard.text(`📄 ${current}/${pages}`, "noop:page")
-    if (current < pages) keyboard.text("➡️ 下一页", `show:reminders:${current + 1}`)
-    if (current > 1 || current < pages) keyboard.row()
-    keyboard.text("🔄 刷新", "show:reminders").text("⬅️ 主菜单", "show:menu")
-
-    const heading = pages > 1 ? `⏰ *待触发的提醒（${all.length}）· 第 ${current}/${pages} 页*` : `⏰ *待触发的提醒（${items.length}）*`
-    return {
-      text: `${heading}\n\n${lines.join("\n\n")}\n\n一次性提醒可「⏰+1h」一键延后；点击按钮取消，或发送 \`/cancel 编号\`。`,
-      keyboard,
-    }
+    this.#modelCommands.applyCliModel(key, engine, model)
   }
 
   async #panelFor(which: string, chatId: number, key: string): Promise<Panel | undefined> {
@@ -3949,10 +2415,6 @@ export class TelegramBridge {
       if (isMessageNotModified(err)) return
     }
     await this.#sendPanel(chatId, { text, keyboard: panel.keyboard })
-  }
-
-  #getCurrentModel(key: string): { providerID: string; modelID: string; label: string } {
-    return resolveOpencodeModel(this.#store, this.#cfg.opencode.model, key)
   }
 
   #isAllowedUser(userId: number): boolean {

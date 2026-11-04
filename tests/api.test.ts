@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { lstatSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import test from "node:test"
-import { ApiServer, resolveApiToken } from "../src/api.js"
+import { ApiServer, resolveApiToken, CC_EXEC_COMMANDS, CC_VIEWS } from "../src/api.js"
+import { ccBlockedReason, ccConfirmPlan } from "../src/ccGuards.js"
 import { AgentCliRegistry } from "../src/agentCli.js"
 import type { AgentCliInstaller } from "../src/agentInstaller.js"
 import type { BotConfig } from "../src/config.js"
@@ -233,6 +234,26 @@ export async function withApi(
     },
     run: async (args: string[]) => {
       ccCalls.push(`run:${args.join(" ")}`)
+      // Hermes memory is answered like the real CLI, so the screen's read/write contract
+      // (limits wording, the "empty" sentence, `--yes` on a clear) is exercised for real
+      if (args[0] === "hermes" && args[1] === "memory") {
+        if (args[2] === "limits") {
+          return {
+            code: 0,
+            stdout:
+              "Hermes memory limits:\n  memory:  2200 chars  (enabled: true)\n  user:    1375 chars  (enabled: false)\n",
+            stderr: "",
+          }
+        }
+        if (args[2] === "show") {
+          // cc-switch puts the kind before the word "memory" in this sentence
+          return args[3] === "user"
+            ? { code: 0, stdout: "Hermes user memory is empty (file not created yet)\n", stderr: "" }
+            : { code: 0, stdout: "旧记忆\n第二行\n", stderr: "" }
+        }
+        if (args[2] === "set") return { code: 0, stdout: `✓ Wrote ${args[5]?.length ?? 0} bytes`, stderr: "" }
+        return { code: 0, stdout: `✓ ${args.slice(2).join(" ")}`, stderr: "" }
+      }
       return { code: 0, stdout: `view ${args.join(" ")}`, stderr: "" }
     },
     runBare: async (args: string[]) => {
@@ -379,6 +400,39 @@ test("api rejects unauthenticated requests", async () => {
   })
 })
 
+test("api adds security headers and gzips large JSON when the client asks", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const health = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders() })
+    assert.equal(health.headers.get("cache-control"), "no-store")
+    assert.equal(health.headers.get("x-content-type-options"), "nosniff")
+    assert.equal(health.headers.get("x-frame-options"), "DENY")
+    assert.equal(health.headers.get("referrer-policy"), "no-referrer")
+
+    // /help is well over the compression threshold and is plain JSON, unlike SSE/media
+    const help = await fetch(`${h.base}/api/v1/help`, {
+      headers: { ...authHeaders(), "accept-encoding": "gzip" },
+    })
+    assert.equal(help.headers.get("content-encoding"), "gzip")
+    const parsed = (await help.json()) as { commands: unknown[] }
+    assert.ok(Array.isArray(parsed.commands))
+  })
+})
+
+test("api rate-limits repeated bad bearer tokens", async () => {
+  await withApi(async () => "ok", async (h) => {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders("not-the-token") })
+      assert.equal(res.status, 401)
+    }
+    const blocked = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders("not-the-token") })
+    assert.equal(blocked.status, 429)
+    assert.ok(Number(blocked.headers.get("retry-after")) >= 1)
+    // The correct token still cannot jump the block for the same address
+    const correct = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders() })
+    assert.equal(correct.status, 429)
+  })
+})
+
 test("api runs a task end to end and records history", async () => {
   await withApi(
     async (_key, _engine, text, onProgress) => {
@@ -505,16 +559,107 @@ test("api stop cancels a running task", async () => {
   )
 })
 
+test("api waits for the live task before it rewires the session", async () => {
+  let release: (() => void) | undefined
+  await withApi(
+    async (_key, _engine, text) => {
+      if (text !== "挂起任务") return "ok"
+      return new Promise<string>((resolve) => {
+        release = () => resolve("回复：挂起任务")
+      })
+    },
+    async (h) => {
+      const call = (path: string, body?: unknown) =>
+        fetch(`${h.base}/api/v1/${path}`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+      const liveDir = mkdtempSync(join(tmpdir(), "agent-bot-live-"))
+      try {
+        h.store.setEngine("tg:42", "codex")
+        h.store.setCliSession("api:app", "claude", "sess-live")
+        h.store.setDir("api:app", liveDir)
+
+        const created = await call("task", { text: "挂起任务" })
+        assert.equal(created.status, 202)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // Telegram answers 任务执行中 for each of these instead of dropping the session
+        // the running task is writing to, so the App gets the same refusal and the same /stop hint.
+        const refused: Array<[string, unknown]> = [
+          ["new", undefined],
+          ["model", { model: "default" }],
+          ["dir", { reset: true }],
+          ["dir", { dir: liveDir }],
+          ["peers/follow", { scope: "telegram" }],
+        ]
+        for (const [path, body] of refused) {
+          const res = await call(path, body)
+          assert.equal(res.status, 409, `POST /${path} must wait for the running task`)
+          assert.match(((await res.json()) as { error: string }).error, /任务执行中，请先停止当前任务再/)
+        }
+        assert.equal(h.store.getCliSession("api:app", "claude"), "sess-live")
+        assert.equal(h.store.getDir("api:app"), liveDir)
+        assert.equal(h.store.getEngine("api:app"), "claude")
+
+        // A queued prompt waits too, and past Telegram's own depth the App is refused
+        const accepted: number[] = []
+        for (let i = 0; i < 6; i++) accepted.push((await call("task", { text: `排队 ${i}` })).status)
+        assert.deepEqual(accepted, [202, 202, 202, 202, 409, 409])
+        const overflow = JSON.stringify(await (await call("task", { text: "第六条" })).json())
+        assert.match(overflow, /最多排队 4 条/)
+
+        // Switching engines only points the *next* task elsewhere, so this one stays allowed
+        const engine = await call("agent", { engine: "opencode" })
+        assert.equal(engine.status, 200)
+        assert.equal(h.store.getEngine("api:app"), "opencode")
+
+        release?.()
+        for (let i = 0; i < 100; i++) {
+          const queue = (await (await fetch(`${h.base}/api/v1/queue`, { headers: authHeaders() })).json()) as {
+            tasks: unknown[]
+          }
+          if (queue.tasks.length === 0) break
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        // Back on the CLI engine, /new clears that engine's session id once nothing runs
+        await call("agent", { engine: "claude" })
+        const settled = await call("new")
+        assert.equal(settled.status, 200)
+        assert.equal(h.store.getCliSession("api:app", "claude"), undefined)
+        const resetDir = await call("dir", { reset: true })
+        assert.equal(resetDir.status, 200)
+        assert.equal(h.store.getDir("api:app"), undefined)
+      } finally {
+        rmSync(liveDir, { recursive: true, force: true })
+      }
+    },
+  )
+})
+
 test("api switch engine, reset session and list models", async () => {
   await withApi(async () => "ok", async (h) => {
-    const switched = await fetch(`${h.base}/api/v1/agent`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ engine: "claude" }),
-    })
+    const postEngine = (engine: string) =>
+      fetch(`${h.base}/api/v1/agent`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ engine }),
+      })
+    const first = await postEngine("opencode")
+    assert.equal(first.status, 200)
+    // Telegram's note travels with the switch, so the App can show the same one
+    assert.equal(((await first.json()) as { message: string }).message, "已切换至 OpenCode")
+
+    const switched = await postEngine("claude")
     assert.equal(switched.status, 200)
-    const session = (await switched.json()) as { session: { engine: string; engineLabel: string } }
+    const session = (await switched.json()) as {
+      message: string
+      session: { engine: string; engineLabel: string }
+    }
     assert.equal(session.session.engine, "claude")
+    // A CLI that is not on PATH is still selected, but the answer says so
+    assert.match(session.message, /^已切换至 Claude Code/)
 
     // CLI sessions reset through /new
     h.store.setCliSession("api:app", "claude", "sess-1")
@@ -525,6 +670,26 @@ test("api switch engine, reset session and list models", async () => {
     const models = await fetch(`${h.base}/api/v1/models`, { headers: authHeaders() })
     const body = (await models.json()) as { models: { models: Array<{ id?: string; label: string }> } }
     assert.ok(body.models.models.length > 0)
+
+    // `/agents` hands a client everything Telegram's `/engine <word>` matching uses:
+    // aliases, the executable name, whether context carries over, and if models are switchable
+    const agentList = (await (await fetch(`${h.base}/api/v1/agents`, { headers: authHeaders() })).json()) as {
+      agents: Array<{ id: string; aliases?: string[]; bin?: string; sessionMode?: string; supportsModel?: boolean }>
+    }
+    const claude = agentList.agents.find((agent) => agent.id === "claude")
+    assert.ok(claude, "the engine list must include the claude profile")
+    assert.deepEqual(claude.aliases, ["claude-code", "anthropic"])
+    assert.equal(claude.bin, "claude")
+    assert.equal(claude.sessionMode, "preassign")
+    assert.equal(claude.supportsModel, true)
+    // Typing an alias switches to the same engine the id would
+    await postEngine("opencode")
+    const byAlias = await postEngine("anthropic")
+    assert.equal(byAlias.status, 200)
+    assert.equal(((await byAlias.json()) as { session: { engine: string } }).session.engine, "claude")
+    // Asking for the engine already in use answers like Telegram instead of rewriting it
+    const sameEngine = await postEngine("claude")
+    assert.match(((await sameEngine.json()) as { message: string }).message, /无需切换/)
 
     // The app can list another engine's models for a one-off pin, without switching
     await fetch(`${h.base}/api/v1/agent`, {
@@ -549,6 +714,94 @@ test("api switch engine, reset session and list models", async () => {
       body: JSON.stringify({ engine: "nope" }),
     })
     assert.equal(unknown.status, 400)
+  })
+})
+
+test("api model switch matches Telegram's reset-word and context rules", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const setModel = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/model`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(body),
+      })
+
+    // An engine that declares a model literally named `auto`; Telegram keeps that model
+    // reachable instead of reading the word as "restore the default"
+    writeFileSync(
+      join(h.dataDir, "agents.json"),
+      JSON.stringify({
+        agents: {
+          autoeng: {
+            bin: "autoeng",
+            supportsModel: true,
+            models: [
+              { id: "auto", label: "Auto Mode" },
+              { id: "fast", label: "Fast" },
+            ],
+          },
+        },
+      }),
+    )
+    const switched = await fetch(`${h.base}/api/v1/agent`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ engine: "autoeng" }),
+    })
+    assert.equal(switched.status, 200)
+
+    h.store.setCliSession("api:app", "autoeng", "ctx-1")
+    const declared = await setModel({ model: "auto" })
+    assert.equal(declared.status, 200)
+    assert.match(((await declared.json()) as { message: string }).message, /模型已切换为 Auto Mode/)
+    assert.equal(h.store.getCliModel("api:app", "autoeng"), "auto")
+    // A model change must not carry the previous model's context over
+    assert.equal(h.store.getCliSession("api:app", "autoeng"), undefined)
+
+    // The App's button is an explicit reset, so the same word drops the pick instead
+    h.store.setCliSession("api:app", "autoeng", "ctx-2")
+    const forced = await setModel({ model: "auto", reset: true })
+    assert.equal(forced.status, 200)
+    assert.match(((await forced.json()) as { message: string }).message, /已取消本会话的模型选择/)
+    assert.equal(h.store.getCliModel("api:app", "autoeng"), undefined)
+    assert.equal(h.store.getCliSession("api:app", "autoeng"), undefined)
+
+    // Reset words the API used to reject as model names now work on a CLI too
+    h.store.setCliModel("api:app", "autoeng", "fast")
+    for (const word of ["reset", "clear", "恢复默认"]) {
+      const reset = await setModel({ model: word })
+      assert.equal(reset.status, 200, word)
+      assert.equal(h.store.getCliModel("api:app", "autoeng"), undefined, word)
+      h.store.setCliModel("api:app", "autoeng", "fast")
+    }
+    // With nothing selected the answer is the same note Telegram sends, not an error
+    h.store.setCliModel("api:app", "autoeng", "")
+    const already = await setModel({ model: "default" })
+    assert.equal(already.status, 200)
+    assert.match(((await already.json()) as { message: string }).message, /本会话没有独立的模型选择/)
+
+    // OpenCode: a reset word restores the configured default and drops the session id
+    await fetch(`${h.base}/api/v1/agent`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ engine: "opencode" }) })
+    h.store.setModel("api:app", { providerID: "custom", modelID: "x-old", label: "Old" })
+    h.store.set("api:app", "sess-9")
+    const ocReset = await setModel({ model: "reset" })
+    assert.equal(ocReset.status, 200)
+    assert.equal(h.store.getModel("api:app"), undefined)
+    assert.ok(!h.store.get("api:app"))
+
+    const ocPick = await setModel({ model: "opus" })
+    assert.equal(ocPick.status, 200)
+    assert.equal(h.store.getModel("api:app")?.modelID, "claude-opus-5-5-high")
+    h.store.set("api:app", "sess-live")
+    // Repicking the current model keeps the conversation, exactly as Telegram reports
+    const sameAgain = await setModel({ model: "opus" })
+    assert.match(((await sameAgain.json()) as { message: string }).message, /无需切换/)
+    assert.equal(h.store.get("api:app"), "sess-live")
+
+    const unknownWord = await setModel({ model: "nope-not-a-model" })
+    assert.equal(unknownWord.status, 400)
+    const missing = await setModel({})
+    assert.equal(missing.status, 400)
   })
 })
 
@@ -673,6 +926,100 @@ test("api work dir can be viewed, changed and reset", async () => {
     })
     assert.equal(reset.status, 200)
     assert.equal(h.store.getDir("api:app"), undefined)
+  })
+})
+
+test("api lists server directories for the App picker without touching the session", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const browse = async (query: string) =>
+      await fetch(`${h.base}/api/v1/dir/browse${query}`, { headers: authHeaders() })
+    const root = mkdtempSync(join(tmpdir(), "agent-bot-browse-"))
+    try {
+      mkdirSync(join(root, "zeta"))
+      mkdirSync(join(root, "Alpha"))
+      mkdirSync(join(root, ".hidden"))
+      mkdirSync(join(root, "link-target"))
+      writeFileSync(join(root, "notes.txt"), "x")
+      symlinkSync(join(root, "link-target"), join(root, "linked"))
+      symlinkSync(join(root, "nowhere"), join(root, "broken"))
+
+      const res = await browse(`?path=${encodeURIComponent(root)}`)
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as {
+        path: string
+        parent: string | null
+        home: string
+        cwd: string
+        defaultWorkDir: string
+        sessionDir: string
+        dirs: Array<{ name: string; path: string }>
+        truncated: boolean
+      }
+      // Directories only, hidden entries skipped, a symlinked directory followed and a
+      // dangling one dropped — that is the whole surface this endpoint has
+      assert.deepEqual(
+        body.dirs.map((entry) => entry.name),
+        ["Alpha", "link-target", "linked", "zeta"],
+      )
+      assert.equal(body.dirs[0]?.path, join(root, "Alpha"))
+      assert.equal(lstatSync(join(root, "broken")).isSymbolicLink(), true, "the dangling link exists, so it was filtered")
+      assert.equal(body.path, root)
+      assert.equal(body.parent, dirname(root))
+      assert.equal(body.home, homedir())
+      assert.equal(body.defaultWorkDir, h.dataDir)
+      assert.equal(body.sessionDir, h.dataDir)
+      assert.equal(body.truncated, false)
+
+      // Browsing is read-only: the session still runs in its default directory
+      h.store.setCliSession("api:app", "claude", "sess-keep")
+      await browse(`?path=${encodeURIComponent(root)}`)
+      assert.equal(h.store.getDir("api:app"), undefined)
+      assert.equal(h.store.getCliSession("api:app", "claude"), "sess-keep")
+
+      // No path and `~` both go through the same resolver POST /dir uses
+      const empty = (await (await browse("")).json()) as { path: string }
+      assert.equal(empty.path, h.dataDir)
+      const tilde = (await (await browse("?path=%7E")).json()) as { path: string }
+      assert.equal(tilde.path, homedir())
+
+      const notADir = await browse(`?path=${encodeURIComponent(join(root, "notes.txt"))}`)
+      assert.equal(notADir.status, 400)
+      assert.match(((await notADir.json()) as { error: string }).error, /不是目录/)
+      const missing = await browse("?path=%2Fdefinitely%2Fnot%2Fa%2Freal%2Fdir")
+      assert.equal(missing.status, 400)
+      const control = await browse(`?path=${encodeURIComponent(`${root}\u0007`)}`)
+      assert.equal(control.status, 400)
+      const fsRoot = await browse("?path=%2F")
+      assert.equal(fsRoot.status, 400, "the filesystem root is refused as a working directory, so also here")
+      const wrongMethod = await fetch(`${h.base}/api/v1/dir/browse?path=${encodeURIComponent(root)}`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ dir: root }),
+      })
+      assert.equal(wrongMethod.status, 405)
+      assert.equal(h.store.getDir("api:app"), undefined, "a rejected browse must not set a directory")
+      const unknownSub = await fetch(`${h.base}/api/v1/dir/nope`, { headers: authHeaders() })
+      assert.equal(unknownSub.status, 404)
+      // A path segment used to be ignored here, so `POST /dir/nope` set the directory anyway
+      const postUnknown = await fetch(`${h.base}/api/v1/dir/nope`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ dir: root }),
+      })
+      assert.equal(postUnknown.status, 404)
+      assert.equal(h.store.getDir("api:app"), undefined)
+
+      // A wide directory is capped rather than dumped whole into a dialog
+      for (let i = 0; i < 205; i++) mkdirSync(join(root, `bulk-${i}`))
+      const capped = (await (await browse(`?path=${encodeURIComponent(root)}`)).json()) as {
+        dirs: unknown[]
+        truncated: boolean
+      }
+      assert.equal(capped.dirs.length, 200)
+      assert.equal(capped.truncated, true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -989,6 +1336,79 @@ test("api task retry refuses a live task and an unknown id", async () => {
       await fetch(`${h.base}/api/v1/stop`, { method: "POST", headers: authHeaders() })
     },
   )
+})
+
+/**
+ * The App's queue screen re-runs finished prompts from `GET /tasks`, because that is the only
+ * list carrying a task id: `history` rows show a cleaned prompt with nothing to retry, and
+ * `GET /queue` answers the live ones alone. So the settled rows, their order and what they hide
+ * are the contract the phone depends on.
+ */
+test("api tasks keeps the settled records the App re-runs from and /queue drops", async () => {
+  type Row = { id: string; status: string; text: string; createdAt: number; finishedAt?: number; reply?: string }
+  await withApi(async () => "回复", async (h) => {
+    const submit = async (text: string): Promise<string> => {
+      const res = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text }),
+      })
+      return ((await res.json()) as { task: { id: string } }).task.id
+    }
+    const settle = async (id: string): Promise<Row> => {
+      for (let i = 0; i < 100; i++) {
+        const res = await fetch(`${h.base}/api/v1/task/${id}`, { headers: authHeaders() })
+        const row = ((await res.json()) as { task: Row }).task
+        if (row.status !== "queued" && row.status !== "running") return row
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      throw new Error(`task ${id} never settled`)
+    }
+    const list = async (query = ""): Promise<Row[]> => {
+      const res = await fetch(`${h.base}/api/v1/tasks${query}`, { headers: authHeaders() })
+      assert.equal(res.status, 200)
+      return ((await res.json()) as { tasks: Row[] }).tasks
+    }
+
+    const first = await submit("重发我")
+    // Letting it settle first gives the two records distinct timestamps, so the ordering
+    // assertion below is about the response and not about how fast the seed ran.
+    assert.equal((await settle(first)).status, "done")
+    const second = await submit("最新一条")
+    await settle(second)
+
+    const rows = await list()
+    for (const id of [first, second]) assert.ok(rows.some((row) => row.id === id), `${id} must survive as a record`)
+    const stamps = rows.map((row) => row.createdAt)
+    assert.deepEqual(stamps, [...stamps].sort((a, b) => b - a), "records arrive newest first")
+
+    const older = rows.find((row) => row.id === first)!
+    assert.equal(older.text, "重发我")
+    assert.equal(older.reply, "回复")
+    assert.ok((older.finishedAt ?? 0) >= older.createdAt)
+    // A record must not smuggle the session key or the abort controller out of the server
+    assert.equal("key" in older, false)
+    assert.equal("controller" in older, false)
+
+    // /queue is Telegram's live view: both of these have finished, so neither appears
+    const queue = (await (await fetch(`${h.base}/api/v1/queue`, { headers: authHeaders() })).json()) as {
+      tasks: Row[]
+    }
+    assert.equal(queue.tasks.length, 0)
+
+    assert.equal((await list("?limit=1")).length, 1)
+    // A silly or unusable limit keeps answering: clamped to one row, or back to the default
+    assert.equal((await list("?limit=0")).length, 1)
+    assert.equal((await list("?limit=abc")).length, rows.length)
+
+    // The phone's 重试 button posts exactly this: an id read straight out of the record list
+    const retry = await fetch(`${h.base}/api/v1/task/${first}/retry`, { method: "POST", headers: authHeaders() })
+    assert.equal(retry.status, 202)
+    const retried = (await retry.json()) as { retriedFrom: string; task: Row }
+    assert.equal(retried.retriedFrom, first)
+    assert.equal(retried.task.text, "重发我")
+    await settle(retried.task.id)
+  })
 })
 
 test("api ops exposes diagnostics and log tails", async () => {
@@ -1333,6 +1753,35 @@ test("api manages custom models", async () => {
     assert.equal(removed.status, 200)
     const missing = await fetch(`${h.base}/api/v1/models/custom/my-test`, { method: "DELETE", headers: authHeaders() })
     assert.equal(missing.status, 404)
+
+    // Telegram's `/cc model add` flags ride on the same body the App sends, and a junk
+    // number must not reach opencode.json
+    const postModel = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/models/custom`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+    for (const contextWindow of [-5, 0, 1.5, "200000", 2e9]) {
+      const refused = await postModel({ key: "flag-test", providerID: "custom", modelID: "flag-model", contextWindow })
+      assert.equal(refused.status, 400, `contextWindow ${JSON.stringify(contextWindow)} must be refused`)
+      assert.match(((await refused.json()) as { error: string }).error, /contextWindow 需要/)
+    }
+    const stillEmpty = (await (await fetch(`${h.base}/api/v1/models/custom`, { headers: authHeaders() })).json()) as {
+      models: unknown[]
+    }
+    assert.equal(stillEmpty.models.length, 0, "a refused add must not write the registry")
+
+    const flagged = await postModel({
+      key: "flag-test",
+      providerID: "custom",
+      modelID: "flag-model",
+      attachment: true,
+      contextWindow: 200_000,
+      outputLimit: 64_000,
+    })
+    assert.equal(flagged.status, 200)
+    const flaggedMessage = ((await flagged.json()) as { message: string }).message
+    // The App sees the same capability sentence Telegram prints, including whether it landed
+    assert.match(flaggedMessage, /模型能力/)
+    assert.match(flaggedMessage, /支持图片输入、上下文 200000、输出上限 64000/)
+    await fetch(`${h.base}/api/v1/models/custom/flag-test`, { method: "DELETE", headers: authHeaders() })
   })
 })
 
@@ -1936,6 +2385,361 @@ test("api cc token tables let the app resolve typed /cc words", async () => {
   })
 })
 
+test("api cc self-update and the extra views answer like Telegram", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const execCatalog = async () => {
+      const res = await fetch(`${h.base}/api/v1/cc/exec`, { headers: authHeaders() })
+      return (await res.json()) as {
+        commands: Array<{ name: string; label: string; group: string; confirm: boolean; tokens: string[] }>
+      }
+    }
+    const postExec = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/cc/exec`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+
+    // Telegram's `/cc update` replaces cc-switch's own binary behind a confirm button; the
+    // App must reach the same thing, not only the ops center's install script
+    const commands = (await execCatalog()).commands
+    const upgrade = commands.find((entry) => entry.name === "cc-update")
+    assert.ok(upgrade, "the danger zone must offer cc-switch's native update")
+    assert.equal(upgrade.confirm, true, "a binary swap needs the same confirm gate as Telegram")
+    assert.equal(upgrade.group, "cc-switch 自更新")
+    assert.deepEqual(upgrade.tokens, ["update binary"])
+    const check = commands.find((entry) => entry.name === "cc-update-check")
+    assert.equal(check?.confirm, false, "checking for an update is read-only")
+    assert.deepEqual(check?.tokens, ["update check"])
+
+    const beforeReject = h.ccCalls.length
+    const unconfirmed = await postExec({ name: "cc-update" })
+    assert.equal(unconfirmed.status, 400)
+    assert.match(((await unconfirmed.json()) as { error: string }).error, /需要确认/)
+    assert.equal(h.ccCalls.length, beforeReject, "a rejected update must never reach the CLI")
+
+    const ranCheck = await postExec({ name: "cc-update-check" })
+    assert.equal(ranCheck.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:update --check")
+
+    const ranUpdate = await postExec({ name: "cc-update", confirm: true })
+    assert.equal(ranUpdate.status, 200)
+    // pty, because cc-switch asks for confirmation on a TTY before overwriting itself
+    assert.equal(h.ccCalls.at(-1), "confirm:update")
+
+    // The read-only views Telegram can print
+    const view = async (name: string, target?: string) => {
+      const suffix = target ? `&target=${encodeURIComponent(target)}` : ""
+      const res = await fetch(`${h.base}/api/v1/cc/view?name=${name}${suffix}`, { headers: authHeaders() })
+      return { status: res.status, body: (await res.json()) as { text?: string; error?: string } }
+    }
+    assert.equal((await view("skills-repos")).status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:skills repos list")
+
+    assert.equal((await view("mcp-validate", "npx")).status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:mcp validate npx")
+
+    // Not a view: `provider export` writes {cwd}/.claude/settings.local.json without -o,
+    // so the read-only table must not offer it
+    const exported = await view("provider-export", "p1")
+    assert.equal(exported.status, 400)
+    assert.match(exported.body.error ?? "", /未知的视图/)
+
+    // A view must not claim the words of a mutating command, or the App resolves to the read
+    const views = (await (await fetch(`${h.base}/api/v1/cc/views`, { headers: authHeaders() })).json()) as {
+      views: Array<{ name: string; tokens: string[] }>
+    }
+    assert.deepEqual(
+      views.views.find((entry) => entry.name === "skills-repos")?.tokens,
+      ["skills repos list"],
+      "the repos view may only name itself with all three words",
+    )
+  })
+})
+
+test("api reads and writes the Hermes memory blobs the way Telegram does", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const post = async (body: Record<string, unknown>) => {
+      const res = await fetch(`${h.base}/api/v1/cc/hermes`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(body),
+      })
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> }
+    }
+    const errorOf = (body: Record<string, unknown>) => String(body.error ?? "")
+
+    const read = await fetch(`${h.base}/api/v1/cc/hermes`, { headers: authHeaders() })
+    assert.equal(read.status, 200)
+    const state = (await read.json()) as {
+      limits: string
+      memory: string
+      user: string
+      memoryEnabled: boolean | null
+      userEnabled: boolean | null
+    }
+    assert.match(state.limits, /2200 chars/)
+    // cc-switch answers a missing file with a sentence, which must not reach the editor as
+    // if it were the blob's own content
+    assert.equal(state.user, "")
+    assert.equal(state.memory, "旧记忆\n第二行")
+    assert.equal(state.memoryEnabled, true)
+    assert.equal(state.userEnabled, false)
+
+    const beforeReject = h.ccCalls.length
+    for (const body of [
+      { kind: "memory", action: "set", content: "新记忆" },
+      { kind: "memory", action: "clear", content: undefined },
+      { kind: "memory", action: "set", content: "  \n ", confirm: true },
+      { kind: "memory", action: "set", content: "a\u0000b", confirm: true },
+      { kind: "notes", action: "enable" },
+      { kind: "memory", action: "append" },
+    ]) {
+      const rejected = await post(body)
+      assert.equal(rejected.status, 400, `${JSON.stringify(body)} must not be accepted`)
+    }
+    assert.equal(h.ccCalls.length, beforeReject, "a rejected memory write must never reach the CLI")
+    const wrongKind = await post({ kind: "notes", action: "enable" })
+    assert.match(errorOf(wrongKind.body), /memory 或 user/)
+    const wrongAction = await post({ kind: "memory", action: "append" })
+    assert.match(errorOf(wrongAction.body), /set、clear、enable、disable/)
+    const noConfirm = await post({ kind: "memory", action: "set", content: "新记忆" })
+    assert.match(errorOf(noConfirm.body), /需要确认/)
+    const blank = await post({ kind: "memory", action: "set", content: "  \n ", confirm: true })
+    assert.match(errorOf(blank.body), /内容为空/)
+    const control = await post({ kind: "memory", action: "set", content: "a\u0000b", confirm: true })
+    assert.match(errorOf(control.body), /控制字符/)
+
+    // One argv word, so the blob keeps its line breaks and its spaces
+    const wrote = await post({ kind: "memory", action: "set", content: "第一行\n第二行 with spaces", confirm: true })
+    assert.equal(wrote.status, 200)
+    assert.ok(
+      h.ccCalls.includes("run:hermes memory set memory --content 第一行\n第二行 with spaces"),
+      `the content must go to cc-switch as one word, got ${h.ccCalls.at(-1)}`,
+    )
+    assert.match(String(wrote.body.message), /已写入 MEMORY\.md（\d+ 字）。$/)
+
+    // cc-switch writes past Hermes' budget and Hermes truncates on load, so going over is
+    // reported instead of refused
+    const long = await post({ kind: "memory", action: "set", content: "x".repeat(2300), confirm: true })
+    assert.equal(long.status, 200)
+    assert.match(String(long.body.message), /超出 Hermes 的 2200 字预算/)
+
+    const cleared = await post({ kind: "user", action: "clear", confirm: true })
+    assert.equal(cleared.status, 200)
+    // Without --yes cc-switch prints a refusal and still exits 0, so the flag is the
+    // server's to add once the user has confirmed
+    assert.ok(h.ccCalls.includes("run:hermes memory clear user --yes"))
+    assert.match(String(cleared.body.message), /已清空 USER\.md/)
+
+    const enabled = await post({ kind: "user", action: "enable" })
+    assert.equal(enabled.status, 200)
+    assert.ok(h.ccCalls.includes("run:hermes memory enable user"))
+    assert.match(String(enabled.body.message), /已启用 USER\.md/)
+    // Every reply carries the stored text, so the editor shows the server, not a local draft
+    assert.equal(String(enabled.body.user), "")
+    assert.equal(String(enabled.body.limits).includes("2200 chars"), true)
+  })
+})
+
+test("api cc commands take the second half Telegram types in the same arg", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const postExec = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/cc/exec`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+    const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error
+
+    // The App prompts once per command, so `failover move p1 up` arrives as one string
+    const moved = await postExec({ name: "failover-move", arg: "p1 up" })
+    assert.equal(moved.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:failover move p1 up")
+
+    const wrongDirection = await postExec({ name: "failover-move", arg: "p1 sideways" })
+    assert.equal(wrongDirection.status, 400)
+    assert.match(await errorOf(wrongDirection), /up 或 down/)
+
+    const halfCommand = await postExec({ name: "failover-move", arg: "p1" })
+    assert.equal(halfCommand.status, 400, "a move without its direction must not run")
+
+    // cc-switch spells the flag before the id; an unknown app would blank the matrix
+    const apps = await postExec({ name: "mcp-set-apps", arg: "fs open-code,codex" })
+    assert.equal(apps.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:mcp set-apps --apps open-code,codex fs")
+
+    const badApps = await postExec({ name: "mcp-set-apps", arg: "fs open-code,bogus" })
+    assert.equal(badApps.status, 400)
+    assert.match(await errorOf(badApps), /应用列表/)
+
+    // A prompt name is free text: spaces survive because it travels as one argv word
+    const renamed = await postExec({ name: "prompt-rename", arg: "review 每日 复盘" })
+    assert.equal(renamed.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:prompts rename review --name 每日 复盘")
+
+    const flagName = await postExec({ name: "prompt-rename", arg: "review --help" })
+    assert.equal(flagName.status, 400, "the new name must never read as a flag")
+
+    // Proxy settings take one value and no id, yet the App still has to prompt for it
+    const commands = (await (await fetch(`${h.base}/api/v1/cc/exec`, { headers: authHeaders() })).json()) as {
+      commands: Array<{ name: string; needsTarget: boolean; tokens: string[] }>
+    }
+    const port = commands.commands.find((entry) => entry.name === "proxy-listen-port")
+    assert.equal(port?.needsTarget, true, "a command whose only value is its arg must ask for it")
+    assert.deepEqual(port?.tokens, ["proxy config port"])
+
+    const setPort = await postExec({ name: "proxy-listen-port", arg: "8787" })
+    assert.equal(setPort.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:proxy config --listen-port 8787")
+
+    const badPort = await postExec({ name: "proxy-listen-port", arg: "http://x" })
+    assert.equal(badPort.status, 400)
+
+    const setAddress = await postExec({ name: "proxy-listen-address", arg: "127.0.0.1" })
+    assert.equal(setAddress.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:proxy config --listen-address 127.0.0.1")
+
+    // Single-target commands keep refusing a stray second word
+    const tooMany = await postExec({ name: "mcp-disable", arg: "fs extra" })
+    assert.equal(tooMany.status, 400)
+    assert.match(await errorOf(tooMany), /只能是一个/)
+  })
+})
+
+test("api runs the raw cc-switch argv Telegram answers as /cc run", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const postRun = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/cc/run`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+    const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error
+
+    // Whatever Telegram can type, the App can send: the argv reaches cc-switch unchanged
+    const plain = await postRun({ args: ["env", "list", "--json"] })
+    assert.equal(plain.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:env list --json")
+    assert.equal(((await plain.json()) as { text: string }).text, "view env list --json")
+
+    // One guard for both surfaces: a command that would sit waiting for a keyboard
+    // is refused instead of pretending to have run, confirm: true included
+    for (const args of [["proxy", "serve"], ["sessions", "resume"], ["mcp", "add", "x"], ["daemon", "start"]]) {
+      const res = await postRun({ args, confirm: true })
+      assert.equal(res.status, 400, `${args.join(" ")} cannot run in a chat`)
+    }
+    assert.equal(h.ccCalls.at(-1), "run:env list --json", "a blocked command must not reach the CLI")
+
+    // The spelling the guard accepts still runs
+    const detached = await postRun({ args: ["daemon", "start", "--detach"] })
+    assert.equal(detached.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:daemon start --detach")
+
+    // -a/--app would retarget another app's config, in every spelling cc-switch reads
+    for (const token of ["-a", "-a=codex", "-acodex", "--app", "--app=codex"]) {
+      const res = await postRun({ args: ["provider", "list", token], confirm: true })
+      assert.equal(res.status, 400, `${token} must not select the app`)
+      assert.match(await errorOf(res), /CC_SWITCH_APP/)
+    }
+
+    // Destructive shapes wait for a confirmation, then run with cc-switch's own flag
+    const unconfirmed = await postRun({ args: ["sessions", "delete", "s1"] })
+    assert.equal(unconfirmed.status, 400)
+    assert.match(await errorOf(unconfirmed), /需要确认/)
+    const deleted = await postRun({ args: ["sessions", "delete", "s1"], confirm: true })
+    assert.equal(deleted.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:sessions delete s1 --yes")
+
+    // `provider use` takes the same path as the App's button, so the switch does the
+    // bookkeeping the raw CLI would skip
+    const used = await postRun({ args: ["provider", "use", "p1"], confirm: true })
+    assert.equal(used.status, 200)
+    assert.equal(h.ccCalls.at(-1), "use:p1")
+
+    // A binary upgrade is confirmed and gets its long timeout
+    const upgraded = await postRun({ args: ["update"], confirm: true })
+    assert.equal(upgraded.status, 200)
+    assert.equal(h.ccCalls.at(-1), "confirm:update")
+
+    // Deep links carry provider keys inside the URL, so they stay on their own endpoint
+    const link = await postRun({ args: ["deeplink", "ccswitch://v1/import?a=1"], confirm: true })
+    assert.equal(link.status, 400)
+    assert.match(await errorOf(link), /deeplink/i)
+
+    // A key typed into the argv is masked in everything sent back
+    const keyed = await postRun({ args: ["provider", "add", "sk-abcdefghijklmnopqrstuvwxyz"] })
+    assert.equal(keyed.status, 200)
+    const keyedBody = (await keyed.json()) as { text: string; command: string }
+    assert.ok(
+      !keyedBody.text.includes("sk-abcdefghijklmnopqrstuvwxyz"),
+      `the echoed output leaked the typed key: ${keyedBody.text}`,
+    )
+    assert.match(keyedBody.text, /sk-\*\*\*/)
+
+    // Junk argv never reaches the CLI
+    for (const args of [[], [""], ["mcp", "list\nall"], Array(17).fill("x"), ["a".repeat(300)]]) {
+      const res = await postRun({ args, confirm: true })
+      assert.equal(res.status, 400)
+    }
+    const noArgs = await postRun({ confirm: true })
+    assert.equal(noArgs.status, 400)
+    assert.match(await errorOf(noArgs), /args/)
+  })
+})
+
+/**
+ * cc-switch reads `-a`/`--app` on every subcommand, and `--apps` is a different flag that
+ * has to stay usable — the guard has to tell those apart in every compact spelling.
+ */
+test("cc passthrough names the app flag in every spelling cc-switch reads", async () => {
+  const { ccAppFlagToken } = await import("../src/ccGuards.js")
+  for (const token of ["-a", "-a=codex", "-acodex", "--app", "--app=codex"]) {
+    assert.equal(ccAppFlagToken(["provider", "list", token]), token, `${token} selects another app`)
+  }
+  for (const args of [["mcp", "set-apps", "--apps", "codex", "fs"], ["provider", "list", "--all"], ["env", "get", "-p"]]) {
+    assert.equal(ccAppFlagToken(args), undefined, `${args.join(" ")} is app-neutral`)
+  }
+})
+
+/**
+ * Hermes memory needs three words to name what it overwrites, and its `clear` exits 0
+ * printing a refusal unless cc-switch also sees `--yes`. Both surfaces share this guard.
+ */
+test("cc guards gate the Hermes memory commands on every word that matters", () => {
+  assert.match(ccBlockedReason(["hermes", "memory", "open-dir"], "App") ?? "", /文件管理器/)
+  for (const args of [
+    ["hermes", "memory", "limits"],
+    ["hermes", "memory", "show", "memory"],
+    ["hermes", "memory", "enable", "user"],
+    ["hermes", "memory", "disable", "user"],
+  ]) {
+    assert.equal(ccBlockedReason(args), undefined, `${args.join(" ")} is a usable cc-switch command`)
+    assert.equal(ccConfirmPlan(args), undefined, `${args.join(" ")} is not an overwrite`)
+  }
+  const cleared = ccConfirmPlan(["hermes", "memory", "clear", "user"])
+  assert.deepEqual(cleared?.appendArgs, ["--yes"], "a clear without cc-switch's flag no-ops silently")
+  assert.match(cleared?.label ?? "", /USER\.md/)
+  assert.match(ccConfirmPlan(["hermes", "memory", "set", "memory", "--content", "x"])?.label ?? "", /MEMORY\.md/)
+})
+
+/**
+ * The App's fixed buttons and the raw passthrough share one guard, so a whitelisted entry
+ * the guard would refuse is a dead button the moment it is added. This runs every argv the
+ * catalogs can build through the same rules `/cc run` applies.
+ */
+test("every whitelisted cc-switch entry survives the shared passthrough guards", () => {
+  for (const [name, spec] of Object.entries(CC_VIEWS)) {
+    const argv = spec.args("t1")
+    assert.equal(ccBlockedReason(argv), undefined, `view ${name} is blocked as interactive`)
+    assert.equal(ccConfirmPlan(argv), undefined, `view ${name} would ask the user to confirm a read`)
+  }
+
+  for (const [name, spec] of Object.entries(CC_EXEC_COMMANDS)) {
+    const argv = spec.args(spec.needsTarget ? "t1" : "", "x")
+    assert.equal(ccBlockedReason(argv), undefined, `exec ${name} is blocked as interactive`)
+    const plan = ccConfirmPlan(argv)
+    assert.equal(
+      Boolean(plan),
+      spec.confirm === true,
+      `exec ${name} disagrees with the guard${plan ? `: it wants confirming (${plan.label})` : ""}`,
+    )
+    assert.equal(
+      spec.pty === true,
+      plan?.pty === true,
+      `exec ${name} would run under a pty while Telegram would not`,
+    )
+  }
+})
+
 test("api surfaces every Telegram /cc alias the app can stand for", async () => {
   await withApi(async () => "ok", async (h) => {
     const [viewsRes, execRes] = await Promise.all([
@@ -2300,9 +3104,6 @@ test("api exposes session and pairing info without leaking the token", async () 
   })
 })
 
-function b64(text: string): string {
-  return Buffer.from(text, "utf8").toString("base64")
-}
 
 test("api streams task events over SSE until the terminal state", async () => {
   // Deferred engine: keeps the task running until the test pulls the finish trigger
@@ -2449,6 +3250,8 @@ interface WireCase {
   model: string
   /** `pick` is a list: every element is compared, not just the first row. */
   list?: boolean
+  /** Compared by POSTing this body, for endpoints the App only reaches with a request body. */
+  postBody?: Record<string, unknown>
 }
 
 /**
@@ -2459,7 +3262,9 @@ const NESTED_FIELDS: Record<string, Array<{ field: string; model: string }>> = {
   Status: [{ field: "usageToday", model: "UsageDay" }, { field: "activeTask", model: "Task" }],
   Usage: [{ field: "today", model: "UsageDay" }],
   Task: [{ field: "media", model: "TaskMedia" }],
+  DirListing: [{ field: "dirs", model: "DirEntry" }],
   Session: [{ field: "modelRef", model: "ModelRef" }],
+  EngineSwitch: [{ field: "session", model: "Session" }],
   Peer: [{ field: "session", model: "Session" }, { field: "activity", model: "PeerActivity" }],
   AgentInfo: [{ field: "models", model: "AgentModelOption" }],
   ModelChoices: [{ field: "models", model: "ModelEntry" }],
@@ -2520,6 +3325,8 @@ test("api responses fill every field the App's models decode", async () => {
         await post("schedules", { text: "30m 检查服务器" })
         await post("aliases", { name: "review", expansion: "审查当前改动" })
         await post("proxy", { url: "socks5://127.0.0.1:1080", name: "测试代理" })
+        // The directory picker has to compare a real row, not an empty listing
+        mkdirSync(join(h.dataDir, "contract-sub"), { recursive: true })
 
         const cases: WireCase[] = [
           { url: "health", pick: "", model: "Health" },
@@ -2528,10 +3335,12 @@ test("api responses fill every field the App's models decode", async () => {
           { url: "info", pick: "", model: "ServerInfo" },
           // GET /dir answers with the view itself; POST answers with { ok, message, dir }
           { url: "dir", pick: "", model: "DirInfo" },
+          { url: "dir/browse", pick: "", model: "DirListing" },
           { url: "usage", pick: "usage", model: "Usage" },
           { url: "usage", pick: "trend", model: "UsageTrendDay", list: true },
           { url: "usage/report", pick: "", model: "DailyReport" },
           { url: "task", pick: "task", model: "Task" },
+          { url: "tasks", pick: "tasks", model: "Task", list: true },
           { url: "history", pick: "history", model: "HistoryEntry", list: true },
           { url: "reminders", pick: "reminders", model: "Reminder", list: true },
           { url: "schedules", pick: "schedules", model: "Schedule", list: true },
@@ -2544,6 +3353,8 @@ test("api responses fill every field the App's models decode", async () => {
           { url: "help", pick: "sections", model: "HelpSection", list: true },
           { url: "help", pick: "commands", model: "BotCommand", list: true },
           { url: "agents", pick: "agents", model: "AgentInfo", list: true },
+          // POST /agent answers with the new session plus Telegram's note, both decoded here
+          { url: "agent", pick: "", model: "EngineSwitch", postBody: { engine: "opencode" } },
           // Both engine kinds answer /models, and their entry shapes differ
           { url: "models", pick: "models", model: "ModelChoices" },
           { url: "models?engine=opencode", pick: "models", model: "ModelChoices" },
@@ -2554,6 +3365,10 @@ test("api responses fill every field the App's models decode", async () => {
           { url: "cc", pick: "", model: "CcStatus" },
           { url: "cc/views", pick: "views", model: "CcViewSpec", list: true },
           { url: "cc/exec", pick: "commands", model: "CcExecCommand", list: true },
+          { url: "cc/hermes", pick: "", model: "HermesMemory" },
+          { url: "cc/hermes", pick: "", model: "HermesResult", postBody: { kind: "memory", action: "enable" } },
+          // The raw passthrough answers with the redacted words it ran, which the App shows
+          { url: "cc/run", pick: "", model: "CcRunResult", postBody: { args: ["config", "show"] } },
         ]
 
         const problems: string[] = []
@@ -2583,7 +3398,8 @@ test("api responses fill every field the App's models decode", async () => {
         }
 
         for (const wire of cases) {
-          const payload = wire.url === "task" ? submitted : await get(wire.url)
+          const payload =
+            wire.url === "task" ? submitted : wire.postBody ? await post(wire.url, wire.postBody) : await get(wire.url)
           const value = pickPath(payload, wire.pick)
           if (wire.list) {
             if (!Array.isArray(value) || value.length === 0) {

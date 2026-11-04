@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +25,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -36,6 +38,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.Peer
 import com.agentbot.app.data.Task
@@ -60,6 +65,7 @@ private val TIMEZONE_PRESETS = listOf(
 @Composable
 fun SessionScreen(vm: AppViewModel) {
     var editDir by remember { mutableStateOf(false) }
+    var browseDir by remember { mutableStateOf(false) }
     var editTz by remember { mutableStateOf(false) }
     var followTarget by remember { mutableStateOf<Peer?>(null) }
     val session = vm.session
@@ -92,7 +98,32 @@ fun SessionScreen(vm: AppViewModel) {
                 dir?.custom?.let {
                     Text("自定义目录：$it", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
                 }
+                // Typing an absolute path is the awkward part of changing this on a phone
+                TextButton(
+                    onClick = {
+                        vm.openDirBrowser()
+                        browseDir = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("浏览服务器目录…")
+                }
                 HorizontalDivider()
+                if (vm.hasLiveTask) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "任务执行中：恢复默认模型、新建会话与改动工作目录需要先停止任务；切换引擎不受影响。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = vm::stop) { Text("停止") }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { editDir = true }) { Text("修改目录") }
                     OutlinedButton(onClick = vm::resetWorkDir) { Text("恢复默认目录") }
@@ -199,6 +230,12 @@ fun SessionScreen(vm: AppViewModel) {
             },
         )
     }
+    if (browseDir) {
+        DirBrowserDialog(vm, onDismiss = {
+            browseDir = false
+            vm.closeDirBrowser()
+        })
+    }
     if (editTz) {
         TextPromptDialog(
             title = "自定义时区",
@@ -237,6 +274,101 @@ fun SessionScreen(vm: AppViewModel) {
     }
 }
 
+/**
+ * The picker behind 「浏览服务器目录…」: walks the server's tree one level at a time, then hands
+ * the chosen path to the same `POST /dir` the typed dialog uses. Reading a listing never touches
+ * the session, so wandering around costs nothing.
+ */
+@Composable
+private fun DirBrowserDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+    val listing = vm.dirBrowse
+    val busy = vm.dirBrowseBusy
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择工作目录") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "CLI 引擎将在选定的目录下执行，切换会重置该会话的 CLI 上下文。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    listing?.path ?: "读取中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                listing?.sessionDir?.takeIf { it.isNotEmpty() }?.let {
+                    Text("当前会话：$it", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                }
+                vm.dirBrowseError?.let {
+                    Text(it, color = Color.Red, style = MaterialTheme.typography.bodySmall)
+                }
+                if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    TextButton(onClick = { vm.loadDir("") }, enabled = !busy) { Text("默认") }
+                    listing?.home?.takeIf { it.isNotEmpty() }?.let {
+                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("主目录") }
+                    }
+                    listing?.cwd?.takeIf { it.isNotEmpty() }?.let {
+                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("运行目录") }
+                    }
+                    listing?.parent?.let {
+                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("上一级") }
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    listing?.dirs?.forEach { entry ->
+                        TextButton(
+                            onClick = { vm.loadDir(entry.path) },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                entry.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    if (listing != null && !busy && listing.dirs.isEmpty()) {
+                        Text(
+                            "该目录下没有子目录",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (listing != null && listing.truncated) {
+                        Text(
+                            "子目录过多，仅列出前 ${listing.dirs.size} 个；其余请用「修改目录」手打路径。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { listing?.let { vm.chooseDir(it.path) } },
+                enabled = listing != null && !busy,
+            ) { Text("选择此目录") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
 @Composable
 private fun InfoRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -252,7 +384,7 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
-/** Telegram's /queue: queued and running tasks with per-task stop buttons. */
+/** Telegram's /queue: queued and running tasks with per-task stop buttons, plus recent finished records to re-run. */
 @Composable
 fun QueueScreen(vm: AppViewModel) {
     var confirmClear by remember { mutableStateOf(false) }
@@ -292,7 +424,7 @@ fun QueueScreen(vm: AppViewModel) {
             }
         }
 
-        if (vm.queue.isEmpty()) {
+        if (vm.queue.isEmpty() && vm.recentTasks.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
                 verticalArrangement = Arrangement.Center,
@@ -350,6 +482,60 @@ fun QueueScreen(vm: AppViewModel) {
                     }
                 }
             }
+            if (vm.recentTasks.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                        Text("最近任务", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "「重试」按服务器里保存的原提示重发，附件与临时模型选择都跟着走。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+                items(vm.recentTasks, key = { it.id }) { task ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(14.dp)) {
+                                Text(
+                                    task.text.ifBlank { "（附件消息）" },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 2,
+                                )
+                                val took = task.startedAt?.let { start ->
+                                    task.finishedAt?.let { end -> AppViewModel.formatDuration(end - start) }
+                                }
+                                Text(
+                                    listOfNotNull(
+                                        taskStatusLabel(task),
+                                        took?.let { "耗时 $it" },
+                                        task.finishedAt?.let { AppViewModel.formatTime(it) },
+                                        task.engine,
+                                        task.model,
+                                        task.attachmentCount?.takeIf { it > 0 }?.let { "附件 $it" },
+                                    ).joinToString(" · "),
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                                task.error?.takeIf { it.isNotBlank() }?.let {
+                                    Text(
+                                        it,
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 2,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                            }
+                            TextButton(onClick = { vm.retryRecord(task.id) }) { Text("重试") }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -374,5 +560,8 @@ fun QueueScreen(vm: AppViewModel) {
 private fun taskStatusLabel(task: Task): String = when (task.status) {
     "queued" -> "排队中"
     "running" -> "执行中"
+    "done" -> "已完成"
+    "failed" -> "失败"
+    "cancelled" -> "已取消"
     else -> task.status
 }

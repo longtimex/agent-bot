@@ -26,6 +26,9 @@ internal val SLASH_COMMANDS = setOf(
 /** Telegram's words for dropping the session's model pick. */
 private val MODEL_DEFAULT_WORDS = setOf("default", "reset", "clear", "auto", "默认", "恢复默认")
 
+/** Telegram compares the trimmed, lowercased word; the Chinese spellings are unaffected by casing. */
+private fun isResetWord(arg: String): Boolean = arg.trim().lowercase() in MODEL_DEFAULT_WORDS
+
 /** Words that mean "drop this pick" for the session model, the queue and a one-off pin. */
 private val CLEAR_WORDS = setOf("clear", "off", "reset", "default", "取消", "清空", "默认")
 
@@ -95,6 +98,14 @@ internal fun matchCcQuery(
 }
 
 /**
+ * The argv Telegram hands to cc-switch for `/cc run provider list`: one entry per word, and
+ * the leading `run` word is Telegram's own, so it never reaches the CLI.
+ */
+internal fun ccRawArgv(words: String): List<String> =
+    words.split(SLASH_SPACES).filter { it.isNotBlank() }
+        .let { if (it.firstOrNull()?.lowercase() == "run") it.drop(1) else it }
+
+/**
  * Runs one resolved bot command, mirroring the argument grammar Telegram accepts.
  * Anything the App can only do with a control (installs, restarts, cc-switch writes)
  * opens the page that holds it; the words the user typed prefill that page's own
@@ -116,12 +127,17 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
 
         "new" -> vm.newChat()
         "stop" -> vm.stop()
-        "retry" -> vm.retryLastFailed()
+        "retry" -> vm.retryLastTask()
 
         "queue" -> if (arg.lowercase() in CLEAR_WORDS) vm.clearQueue() else vm.navigate(Screen.Queue)
 
         "history" -> {
-            arg.toIntOrNull()?.let { vm.setHistoryLimit(it.coerceIn(1, 200)) }
+            // The server's window stops at 50 rows, so say so instead of quietly showing fewer
+            arg.toIntOrNull()?.let { count ->
+                val limit = count.coerceIn(1, 50)
+                if (limit != count) vm.showToast("历史窗口最多 50 条，已按 $limit 条显示")
+                vm.setHistoryLimit(limit)
+            }
             vm.navigate(Screen.History)
         }
 
@@ -167,7 +183,9 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
 
         "model" -> when {
             arg.isBlank() -> vm.navigate(Screen.Session)
-            arg.lowercase() in MODEL_DEFAULT_WORDS -> vm.resetModel()
+            // Reset words go to the server, which owns Telegram's rule: a model really
+            // named `auto` stays reachable, anything else restores the default
+            isResetWord(arg) -> vm.applyModelWord(arg)
             else -> vm.selectModelByQuery(arg)
         }
 
@@ -346,7 +364,7 @@ internal fun applyOneOffSlashCommand(vm: AppViewModel, name: String, arg: String
             vm.requestPinPicker()
             true
         }
-        arg.lowercase() in MODEL_DEFAULT_WORDS -> {
+        isResetWord(arg) && vm.oneOffModels.matchModel(arg.trim().lowercase()) == null -> {
             vm.setOneOffModel(null)
             true
         }

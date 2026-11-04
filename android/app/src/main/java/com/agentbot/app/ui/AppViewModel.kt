@@ -35,7 +35,9 @@ import com.agentbot.app.data.ConfigView
 import com.agentbot.app.data.Connection
 import com.agentbot.app.data.CustomModel
 import com.agentbot.app.data.DirInfo
+import com.agentbot.app.data.DirListing
 import com.agentbot.app.data.HelpView
+import com.agentbot.app.data.HermesMemory
 import com.agentbot.app.data.HistoryEntry
 import com.agentbot.app.data.Health
 import com.agentbot.app.data.ModelChoices
@@ -101,6 +103,7 @@ sealed interface Screen {
     data object Access : Screen
     data object Models : Screen
     data object Cc : Screen
+    data object Hermes : Screen
     data object Config : Screen
     data object Status : Screen
     data object Help : Screen
@@ -174,6 +177,16 @@ class AppViewModel(
     var busy by mutableStateOf(false)
         private set
 
+    /**
+     * The server refuses session rewiring (`/new`, `/model`, `/dir`, peers follow) while a
+     * prompt is queued or running, exactly as Telegram's buttons do; switching the engine is
+     * still allowed because it only points the next task elsewhere.
+     */
+    val hasLiveTask: Boolean
+        get() = messages.any {
+            it.role == ChatMessage.Role.ASSISTANT && (it.status == "queued" || it.status == "running")
+        }
+
     var agents by mutableStateOf<List<AgentInfo>>(emptyList())
         private set
 
@@ -229,6 +242,17 @@ class AppViewModel(
     var ccPanelText by mutableStateOf<String?>(null)
         private set
 
+    /** Hermes' MEMORY.md / USER.md and the limits line, loaded when the screen opens. */
+    var hermes by mutableStateOf<HermesMemory?>(null)
+        private set
+
+    var hermesBusy by mutableStateOf(false)
+        private set
+
+    /** Last write result, so a truncated-by-budget warning survives the refresh. */
+    var hermesMessage by mutableStateOf<String?>(null)
+        private set
+
     var configView by mutableStateOf<ConfigView?>(null)
         private set
 
@@ -268,10 +292,25 @@ class AppViewModel(
     var dirInfo by mutableStateOf<DirInfo?>(null)
         private set
 
+    /** Where the working-directory picker is standing; null while it is closed. */
+    var dirBrowse by mutableStateOf<DirListing?>(null)
+        private set
+
+    var dirBrowseBusy by mutableStateOf(false)
+        private set
+
+    /** Its own error line: a banner would hide behind the dialog. */
+    var dirBrowseError by mutableStateOf<String?>(null)
+        private set
+
     var timezone by mutableStateOf<String?>(null)
         private set
 
     var queue by mutableStateOf<List<Task>>(emptyList())
+        private set
+
+    /** Settled records behind the queue screen; the server prunes old ones, so best effort. */
+    var recentTasks by mutableStateOf<List<Task>>(emptyList())
         private set
 
     var diagnostics by mutableStateOf<Diagnostics?>(null)
@@ -480,6 +519,7 @@ class AppViewModel(
             Screen.Access -> refreshAccess()
             Screen.Models -> refreshCustomModels()
             Screen.Cc -> refreshCc()
+            Screen.Hermes -> refreshHermes()
             Screen.Config -> refreshConfig()
             Screen.Status -> refreshStatus()
             Screen.Help -> refreshHelp()
@@ -604,7 +644,7 @@ class AppViewModel(
     fun addCustomModel(input: String) {
         val tokens = input.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (tokens.size < 2) {
-            connectionError = "用法：简称 provider/modelID [显示名]，例如：mymodel custom/my-model-id"
+            connectionError = "用法：简称 provider/modelID [显示名] [--attachment] [--context N] [--output N]"
             return
         }
         val key = tokens[0]
@@ -615,11 +655,50 @@ class AppViewModel(
         }
         val providerID = tokens[1].substring(0, slash)
         val modelID = tokens[1].substring(slash + 1)
-        val label = tokens.drop(2).joinToString(" ").ifBlank { null }
+        // Telegram's `/cc model add` flags, spelled the same way here so one line works in either client
+        var attachment: Boolean? = null
+        var contextWindow: Int? = null
+        var outputLimit: Int? = null
+        val labelParts = mutableListOf<String>()
+        var index = 2
+        while (index < tokens.size) {
+            val token = tokens[index]
+            val equals = token.indexOf('=')
+            val name = if (equals > 0) token.substring(0, equals) else token
+            val inline = if (equals > 0) token.substring(equals + 1) else null
+            when (name) {
+                "--attachment", "--vision", "-a" -> {
+                    attachment = true
+                    index += 1
+                }
+
+                "--context", "--ctx" -> {
+                    val raw = inline ?: tokens.getOrNull(index + 1)
+                    contextWindow = positiveLimit(name, raw) ?: return
+                    index += if (inline == null) 2 else 1
+                }
+
+                "--output", "--max-output" -> {
+                    val raw = inline ?: tokens.getOrNull(index + 1)
+                    outputLimit = positiveLimit(name, raw) ?: return
+                    index += if (inline == null) 2 else 1
+                }
+
+                else -> {
+                    if (token.startsWith("-")) {
+                        connectionError = "未知参数：$token"
+                        return
+                    }
+                    labelParts.add(token)
+                    index += 1
+                }
+            }
+        }
+        val label = labelParts.joinToString(" ").ifBlank { null }
         viewModelScope.launch {
             modelBusy = true
             try {
-                val result = api.addCustomModel(conn(), key, providerID, modelID, label)
+                val result = api.addCustomModel(conn(), key, providerID, modelID, label, attachment, contextWindow, outputLimit)
                 toast = result.message ?: "已添加模型"
                 refreshCustomModels()
                 refreshModels()
@@ -629,6 +708,16 @@ class AppViewModel(
                 modelBusy = false
             }
         }
+    }
+
+    /** `--context 200000` and `--output 64000` take a positive integer, or the dialog says so. */
+    private fun positiveLimit(flag: String, raw: String?): Int? {
+        val value = raw?.toIntOrNull()
+        if (value == null || value <= 0) {
+            connectionError = "$flag 需要一个正整数，例如 `$flag 200000`。"
+            return null
+        }
+        return value
     }
 
     /** Mirrors `/cc model assign`: bind an agent (or `self`) to a model shorthand. */
@@ -1031,6 +1120,60 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Words the bot wants confirmed before a raw cc-switch run: which commands need a tap is
+     * the server guard's decision, so the App only asks when Telegram would ask too.
+     */
+    var ccRawConfirmation by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * Telegram's `/cc run <argv>` for any command its guard accepts: the App types the same
+     * words. A refusal that asks for confirmation opens the dialog instead of failing, and
+     * confirming re-sends the identical argv with `confirm`.
+     */
+    fun runCcRaw(words: String, confirm: Boolean) {
+        if (ccBusy) return
+        val argv = ccRawArgv(words)
+        if (argv.isEmpty()) {
+            toast = "没有要执行的 cc-switch 参数"
+            return
+        }
+        viewModelScope.launch {
+            ccBusy = true
+            try {
+                val result = api.ccRun(conn(), argv, confirm)
+                val shown = result.command.ifBlank { argv.joinToString(" ") }
+                toast = result.message.ifBlank { if (result.ok) "已完成：$shown" else "执行失败：$shown" }
+                ccPanelTitle = "⌨️ $shown"
+                ccPanelText = result.text
+                ccRawConfirmation = null
+                // Provider commands change what the console lists, so its header refreshes
+                if (argv.first() == "provider") ccStatus = api.ccStatus(conn())
+            } catch (err: ApiException) {
+                if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
+                    ccRawConfirmation = words
+                } else {
+                    connectionError = "cc-switch 执行失败：${err.message}"
+                }
+            } catch (err: Exception) {
+                connectionError = "cc-switch 执行失败：${err.message}"
+            } finally {
+                ccBusy = false
+            }
+        }
+    }
+
+    fun confirmCcRaw() {
+        val words = ccRawConfirmation ?: return
+        ccRawConfirmation = null
+        runCcRaw(words, true)
+    }
+
+    fun dismissCcRaw() {
+        ccRawConfirmation = null
+    }
+
     /** Runs one allowlisted mutating command; the server re-checks the confirm flag. */
     fun runCcExec(name: String, arg: String?, confirm: Boolean) {
         if (ccBusy) return
@@ -1055,6 +1198,55 @@ class AppViewModel(
         ccPanelTitle = null
         ccPanelText = null
         ccTestMessage = null
+    }
+
+    // ---- Hermes memory ----
+
+    fun refreshHermes() {
+        if (hermesBusy) return
+        hermesBusy = true
+        viewModelScope.launch {
+            try {
+                hermes = api.hermes(conn())
+                connectionError = null
+            } catch (err: Exception) {
+                connectionError = if (err is NotConfiguredException) err.message else "读取 Hermes 记忆失败：${err.message}"
+            } finally {
+                hermesBusy = false
+            }
+        }
+    }
+
+    /** `set` and `clear` replace the whole file, so the screen confirms before either posts. */
+    fun saveHermes(kind: String, content: String) = hermesWrite(kind, "set", content)
+
+    fun clearHermes(kind: String) = hermesWrite(kind, "clear", null)
+
+    fun setHermesEnabled(kind: String, enabled: Boolean) =
+        hermesWrite(kind, if (enabled) "enable" else "disable", null)
+
+    private fun hermesWrite(kind: String, action: String, content: String?) {
+        if (hermesBusy) return
+        hermesBusy = true
+        hermesMessage = null
+        viewModelScope.launch {
+            try {
+                val result = api.hermesAction(conn(), kind, action, content, confirm = action == "set" || action == "clear")
+                // The server reports what the file holds now, so the editor shows stored text
+                hermes = HermesMemory(
+                    limits = result.limits,
+                    memory = result.memory,
+                    user = result.user,
+                    memoryEnabled = result.memoryEnabled,
+                    userEnabled = result.userEnabled,
+                )
+                hermesMessage = result.message
+            } catch (err: Exception) {
+                connectionError = if (err is NotConfiguredException) err.message else "Hermes 记忆操作失败：${err.message}"
+            } finally {
+                hermesBusy = false
+            }
+        }
     }
 
     // ---- env config ----
@@ -1245,6 +1437,40 @@ class AppViewModel(
         guarded("加载工作目录") { dirInfo = api.dir(conn()) }
     }
 
+    /** Opens the picker on the session's own directory, or wherever the caller names. */
+    fun openDirBrowser(path: String? = null) {
+        dirBrowseError = null
+        loadDir(path ?: dirInfo?.workDir ?: "")
+    }
+
+    fun closeDirBrowser() {
+        dirBrowse = null
+        dirBrowseError = null
+    }
+
+    /** Read-only walk of the server's tree; nothing here touches the session. */
+    fun loadDir(path: String) {
+        if (dirBrowseBusy) return
+        dirBrowseBusy = true
+        viewModelScope.launch {
+            try {
+                dirBrowse = api.dirBrowse(conn(), path)
+                dirBrowseError = null
+            } catch (err: Exception) {
+                dirBrowseError =
+                    if (err is NotConfiguredException) err.message else "读取目录失败：${err.message}"
+            } finally {
+                dirBrowseBusy = false
+            }
+        }
+    }
+
+    /** Hands the browsed path to the same call the typed dialog uses, so both agree. */
+    fun chooseDir(path: String) {
+        closeDirBrowser()
+        setWorkDir(path)
+    }
+
     fun setWorkDir(path: String) {
         guarded("切换工作目录") {
             dirInfo = api.setDir(conn(), path)
@@ -1275,14 +1501,19 @@ class AppViewModel(
     }
 
     fun refreshQueue() {
-        guarded("加载队列") { queue = api.queue(conn()) }
+        guarded("加载队列") {
+            queue = api.queue(conn())
+            recentTasks = api.tasks(conn()).filterNot { it.isRunning }
+        }
     }
 
     /** Auto-refresh for the queue screen: a flaky link must not paint an error banner. */
     fun pollQueue() {
         viewModelScope.launch {
             try {
+                val records = api.tasks(conn())
                 queue = api.queue(conn())
+                recentTasks = records.filterNot { it.isRunning }
             } catch (_: Exception) {
             }
         }
@@ -1320,6 +1551,29 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Re-runs a record from the task list. No local bubble points at it, so the server's replay
+     * (prompt, attachments and model pin included) comes back as a new one.
+     */
+    fun retryRecord(taskId: String) {
+        viewModelScope.launch {
+            try {
+                val task = api.retryTask(conn(), taskId)
+                messages = messages + ChatMessage(
+                    ChatMessage.Role.ASSISTANT,
+                    "",
+                    taskId = task.id,
+                    status = task.status,
+                )
+                persistMessages()
+                pollTask(task.id)
+                refreshQueue()
+            } catch (err: Exception) {
+                connectionError = "重试失败：${err.message}"
+            }
+        }
+    }
+
     /** Text-only resend of the prompt preceding message [index]. */
     private fun resendFromHistory(index: Int) {
         val prompt = messages.subList(0, index).lastOrNull { it.role == ChatMessage.Role.USER }?.text
@@ -1330,9 +1584,24 @@ class AppViewModel(
         if (!send(prompt)) toast = "任务执行中，请先等待或停止当前任务"
     }
 
+    /** The button's intent: always drop this session's own model pick. */
     fun resetModel() {
         guarded("恢复默认模型") {
-            val message = api.setModel(conn(), "default")
+            val message = api.setModel(conn(), "default", reset = true)
+            session = api.session(conn())
+            toast = message
+        }
+    }
+
+    /**
+     * Sends a typed `/model <word>` untouched: the server owns Telegram's rule, so a word
+     * naming a real model switches to it and any other reset word restores the default.
+     */
+    fun applyModelWord(word: String) {
+        val raw = word.trim()
+        if (raw.isEmpty()) return
+        guarded("切换模型") {
+            val message = api.setModel(conn(), raw)
             session = api.session(conn())
             toast = message
         }
@@ -1583,8 +1852,10 @@ class AppViewModel(
     }
 
     private suspend fun applyEngine(engine: String) {
-        session = api.switchAgent(conn(), engine)
-        toast = "已切换到 ${session?.engineLabel ?: engine}"
+        val result = api.switchAgent(conn(), engine)
+        session = result.session
+        // The server's own note covers "already on this engine" and a missing CLI binary
+        toast = result.message ?: "已切换到 ${result.session.engineLabel ?: engine}"
         refreshModels()
     }
 
@@ -1695,6 +1966,12 @@ class AppViewModel(
     }
 
     fun newChat() {
+        // The list is wiped before the call, so a live task's bubble would vanish with it —
+        // and the server refuses the reset while one runs anyway (409, like Telegram's button).
+        if (hasLiveTask) {
+            toast = "任务执行中，请先停止当前任务再开启新会话"
+            return
+        }
         messages = emptyList()
         mediaImages = emptyMap()
         mediaErrors = emptySet()
@@ -1778,19 +2055,23 @@ class AppViewModel(
         return true
     }
 
-    /** Re-runs the last failed task (the error banner's 重试, also `/retry`). */
-    fun retryLastFailed() {
-        // Telegram replays its own record of the task, so do the same and keep the
-        // attachments and model pin a local text resend would drop
-        val taskId = messages.lastOrNull {
-            it.role == ChatMessage.Role.ASSISTANT &&
-                it.taskId != null &&
-                (it.status == "failed" || it.status == "cancelled")
-        }?.taskId
-        if (taskId != null) {
-            retryTask(taskId)
+    /**
+     * Re-runs the last task whatever its outcome, which is Telegram's `/retry`: a good answer
+     * is replayable just as easily as a broken one. Picking the task id means the server
+     * resubmits the original prompt with its attachments and model pin, so unlike a local
+     * text resend the retry is never silently degraded.
+     */
+    fun retryLastTask() {
+        val last = messages.lastOrNull { it.role == ChatMessage.Role.ASSISTANT && it.taskId != null }
+        if (last?.taskId != null) {
+            if (last.status == "queued" || last.status == "running") {
+                toast = "上一条任务还在执行，请先停止或等待"
+                return
+            }
+            retryTask(last.taskId)
             return
         }
+        // Only a task the server no longer remembers has to be rebuilt from local history
         val lastUser = messages.lastOrNull { it.role == ChatMessage.Role.USER }
         if (lastUser == null || lastUser.text.isBlank()) {
             toast = "没有可重试的任务"

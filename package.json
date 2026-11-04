@@ -13,9 +13,11 @@
     "setup": "tsx src/setup-cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint src tests scripts",
+    "knip": "knip --include files,dependencies --no-config-hints",
     "check:android": "node scripts/check-android-sources.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
-    "check": "npm run check:android && npm run typecheck && npm test && npm run build",
+    "check": "npm run check:android && npm run lint && npm run knip && npm run typecheck && npm test && npm run build",
     "serve": "opencode serve --port 4096 --hostname 127.0.0.1",
     "serve:proxy": "bash -c 'set -a; [ -f data/proxy.env ] && . data/proxy.env; set +a; exec opencode serve --port 4096 --hostname 127.0.0.1'",
     "restart": "bash scripts/restart.sh",
@@ -32,6 +34,8 @@
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/qrcode": "^1.5.6",
+    "knip": "^6.44.1",
+    "oxlint": "^1.91.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }

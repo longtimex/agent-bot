@@ -134,7 +134,7 @@ export class ProgressTracker {
   #escape(str: string): string {
     // Backslash is stripped too: legacy Markdown treats it as an escape character,
     // and one stray `\` before punctuation makes the whole send fail to parse
-    return clip(str.replace(/[_*`\[\]\\]/g, " "), 80) ?? ""
+    return clip(str.replace(/[_*`[\]\\]/g, " "), 80) ?? ""
   }
 
   async finish(): Promise<void> {

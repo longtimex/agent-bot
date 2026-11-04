@@ -46,6 +46,7 @@ export function res_attachment(res: ServerResponse, filename: string, contentTyp
     "content-type": contentType,
     "content-length": Buffer.byteLength(body),
     "content-disposition": `attachment; filename="${filename}"`,
+    "x-content-type-options": "nosniff",
   })
   res.end(body)
 }
@@ -56,6 +57,7 @@ export function res_attachment_binary(res: ServerResponse, filename: string, con
     "content-type": contentType,
     "content-length": body.byteLength,
     "content-disposition": `attachment; filename="${filename}"`,
+    "x-content-type-options": "nosniff",
   })
   res.end(body)
 }

@@ -122,9 +122,9 @@ fun ModelsScreen(vm: AppViewModel) {
     if (adding) {
         TextPromptDialog(
             title = "添加自定义模型",
-            hint = "格式：简称 provider/modelID [显示名]。例如：mymodel custom/my-model-id 我的模型。",
+            hint = "格式：简称 provider/modelID [显示名] [--attachment] [--context 200000] [--output 64000]。例如：mymodel custom/my-model-id 我的模型 --attachment。",
             confirmLabel = "添加",
-            placeholder = "mymodel custom/my-model-id 我的模型",
+            placeholder = "mymodel custom/my-model-id 我的模型 --attachment",
             onDismiss = { adding = false },
             onConfirm = { input ->
                 vm.addCustomModel(input)

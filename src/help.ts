@@ -132,16 +132,22 @@ export const CC_HELP = `🔌 *cc-switch 控制台*
 • \`/cc failover show|list|available|add|remove|move|clear\`（clear 需确认）
 • \`/cc settings show|language [en|zh]\`
 
+*Hermes 记忆*
+• \`/cc hermes memory limits\` · \`/cc hermes memory show [memory|user]\`
+• \`/cc hermes memory set <memory|user> --content <内容>\`（覆盖整份文件，需确认）
+• \`/cc hermes memory clear <memory|user>\`（需确认）
+• \`/cc hermes memory enable|disable <memory|user>\`（停用后 Hermes 加载时跳过它）
+
 *其他*
 • \`/cc deeplink <ccswitch://网址>\`（导入会覆盖配置，需确认）
 • \`/cc update --check\` · \`/cc update\`（升级二进制，需确认）
-• \`/cc hermes memory ...\`
 • \`/cc run <任意非交互参数>\`（通用入口）
 • \`/cc model ...\`（模型与 Agent 管理）
 
 ⚠️ 只能由 TUI/编辑器/OAuth 完成的交互命令无法在聊天中执行：
 \`provider edit\`、\`mcp edit\`、\`prompts edit\`、\`auth login\`、\`sessions resume\`、
-\`config restore\`、\`start\`、\`proxy serve\`、前台 \`daemon start\`、\`completions\`、\`interactive\`。
+\`config restore\`、\`start\`、\`proxy serve\`、前台 \`daemon start\`、\`completions\`、\`interactive\`、
+\`hermes memory open-dir\`。
 输出中的 API Key / Token 会自动打码。`
 
 export interface HelpSection {

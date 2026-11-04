@@ -69,6 +69,17 @@ data class Session(
 }
 
 /**
+ * `POST /agent` answers with the new session plus the note Telegram shows: pointing at the
+ * engine already in use, or at a CLI whose binary is missing, both say so here.
+ */
+@Serializable
+data class EngineSwitch(
+    val ok: Boolean = false,
+    val session: Session = Session(),
+    val message: String? = null,
+)
+
+/**
  * What a session has really run. The server reads this from the usage store both ends write
  * to, so the other end's numbers are not guessed. Prompt text never travels — only counts
  * and the last activity timestamp.
@@ -335,6 +346,29 @@ data class DirInfo(
     val note: String? = null,
 )
 
+/** One selectable subdirectory of a server listing. */
+@Serializable
+data class DirEntry(
+    val name: String,
+    val path: String,
+)
+
+/**
+ * One level of the server's directory tree (`GET /dir/browse`). Directories only, and never
+ * a change to the session — the listing shows what `POST /dir` would already accept.
+ */
+@Serializable
+data class DirListing(
+    val path: String = "",
+    val parent: String? = null,
+    val home: String = "",
+    val cwd: String = "",
+    val defaultWorkDir: String = "",
+    val sessionDir: String = "",
+    val dirs: List<DirEntry> = emptyList(),
+    val truncated: Boolean = false,
+)
+
 @Serializable
 data class Health(
     val ok: Boolean = false,
@@ -558,6 +592,43 @@ data class CcExecResult(
     val code: Int = 0,
     val message: String = "",
     val text: String = "",
+)
+
+/** Answer to the raw cc-switch passthrough; `command` is the redacted words that ran. */
+@Serializable
+data class CcRunResult(
+    val ok: Boolean = false,
+    val code: Int = 0,
+    val command: String = "",
+    val message: String = "",
+    val text: String = "",
+)
+
+/**
+ * Hermes' two memory blobs with cc-switch's limits summary. The enable flags are read out
+ * of that summary's wording, so a cc-switch change leaves them null instead of wrong.
+ */
+@Serializable
+data class HermesMemory(
+    val limits: String = "",
+    val memory: String = "",
+    val user: String = "",
+    val memoryEnabled: Boolean? = null,
+    val userEnabled: Boolean? = null,
+)
+
+/** POST /cc/hermes answers with the state as stored, so the editor never shows local text. */
+@Serializable
+data class HermesResult(
+    val ok: Boolean = false,
+    val kind: String = "",
+    val action: String = "",
+    val message: String = "",
+    val limits: String = "",
+    val memory: String = "",
+    val user: String = "",
+    val memoryEnabled: Boolean? = null,
+    val userEnabled: Boolean? = null,
 )
 
 @Serializable

@@ -94,6 +94,8 @@ export class CcSwitchError extends Error {}
 const DEFAULT_TIMEOUT_MS = 20_000
 /** Commands that shell out to a provider or the skill market need more than the 20s default. */
 export const CC_LONG_TIMEOUT_MS = 90_000
+/** `cc-switch update` replaces the running binary and may download first. */
+export const CC_UPDATE_TIMEOUT_MS = 180_000
 const SPEEDTEST_TIMEOUT_MS = CC_LONG_TIMEOUT_MS
 const KILL_ESCALATION_MS = 5_000
 const MAX_ID_LENGTH = 128

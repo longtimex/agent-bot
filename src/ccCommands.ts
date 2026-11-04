@@ -4,25 +4,31 @@ import { InlineKeyboard } from "grammy"
 import { escapeMarkdown, clip, pruneChatState, type Panel } from "./messages.js"
 import { AVAILABLE_MODELS, reloadCustomModels } from "./models.js"
 import { CC_HELP, CC_SUB_ALIASES } from "./help.js"
-import { CcSwitchService, CC_LONG_TIMEOUT_MS, redactSecrets, stripAnsi, type CcSwitchProvider, type CcSwitchProviderDraft, type CcSwitchSpeedtest } from "./ccswitch.js"
+import {
+  CcSwitchService,
+  CC_LONG_TIMEOUT_MS,
+  CC_UPDATE_TIMEOUT_MS,
+  redactSecrets,
+  stripAnsi,
+  type CcSwitchProvider,
+  type CcSwitchProviderDraft,
+  type CcSwitchSpeedtest,
+} from "./ccswitch.js"
+import {
+  ccAppFlagToken,
+  ccBlockedReason,
+  ccConfirmPlan,
+  isLongCcCommand,
+  type CcActionPlan,
+} from "./ccGuards.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 import type { Logger } from "./logger.js"
 import type { SessionStore } from "./store.js"
 import type { BotConfig } from "./config.js"
 
-interface PendingCcAction {
+interface PendingCcAction extends CcActionPlan {
   /** Confirmation tokens are only valid in the chat that requested them. */
   chatId: number
-  args: string[]
-  label: string
-  bare?: boolean
-  pty?: boolean
-  appendArgs?: string[]
-  timeoutMs?: number
-  kind?: "provider-use" | "model-delete"
-  providerId?: string
-  modelKey?: string
-  modelForce?: boolean
   createdAt: number
 }
 
@@ -118,8 +124,6 @@ export function parseProviderAdd(tokens: string[]): CcSwitchProviderDraft | stri
   return draft
 }
 
-const CC_UPDATE_TIMEOUT_MS = 180_000
-
 const CC_CONFIRM_TTL_MS = 5 * 60_000
 
 /**
@@ -205,7 +209,7 @@ export class CcCommands {
     if (error) {
       lines.push(`\n⚠️ 读取 Provider 失败：${escapeMarkdown(clip(error, 300) ?? "")}`)
     } else if (providers.length === 0) {
-      lines.push("\n暂无 Provider。可在 cc-switch TUI 或 \`cc-switch provider add\` 中添加。")
+      lines.push("\n暂无 Provider。可在 cc-switch TUI 或 `cc-switch provider add` 中添加。")
     } else {
       const current = providers.find((provider) => provider.current)
       lines.push(`当前：*${escapeMarkdown(current?.name || current?.id || "未设置")}*`)
@@ -788,9 +792,8 @@ export class CcCommands {
       await this.#host.sendTextMessage(chatId, "用法：`/cc run provider list`、`/cc run mcp enable foo --apps opencode` 等。")
       return
     }
-    if (args.includes("--app") || args.includes("-a")) {
-      throw new Error("不要在 /cc run 中传 --app；应用类型由 CC_SWITCH_APP 固定。")
-    }
+    const appFlag = ccAppFlagToken(args)
+    if (appFlag) throw new Error(`不要在 /cc run 中传 ${appFlag}；应用类型由 CC_SWITCH_APP 固定。`)
     if (args[0] === "deeplink") {
       await this.#requestCcDeeplinkImport(chatId, args[1] ?? "")
       return
@@ -801,112 +804,22 @@ export class CcCommands {
   async #dispatchCc(chatId: number, args: string[]): Promise<void> {
     // Every cc-switch command accepts -a/--app; letting one through would retarget
     // another app's config, so the flag is rejected in all its spellings
-    if (args.some((token) => /^(-a|--app)(=|$)/.test(token))) {
-      throw new Error("不要在 /cc 命令中传 --app；应用类型由 CC_SWITCH_APP 固定。")
-    }
+    const appFlag = ccAppFlagToken(args)
+    if (appFlag) throw new Error(`不要在 /cc 命令中传 ${appFlag}；应用类型由 CC_SWITCH_APP 固定。`)
 
-    const blocked = this.#ccBlockedReason(args)
+    const blocked = ccBlockedReason(args)
     if (blocked) {
       await this.#host.sendTextMessage(chatId, blocked)
       return
     }
 
-    const risk = this.#ccConfirmReason(args)
+    const risk = ccConfirmPlan(args)
     if (risk) {
       await this.#requestCcConfirm(chatId, { args, ...risk })
       return
     }
 
     await this.#executeCc(chatId, args, { label: args.slice(0, 3).join(" ") })
-  }
-
-  #ccBlockedReason(args: string[]): string | undefined {
-    const [group = "", sub = ""] = args
-    const key = `${group} ${sub}`.trim().toLowerCase()
-    const blocked = new Map<string, string>([
-      ["interactive", "交互式 TUI 无法在 Telegram 中使用；请使用 `/cc help` 查看可用命令。"],
-      ["completions", "shell 补全命令与聊天无关，已跳过。"],
-      ["start", "`start` 会启动交互式 CLI，无法在 Telegram 中运行。"],
-      ["proxy serve", "`proxy serve` 是前台常驻进程，无法在 Telegram 中运行；请用 `proxy enable`。"],
-      ["auth login", "OAuth 登录需要在终端完成设备授权，无法在 Telegram 中运行。"],
-      ["sessions resume", "恢复会话会启动交互式 CLI，无法在 Telegram 中运行。"],
-      ["provider edit", "`provider edit` 依赖交互式 TUI；可先用 `provider add` 新建，或在服务器上编辑。"],
-      ["mcp edit", "`mcp edit` 依赖交互式 TUI；可删除后用 `/cc mcp add <JSON>` 重建。"],
-      ["mcp add", "原生 `mcp add` 是交互式的；请用 `/cc mcp add <JSON>` 导入。"],
-      ["prompts edit", "`prompts edit` 依赖外部编辑器；可用 `/cc prompts new` 新建预设。"],
-      ["prompts create", "原生 `prompts create` 依赖外部编辑器；请用 `/cc prompts new <名称> <内容>`。"],
-      ["config restore", "`config restore` 需要在备份列表中交互选择，无法在 Telegram 中运行。"],
-    ])
-    if (blocked.has(key)) return blocked.get(key)
-    if (group === "daemon" && sub === "start" && !args.includes("--detach")) {
-      return "前台 `daemon start` 会阻塞；请使用 `/cc daemon start --detach`。"
-    }
-    return undefined
-  }
-
-  #ccConfirmReason(
-    args: string[],
-  ): Omit<PendingCcAction, "args" | "createdAt" | "label" | "chatId"> & { label: string } | undefined {
-    const [group = "", sub = ""] = args
-    const key = `${group} ${sub}`.trim().toLowerCase()
-    switch (key) {
-      case "provider use":
-        return {
-          label: `切换 Provider 到 \`${args[2] ?? "?"}\``,
-          kind: "provider-use",
-          providerId: args[2] ?? "",
-        }
-      // Canonical spelling of `use`; /cc provider switch and /cc run bypass the
-      // /cc use shortcut, so the same confirmation has to cover it here
-      case "provider switch":
-        return {
-          label: `切换 Provider 到 \`${args[2] ?? "?"}\`（修改 cc-switch 全局配置）`,
-          kind: "provider-use",
-          providerId: args[2] ?? "",
-        }
-      case "use":
-        return {
-          label: `切换 Provider 到 \`${args[1] ?? "?"}\``,
-          kind: "provider-use",
-          providerId: args[1] ?? "",
-        }
-      case "provider delete":
-        return { label: `删除 Provider \`${args[2] ?? "?"}\``, pty: true }
-      case "mcp delete":
-        return { label: `删除 MCP 服务器 \`${args[2] ?? "?"}\``, pty: true }
-      case "prompts delete":
-        return { label: `删除提示词预设 \`${args[2] ?? "?"}\``, pty: true }
-      case "skills uninstall":
-        return { label: `卸载技能 \`${args[2] ?? "?"}\``, pty: true }
-      case "auth remove":
-        return { label: `移除 ChatGPT 账号 \`${args[2] ?? "?"}\``, pty: true }
-      case "auth logout":
-        return { label: "登出并清除所有 ChatGPT OAuth 数据", pty: true }
-      // Without --confirm cc-switch only runs a dry run; with it a banked reset
-      // credit is burned, which deserves the same gate as `provider quota --reset`
-      case "auth reset-quota":
-        return args.includes("--confirm") ? { label: "消耗一次 Codex 配额重置额度" } : undefined
-      case "config import":
-        return { label: `导入配置 \`${args[2] ?? "?"}\`（会覆盖当前数据库）`, pty: true }
-      case "config reset":
-        return { label: "重置 cc-switch 配置为默认值", pty: true }
-      case "sessions delete":
-        return { label: `删除会话 \`${args[2] ?? "?"}\``, appendArgs: ["--yes"] }
-      case "failover clear":
-        return { label: "清空故障转移队列", appendArgs: ["--yes"] }
-      case "failover enable":
-        return { label: "启用自动故障转移（可能同时开启代理路由）", pty: true }
-      case "provider quota":
-        if (args.includes("--reset")) {
-          return { label: "消耗一次配额重置额度", appendArgs: ["--confirm"] }
-        }
-        return undefined
-      default:
-        if (group === "update" && !args.includes("--check")) {
-          return { label: "升级 cc-switch 二进制到最新版本", pty: true, timeoutMs: CC_UPDATE_TIMEOUT_MS }
-        }
-        return undefined
-    }
   }
 
   /** cc-switch deep links overwrite provider/MCP/prompt config, so they always confirm. */
@@ -947,23 +860,12 @@ export class CcCommands {
     )
   }
 
-  #isLongCcCommand(args: string[]): boolean {
-    const [group = "", sub = ""] = args
-    if (group === "update" || group === "deeplink") return true
-    if (group === "provider" && ["speedtest", "stream-check", "fetch-models", "quota"].includes(sub)) return true
-    if (group === "sessions" && sub === "search") return true
-    if (group === "config" && ["import", "export", "backup"].includes(sub)) return true
-    if (group === "skills" && ["install", "market", "update", "check-updates", "discover", "sync"].includes(sub)) return true
-    if (group === "daemon" && sub === "start") return true
-    return false
-  }
-
   async #executeCc(
     chatId: number,
     args: string[],
     options: { bare?: boolean; pty?: boolean; timeoutMs?: number; label?: string } = {},
   ): Promise<void> {
-    const timeoutMs = options.timeoutMs ?? (this.#isLongCcCommand(args) ? CC_LONG_TIMEOUT_MS : undefined)
+    const timeoutMs = options.timeoutMs ?? (isLongCcCommand(args) ? CC_LONG_TIMEOUT_MS : undefined)
     // The echoed preview can quote a token typed into the command (an API URL, a
     // password flag value), so it gets the same redaction as command output; long
     // tokens are clipped so escaping cannot push the line past the message limit
