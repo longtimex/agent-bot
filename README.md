@@ -193,6 +193,18 @@ npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
 
 ### 第 4 步：安卓 App（可选）
 
+#### 直接下载
+
+从 [GitHub Release](https://github.com/longtimex/agent-bot/releases/tag/android-v1.0.0) 下载 `agent-bot.apk`，或在仓库中直接下载 [`android/releases/agent-bot-v1.0.0.apk`](android/releases/agent-bot-v1.0.0.apk)。
+
+APK SHA-256（[`android/releases/agent-bot-v1.0.0.apk.sha256`](android/releases/agent-bot-v1.0.0.apk.sha256)）：
+
+```text
+89aae3ad7de3c1ef77897c6342c1b27f216b735f90498bcab40323a23d7647aa
+```
+
+#### 从源码构建
+
 要求 JDK 17 与 Android Studio（或 Gradle 8.9+）：
 
 ```bash

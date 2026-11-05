@@ -1,0 +1,53 @@
+name: Publish Android APK
+
+on:
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release files
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          apk="android/releases/agent-bot-v${version}.apk"
+          checksum="${apk}.sha256"
+          test -f "$apk"
+          test -f "$checksum"
+          sha256sum --check --strict "$checksum"
+          test "$(sha256sum "$apk" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$checksum")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "apk=$apk" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              "${{ steps.assets.outputs.apk }}#agent-bot.apk" \
+              "${{ steps.assets.outputs.checksum }}#agent-bot.apk.sha256" \
+              --clobber
+          else
+            gh release create "$tag" \
+              "${{ steps.assets.outputs.apk }}#agent-bot.apk" \
+              "${{ steps.assets.outputs.checksum }}#agent-bot.apk.sha256" \
+              --verify-tag \
+              --title "Agent Bot Android v${{ steps.assets.outputs.version }}" \
+              --notes "Agent Bot Android v${{ steps.assets.outputs.version }}. Download agent-bot.apk and verify it against agent-bot.apk.sha256."
+          fi
