@@ -25,7 +25,8 @@ jobs:
           checksum="${apk}.sha256"
           test -f "$apk"
           test -f "$checksum"
-          sha256sum --check --strict "$checksum"
+          # The checksum file names the APK relative to its own directory.
+          (cd "$(dirname "$checksum")" && sha256sum --check --strict "$(basename "$checksum")")
           test "$(sha256sum "$apk" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$checksum")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "apk=$apk" >> "$GITHUB_OUTPUT"
