@@ -7,8 +7,9 @@ export function assertSafeQuery(raw: string, label: string): string {
   if (!value) throw new ApiError(400, `${label} 不能为空`)
   if (value.length > 128) throw new ApiError(400, `${label} 过长（上限 128 字）`)
   if (value.startsWith("-")) throw new ApiError(400, `${label} 不能以 - 开头`)
-  // One argv token, and no control characters reaching the terminal output
-  if (!/^[\w\s.@:/+-]+$/u.test(value)) throw new ApiError(400, `${label} 含有不支持的字符`)
+  // One argv token with no control characters reaching the terminal output. \w is ASCII-only,
+  // and a Latin-only set would reject the Chinese keywords both clients search session titles with.
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) throw new ApiError(400, `${label} 含有不支持的字符`)
   return value
 }
 

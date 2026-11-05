@@ -119,6 +119,28 @@ export function resolveApiToken(cfg: BotConfig): string {
 }
 
 /**
+ * The address the App should dial, or nothing when there is no honest one to hand out.
+ * `bind` alone is not enough: a container listens on 0.0.0.0 while the phone needs the host's
+ * address, so API_PUBLIC_URL is the operator's answer and the QR stays away when it is unset.
+ */
+export function resolvePairingUrl(cfg: BotConfig): string | undefined {
+  if (cfg.api.publicUrl) return cfg.api.publicUrl
+  const { bind, port } = cfg.api
+  if (bind === "0.0.0.0" || bind === "::" || bind === "127.0.0.1" || bind === "localhost" || bind === "::1") {
+    return undefined
+  }
+  return `http://${bind.includes(":") ? `[${bind}]` : bind}:${port}`
+}
+
+/**
+ * The JSON inside the /api pairing QR. The App's 扫码配对 reads `url`, `token` and `enc`, so the
+ * names are checked against that screen by tests/appParity.test.ts rather than by eye.
+ */
+export function pairingQrPayload(url: string, token: string, encKey?: string): Record<string, string> {
+  return { url, token, ...(encKey ? { enc: encKey } : {}) }
+}
+
+/**
  * Pairing key for message-level encryption, created on first start when
  * API_ENCRYPTION=1. It deliberately never appears in chat output — the App
  * receives it through the /api QR code alongside the address and token.
@@ -154,6 +176,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
   readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
   readonly #resKeys = new WeakMap<ServerResponse, Buffer>()
+  /** Requests whose body could not be decrypted: the peer lacks the current key, so its answer must stay readable. */
+  readonly #keyMismatch = new WeakSet<IncomingMessage>()
   /** Responses that may be gzipped, decided once from the request's Accept-Encoding. */
   readonly #gzipResponses = new WeakSet<ServerResponse>()
   /** Failed bearer attempts are counted per client address so a static token cannot be brute-forced. */
@@ -231,17 +255,24 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       this.#json(res, 404, { error: "未知的 API 路径" })
       return
     }
-    const limit = this.#authLimit.check(client)
-    if (!limit.allowed) {
-      this.#json(
-        res,
-        429,
-        { error: `认证失败次数过多，请在 ${limit.retryAfterSec} 秒后重试` },
-        { "retry-after": String(limit.retryAfterSec) },
-      )
-      return
-    }
-    if (!this.#authorized(req)) {
+    // Authorize before the failure budget is consulted. Behind nginx every phone shares one
+    // socket address, and this limiter is keyed on it, so a block earned by one stale-token
+    // device used to refuse the devices holding the right token: the App went silent for five
+    // minutes and re-scanning the QR changed nothing, because the correct answer was being
+    // rejected for somebody else's failures. Wrong tokens still pay the full budget.
+    if (this.#authorized(req)) {
+      this.#authLimit.recordSuccess(client)
+    } else {
+      const limit = this.#authLimit.check(client)
+      if (!limit.allowed) {
+        this.#json(
+          res,
+          429,
+          { error: `认证失败次数过多，请在 ${limit.retryAfterSec} 秒后重试` },
+          { "retry-after": String(limit.retryAfterSec) },
+        )
+        return
+      }
       const failed = this.#authLimit.recordFailure(client)
       if (!failed.allowed) {
         this.#log.warn(`api auth blocked for ${client} after repeated failures`)
@@ -249,7 +280,6 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       this.#json(res, 401, { error: "未授权：请在请求头携带 Authorization: Bearer <token>" })
       return
     }
-    this.#authLimit.recordSuccess(client)
     if (/\bgzip\b/i.test(req.headers["accept-encoding"] ?? "")) this.#gzipResponses.add(res)
 
     const segments = url.pathname.slice(API_PREFIX.length).split("/").filter(Boolean)
@@ -1152,7 +1182,11 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       try {
         inner = decryptPayload(encKey, raw.toString("utf8"))
       } catch (err) {
-        throw new ApiError(400, `解密请求体失败：${(err as Error).message}`)
+        // An unreadable body means the peer holds a different key (the bot rotated
+        // API_ENCRYPTION or the App re-scanned): encrypting the explanation with our
+        // current key would hide the one message that tells the user to re-pair.
+        this.#keyMismatch.add(req)
+        throw new ApiError(400, `解密请求体失败：${(err as Error).message}。若服务器刚更换过加密密钥，请在 App 设置里清空密钥或重新扫码。`)
       }
       return parseObject(inner)
     }
@@ -1166,7 +1200,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     extraHeaders: Record<string, string> = {},
   ): void {
     let payload = JSON.stringify(body)
-    const encKey = this.#resKeys.get(res)
+    const encKey =
+      res.req && this.#keyMismatch.has(res.req) ? undefined : this.#resKeys.get(res)
     const headers: Record<string, string | number> = {
       "content-type": "application/json; charset=utf-8",
       // API responses can carry the pairing/token state and task text.

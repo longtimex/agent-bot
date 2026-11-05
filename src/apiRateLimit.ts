@@ -25,7 +25,8 @@ const ALLOWED: AuthLimitDecision = { allowed: true, retryAfterSec: 0 }
 /**
  * Counts failed bearer-token attempts per client address. The token is static, so a
  * brute-force guard is the only server-side cost an unauthenticated caller can be made
- * to pay; successful authentication clears the record immediately.
+ * to pay. A cooldown is not a refusal of the address's legitimate traffic: the server
+ * authorizes first and only consults this budget for a wrong token.
  */
 export class AuthFailureLimiter {
   readonly #maxFailures: number
@@ -68,7 +69,16 @@ export class AuthFailureLimiter {
     return this.#blocked(entry, now)
   }
 
-  recordSuccess(key: string): void {
+  /**
+   * A good token resets its address's failure count, but not a cooldown that count already
+   * triggered. Behind nginx every phone is the same address, so letting an authenticated request
+   * from a working App clear the block would hand an attacker sitting on the same proxy unlimited
+   * tries: the App's own polling would launder the cooldown away between every attempt.
+   */
+  recordSuccess(key: string, now = Date.now()): void {
+    const entry = this.#entries.get(key)
+    if (!entry) return
+    if (entry.blockedUntil > now) return
     this.#entries.delete(key)
   }
 

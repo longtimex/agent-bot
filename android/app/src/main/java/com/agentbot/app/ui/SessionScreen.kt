@@ -73,7 +73,7 @@ fun SessionScreen(vm: AppViewModel) {
     val currentTz = vm.timezone ?: session?.timezone
     val others = vm.peers.filter { !it.current }
     // Peer ages are drawn once per reload (navigation, 刷新, foreground) — no ticking clock here.
-    val now = System.currentTimeMillis()
+    val now = vm.serverNow()
 
     Column(
         modifier = Modifier
@@ -388,14 +388,14 @@ private fun InfoRow(label: String, value: String) {
 @Composable
 fun QueueScreen(vm: AppViewModel) {
     var confirmClear by remember { mutableStateOf(false) }
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var now by remember { mutableStateOf(vm.serverNow()) }
     val active = vm.queue.isNotEmpty()
     LaunchedEffect(active) {
-        now = System.currentTimeMillis()
+        now = vm.serverNow()
         var ticks = 0
         while (active) {
             delay(1_000)
-            now = System.currentTimeMillis()
+            now = vm.serverNow()
             if (++ticks % 5 == 0) vm.pollQueue()
         }
     }

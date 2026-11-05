@@ -88,7 +88,7 @@ fun StatusScreen(vm: AppViewModel) {
                     StatusLine("平均耗时", AppViewModel.formatDuration(usage.avgMs))
                     if (usage.lastAt > 0) {
                         val last = listOfNotNull(
-                            "${AppViewModel.formatDuration((System.currentTimeMillis() - usage.lastAt).coerceAtLeast(0))}前",
+                            "${AppViewModel.formatDuration((vm.serverNow() - usage.lastAt).coerceAtLeast(0))}前",
                             usage.lastEngine,
                             usage.lastModel,
                         ).joinToString(" · ")

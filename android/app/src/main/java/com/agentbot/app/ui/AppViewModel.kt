@@ -59,13 +59,16 @@ import com.agentbot.app.data.TaskMedia
 import com.agentbot.app.data.TaskNotifier
 import com.agentbot.app.data.Usage
 import com.agentbot.app.data.UsageTrendDay
-import com.agentbot.app.data.decodeMediaBitmap
+import com.agentbot.app.data.decodeMediaFile
 import com.agentbot.app.data.mediaMime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -117,6 +120,12 @@ class AppViewModel(
 ) : ViewModel() {
     private val appContext = context.applicationContext
     private val api = ApiClient()
+
+    /**
+     * The server's clock, for labels built from server timestamps (`startedAt`, `lastAt`, a history
+     * row's time). The device's own clock is a different clock and the two are never synced here.
+     */
+    fun serverNow(): Long = api.serverNow()
 
     var screen by mutableStateOf<Screen>(Screen.Chat)
         private set
@@ -426,14 +435,46 @@ class AppViewModel(
 
     fun updateDraft(text: String) {
         draft = text
-        LocalStore.saveDraft(appContext, text)
+        // Every keystroke lands here, and one preferences commit serializes the whole file —
+        // including the stored chat. Conflated, typing keeps only the last text worth writing.
+        draftWrites.trySend(text)
     }
 
     private val polls = mutableMapOf<String, Job>()
 
+    /**
+     * Task ids with a retry request in flight. POST /task/{id}/retry is not idempotent — the server
+     * starts a whole new Agent run for every accepted call — so a second tap issued while the first
+     * request was still on the wire used to bill two complete runs for one press.
+     */
+    private val retrying = mutableSetOf<String>()
+
+    /**
+     * The chat and the unsent draft are handed to one background writer instead of being stored on
+     * the caller's thread. Conflated: a burst of SSE progress frames (or keystrokes) keeps only the
+     * newest value, and the writer never exits while values may still arrive, so nothing queued
+     * during a write can be dropped.
+     */
+    private val historyWrites = Channel<List<ChatMessage>>(Channel.CONFLATED)
+    private val draftWrites = Channel<String>(Channel.CONFLATED)
+
     init {
         messages = LocalStore.loadMessages(appContext)
         draft = LocalStore.loadDraft(appContext)
+        // The two stored values share one writer each and stay alive for the ViewModel: a writer
+        // that ends between sends is how a queued snapshot goes missing.
+        viewModelScope.launch(Dispatchers.IO) {
+            for (snapshot in historyWrites) {
+                LocalStore.writeHistory(appContext, snapshot)
+                delay(HISTORY_WRITE_DELAY_MS)
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            for (text in draftWrites) {
+                LocalStore.saveDraft(appContext, text)
+                delay(DRAFT_WRITE_DELAY_MS)
+            }
+        }
         TaskNotifier.ensureChannel(appContext)
         // A task may still be running after the process was killed: resume polling it
         if (settings.connection() != null) {
@@ -458,6 +499,38 @@ class AppViewModel(
 
     fun removeAttachment(index: Int) {
         pendingAttachments = pendingAttachments.filterIndexed { i, _ -> i != index }
+    }
+
+    /** Reads a picked file away from the main thread; 15 MB of Base64 would freeze the picker. */
+    fun stageAttachmentFrom(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                stageAttachment(withContext(Dispatchers.IO) { LocalStore.read(context, uri) })
+            } catch (err: Exception) {
+                connectionError = "读取附件失败：${err.message}"
+            }
+        }
+    }
+
+    /**
+     * Reads a finished voice note the same way and sends it, as Telegram does when the button is
+     * released. The recording is deleted here rather than by the caller: reading it is a suspend
+     * call now, so a cleanup that ran beside it could remove the file before it was opened.
+     */
+    fun stageVoiceNote(context: Context, file: File, onStaged: () -> Unit) {
+        viewModelScope.launch {
+            try {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+                val attachment = withContext(Dispatchers.IO) { LocalStore.read(context, uri) }
+                // Some resolvers cannot name .m4a; keep the server's audio path intact.
+                val audio = if (attachment.mime.startsWith("audio/")) attachment else attachment.copy(mime = "audio/mp4")
+                if (stageAttachment(audio)) onStaged()
+            } catch (err: Exception) {
+                connectionError = "语音发送失败：${err.message}"
+            } finally {
+                runCatching { file.delete() }
+            }
+        }
     }
 
     /** Text shared from another app, handed to the chat input once it is composed. */
@@ -545,11 +618,20 @@ class AppViewModel(
 
     private fun conn(): Connection = settings.connection() ?: throw NotConfiguredException()
 
-    /** Runs a suspended block, surfacing failures as an in-app error banner. */
+    /**
+     * Runs a suspended block, surfacing failures as an in-app error banner.
+     *
+     * Cancellation is not a failure: leaving the Activity clears the ViewModel scope while a
+     * request is mid-flight, and catching that as an error would report a healthy call as broken.
+     */
     private fun guarded(label: String, block: suspend () -> Unit): Job = viewModelScope.launch {
         try {
             block()
+        } catch (err: CancellationException) {
+            throw err
         } catch (err: Exception) {
+            // A rejected token already arrives here as UNAUTHORIZED_HINT: ApiException is built
+            // from serverFailure(), so no branch has to special-case the server's raw 401 text.
             connectionError = if (err is NotConfiguredException) err.message else "${label}失败：${err.message}"
         }
     }
@@ -628,6 +710,8 @@ class AppViewModel(
     private fun silent(block: suspend () -> Unit) = viewModelScope.launch {
         try {
             block()
+        } catch (err: CancellationException) {
+            throw err
         } catch (_: Exception) {
         }
     }
@@ -1525,32 +1609,53 @@ class AppViewModel(
 
     fun stopTask(id: String) {
         guarded("停止任务") {
-            api.stopTask(conn(), id)
+            try {
+                api.stopTask(conn(), id)
+                toast = "已请求停止"
+            } catch (err: ApiException) {
+                // The queue list is refreshed asynchronously, so a row can have settled between
+                // being drawn and being tapped. That is not an error worth an error banner.
+                if (err.code != 409) throw err
+                toast = "这条任务已经结束了"
+            }
             refreshQueue()
-            toast = "已请求停止"
         }
     }
 
     /** Re-runs one failed or stopped assistant message; the server replays the original prompt. */
     fun retryTask(taskId: String) {
-        val index = messages.indexOfFirst { it.taskId == taskId }
-        if (index < 0) return
+        if (messages.none { it.taskId == taskId }) return
+        if (!retrying.add(taskId)) return
         viewModelScope.launch {
             try {
                 // the stored task carries attachments and the one-off model pin, which a
                 // client-side text copy would silently drop
                 val task = api.retryTask(conn(), taskId)
-                messages = messages.toMutableList().also { list ->
-                    list[index] = ChatMessage(ChatMessage.Role.ASSISTANT, "", taskId = task.id, status = task.status)
+                // The list can change while the request is in flight (新建会话 empties it),
+                // so the bubble is located again by task id instead of a captured index.
+                val position = messages.indexOfFirst { it.taskId == taskId }
+                val replacement = ChatMessage(ChatMessage.Role.ASSISTANT, "", taskId = task.id, status = task.status)
+                messages = if (position < 0) {
+                    messages + replacement
+                } else {
+                    messages.toMutableList().also { list -> list[position] = replacement }
                 }
                 persistMessages()
                 pollTask(task.id)
             } catch (err: ApiException) {
                 // The server prunes old tasks; then only the local history can help,
                 // at the cost of attachments and the model pin
-                if (err.code == 404) resendFromHistory(index) else connectionError = "重试失败：${err.message}"
+                if (err.code != 404) {
+                    connectionError = "重试失败：${err.message}"
+                } else {
+                    val position = messages.indexOfFirst { it.taskId == taskId }
+                    if (position < 0) connectionError = "重试失败：这条消息已不在聊天里"
+                    else resendFromHistory(position)
+                }
             } catch (err: Exception) {
                 connectionError = "重试失败：${err.message}"
+            } finally {
+                retrying.remove(taskId)
             }
         }
     }
@@ -1560,6 +1665,7 @@ class AppViewModel(
      * (prompt, attachments and model pin included) comes back as a new one.
      */
     fun retryRecord(taskId: String) {
+        if (!retrying.add(taskId)) return
         viewModelScope.launch {
             try {
                 val task = api.retryTask(conn(), taskId)
@@ -1574,6 +1680,8 @@ class AppViewModel(
                 refreshQueue()
             } catch (err: Exception) {
                 connectionError = "重试失败：${err.message}"
+            } finally {
+                retrying.remove(taskId)
             }
         }
     }
@@ -1977,7 +2085,10 @@ class AppViewModel(
         messages = emptyList()
         mediaImages = emptyMap()
         mediaErrors = emptySet()
-        LocalStore.clearMessages(appContext)
+        // Trailing history writes are the only writer of the stored chat, so the reset goes
+        // through them too: calling clearMessages here could be overtaken by an in-flight
+        // snapshot and bring the old bubbles back on the next launch.
+        persistMessages()
         guarded("新会话") {
             api.newSession(conn())
             session = api.session(conn())
@@ -2036,7 +2147,9 @@ class AppViewModel(
                 oneOffEngine = null
                 oneOffModel = null
                 oneOffChoices = ModelChoices()
-                pendingAttachments = emptyList()
+                // Only the files this request actually carried. Clearing the strip instead would
+                // silently drop an attachment the user picked while a 10 MB upload was in flight.
+                pendingAttachments = pendingAttachments.filterNot { staged -> attachments.any { it === staged } }
                 val sentAt = System.currentTimeMillis()
                 val sent = attachments.map { SentAttachment(it.name, it.mime, it.sizeBytes) }
                 messages = messages + ChatMessage(ChatMessage.Role.USER, raw, at = sentAt, attachments = sent) +
@@ -2082,11 +2195,27 @@ class AppViewModel(
         if (!send(lastUser.text)) toast = "任务执行中，请先等待或停止当前任务"
     }
 
+    /**
+     * The error banner's 重试. The banner is global, so most of what reaches it has nothing to do
+     * with the last task: an attachment that could not be read, a screen that failed to load, a
+     * send that never left the phone. Replaying the newest task for those started a second, fully
+     * billed Agent run whose answer the user had not asked for, so the retry is limited to the one
+     * case where the last task really is the thing that broke.
+     */
+    fun retryFromBanner() {
+        val last = messages.lastOrNull { it.role == ChatMessage.Role.ASSISTANT && it.taskId != null }
+        connectionError = null
+        if (last?.status == "failed" || last?.status == "cancelled") retryLastTask()
+    }
+
     fun stop() {
         guarded("停止") {
-            api.stopTasks(conn())
+            // Say what actually happened. Reporting success when the queue was empty — or when a
+            // non-interruptible /cc job holds it — left the user believing the cloud agent had
+            // stopped, with the task still running and burning tokens.
+            val stopped = api.stopTasks(conn())
             if (screen == Screen.Queue) refreshQueue()
-            toast = "已请求停止"
+            toast = if (stopped.isEmpty()) "当前没有正在执行或排队中的任务可停止" else "已请求停止 ${stopped.size} 条任务"
         }
     }
 
@@ -2096,14 +2225,25 @@ class AppViewModel(
             try {
                 try {
                     // Preferred path: the SSE stream pushes every progress line and
-                    // the terminal snapshot with no polling delay
-                    api.streamTask(conn(), id) { task -> applyTaskSnapshot(id, task) }
+                    // the terminal snapshot with no polling delay. Frames arrive on OkHttp's
+                    // reader thread, so every chat write hops back to Main first.
+                    api.streamTask(conn(), id) { task ->
+                        withContext(Dispatchers.Main) { applyTaskSnapshot(id, task) }
+                    }
                     return@launch
+                } catch (err: CancellationException) {
+                    throw err
                 } catch (err: Exception) {
                     // Missing endpoint, broken stream or auth hiccup: polling is the
                     // authoritative fallback and produces the real error messages
                 }
                 pollTaskLoop(id)
+            } catch (err: CancellationException) {
+                // Leaving the Activity cancels this job while the task keeps running server-side.
+                // Reporting that as a failure would write "任务查询中断" into the saved chat over
+                // a bubble that is still 运行中, and the resume-on-launch only re-attaches to
+                // queued/running rows, so the real answer would be lost for good.
+                throw err
             } catch (err: Exception) {
                 val reason = if (err is ApiException) "任务查询失败：${err.message}" else "任务查询中断：${err.message}"
                 updateMessage(id) { it.copy(status = "failed", text = it.text.ifEmpty { reason }) }
@@ -2133,6 +2273,52 @@ class AppViewModel(
             val task = try {
                 api.task(conn(), id)
             } catch (err: ApiException) {
+                // Task records live in memory, so a bot that restarted has forgotten even a run
+                // that finished while the App was away. Nothing more will arrive: settle the
+                // bubble as stopped — which offers 重新执行 — instead of inventing a failure.
+                if (err.code == 404) {
+                    updateMessage(id) {
+                        it.copy(
+                            status = "cancelled",
+                            progress = null,
+                            text = it.text.ifEmpty { "服务器已重启，这条任务的结果找不回来了" },
+                        )
+                    }
+                    return
+                }
+                // A 401 means the saved token stopped matching the server — it regenerates when
+                // the token file is missing, i.e. after a reinstall or a wiped data dir, and the
+                // bot may also have moved to another host. The task itself is untouched and
+                // conn() re-reads the stored settings on every pass, so backing off lets this
+                // loop collect the answer as soon as the user re-pairs. Marking the bubble failed
+                // would lose it for good: the resume-on-launch only re-attaches to live rows.
+                if (err.code == 401) {
+                    networkFailures++
+                    updateMessage(id) { it.copy(progress = "访问令牌已失效，在「设置」重新配对后这条任务会自动继续…") }
+                    delay(minOf(3_000L * networkFailures, 15_000L))
+                    continue
+                }
+                // A bot reached through nginx, a tunnel or a VPN answers 502/503/504 (and a proxy's
+                // 429) while it is restarting or briefly unreachable. The task is still running
+                // server-side, exactly like a dropped socket, so back off and keep asking instead of
+                // painting a proxy error page onto a bubble that will succeed a moment later.
+                if (err.code >= 500 || err.code == 408 || err.code == 429) {
+                    networkFailures++
+                    updateMessage(id) { it.copy(progress = "服务暂不可用，正在重试…") }
+                    delay(minOf(3_000L * networkFailures, 15_000L))
+                    continue
+                }
+                // Code 0 is a reply this phone could not read at all (a body that would not
+                // decrypt, a 200 that was not the JSON object the endpoint promises). The task is
+                // still running server-side, so asking again is right — but bounded, since unlike
+                // a proxy hiccup this one does not heal itself and an endless loop would settle
+                // nothing while it hammered the server.
+                if (err.code == 0 && networkFailures < MAX_LOCAL_POLL_RETRIES) {
+                    networkFailures++
+                    updateMessage(id) { it.copy(progress = "读取任务状态失败，正在重试…") }
+                    delay(minOf(3_000L * networkFailures, 15_000L))
+                    continue
+                }
                 throw err
             } catch (err: IOException) {
                 // Wi-Fi handovers and server restarts are transient: the task keeps
@@ -2155,7 +2341,10 @@ class AppViewModel(
     }
 
     private fun persistMessages() {
-        LocalStore.saveMessages(appContext, messages)
+        // Called from Main on every SSE progress frame; encoding the whole chat there is how a
+        // long history starts janking the bubble list, and a SharedPreferences commit rewrites the
+        // file with it, so the newest snapshot goes to the writer and returns immediately.
+        historyWrites.trySend(messages)
     }
 
     /** Downloads and decodes one reply image; the bubble calls this from LaunchedEffect. */
@@ -2165,10 +2354,15 @@ class AppViewModel(
         if (mediaImages.containsKey(key) || mediaErrors.contains(key) || !mediaLoads.add(key)) return
         viewModelScope.launch {
             try {
-                val bytes = mediaBytes(taskId, media)
-                val bitmap = withContext(Dispatchers.IO) { decodeMediaBitmap(bytes) }
+                val file = mediaFile(taskId, media)
+                val bitmap = withContext(Dispatchers.IO) { decodeMediaFile(file) }
                 if (bitmap != null) {
-                    mediaImages = mediaImages + (key to bitmap)
+                    // A decoded image costs ~10MB of heap, so only the newest few stay cached;
+                    // scrolling back re-decodes the ones that left.
+                    mediaImages = (mediaImages + (key to bitmap)).let { cached ->
+                        if (cached.size <= MAX_MEDIA_IMAGES) cached
+                        else cached.entries.drop(cached.size - MAX_MEDIA_IMAGES).associate { it.key to it.value }
+                    }
                 } else {
                     mediaErrors = mediaErrors + key
                 }
@@ -2235,8 +2429,7 @@ class AppViewModel(
     fun openMedia(taskId: String, media: TaskMedia) {
         viewModelScope.launch {
             try {
-                mediaBytes(taskId, media)
-                val file = MediaCache.file(appContext, taskId, media.index, media.name)
+                val file = mediaFile(taskId, media)
                 val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", file)
                 val mime = mediaMime(media.name)
                 val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
@@ -2256,10 +2449,11 @@ class AppViewModel(
         }
     }
 
-    private suspend fun mediaBytes(taskId: String, media: TaskMedia): ByteArray {
-        MediaCache.read(appContext, taskId, media.index, media.name)?.let { return it }
-        return api.taskMedia(conn(), taskId, media.index)
-            .also { MediaCache.write(appContext, taskId, media.index, media.name, it) }
+    /** Reply media on disk, downloaded once and reused after a restart; nothing is held in the heap. */
+    private suspend fun mediaFile(taskId: String, media: TaskMedia): File {
+        val file = MediaCache.file(appContext, taskId, media.index, media.name)
+        if (file.isFile && file.length() > 0) return file
+        return api.taskMediaTo(conn(), taskId, media.index, file)
     }
 
     fun addReminder(text: String) {
@@ -2334,6 +2528,22 @@ class AppViewModel(
     }
 
     companion object {
+        /** Decoded reply images kept in memory at once; each one costs roughly 10MB of heap. */
+        private const val MAX_MEDIA_IMAGES = 8
+
+        /**
+         * Minimum spacing between two history writes. A running task pushes a progress frame every
+         * few tens of milliseconds, and the stored chat only has to be recent enough to survive a
+         * process death — re-encoding it per frame buys nothing.
+         */
+        private const val HISTORY_WRITE_DELAY_MS = 250L
+
+        /** Drafts pace themselves the same way, looser because typing is a burst of one field. */
+        private const val DRAFT_WRITE_DELAY_MS = 400L
+
+        /** How long a live task keeps being asked about after replies this phone cannot read. */
+        private const val MAX_LOCAL_POLL_RETRIES = 8
+
         fun formatTime(ms: Long): String =
             SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(ms))
 

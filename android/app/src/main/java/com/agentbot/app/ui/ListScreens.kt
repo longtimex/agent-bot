@@ -84,14 +84,14 @@ private fun dueCountdown(dueAt: Long, now: Long): String? {
     return "${minutes / 1440} 天后"
 }
 
-/** Re-reads the clock every 30s while the screen is visible; coroutine dies with the screen. */
+/** Re-reads the server's clock every 30s while the screen is visible; coroutine dies with the screen. */
 @Composable
-private fun rememberClock(): Long {
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+private fun rememberClock(vm: AppViewModel): Long {
+    var now by remember { mutableStateOf(vm.serverNow()) }
     LaunchedEffect(Unit) {
         while (true) {
             delay(30_000)
-            now = System.currentTimeMillis()
+            now = vm.serverNow()
         }
     }
     return now
@@ -270,7 +270,7 @@ fun HistoryScreen(vm: AppViewModel) {
 fun RemindersScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
     var snoozeTarget by remember { mutableStateOf<com.agentbot.app.data.Reminder?>(null) }
-    val now = rememberClock()
+    val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Text(
             "提醒",
@@ -361,7 +361,7 @@ fun RemindersScreen(vm: AppViewModel) {
 @Composable
 fun SchedulesScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
-    val now = rememberClock()
+    val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         Text(
             "定时 AI 任务",
