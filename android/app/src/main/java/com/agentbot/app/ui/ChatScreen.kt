@@ -14,6 +14,7 @@ import android.content.pm.PackageManager
 import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
@@ -80,6 +81,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -287,10 +289,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
             ErrorBanner(
                 message = vm.connectionError,
                 onDismiss = { vm.connectionError = null },
-                onRetry = {
-                    vm.connectionError = null
-                    vm.retryLastTask()
-                },
+                onRetry = { vm.retryFromBanner() },
             )
 
             AttachmentStrip(
@@ -653,7 +652,7 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
         SelectionContainer {
             Column {
                 when {
-                    status == "queued" || status == "running" -> RunningLine(message)
+                    status == "queued" || status == "running" -> RunningLine(vm, message)
                     status == "failed" -> {
                         Text(
                             message.text.ifEmpty { "任务失败" },
@@ -713,11 +712,11 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
 
 /** "● 思考中… · 已运行 12 秒" — the progress line ticks locally between polls. */
 @Composable
-private fun RunningLine(message: ChatMessage) {
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+private fun RunningLine(vm: AppViewModel, message: ChatMessage) {
+    var now by remember { mutableStateOf(vm.serverNow()) }
     LaunchedEffect(message.startedAt) {
         while (true) {
-            now = System.currentTimeMillis()
+            now = vm.serverNow()
             delay(1_000)
         }
     }
@@ -973,6 +972,27 @@ private fun formatSize(bytes: Int): String =
 /** A slash command that maps a Telegram-style chat command to a local app action. */
 private data class SlashCommand(val name: String, val desc: String, val run: () -> Unit)
 
+/** Builds the one-shot camera file and hands it to the system camera app. */
+private fun launchCameraShot(
+    target: MutableState<Uri?>,
+    launcher: ActivityResultLauncher<Uri>,
+    context: Context,
+    vm: AppViewModel,
+) {
+    runCatching {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        // Only one shot is pending at a time and its bytes are staged in memory.
+        dir.listFiles()?.forEach { it.delete() }
+        val file = File.createTempFile("shot-", ".jpg", dir)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        target.value = uri
+        launcher.launch(uri)
+    }.onFailure {
+        target.value = null
+        vm.connectionError = "无法启动相机：${it.message}"
+    }
+}
+
 @Composable
 private fun ChatInputBar(
     vm: AppViewModel,
@@ -1003,25 +1023,15 @@ private fun ChatInputBar(
         val seconds = recordSeconds
         stopRecorder()
         voiceFile.value = null
-        var staged = false
-        if (file != null && file.length() > 0) {
-            if (seconds < 1) {
-                vm.showToast("录音太短，请按住麦克风说久一点")
-            } else {
-                runCatching {
-                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-                    val stagedAttachment = LocalStore.read(context, uri)
-                    // Some resolvers cannot name .m4a; keep the server's audio path intact.
-                    staged = vm.stageAttachment(
-                        if (stagedAttachment.mime.startsWith("audio/")) stagedAttachment
-                        else stagedAttachment.copy(mime = "audio/mp4"),
-                    )
-                }.onFailure { vm.connectionError = "语音发送失败：${it.message}" }
-            }
+        if (file == null || file.length() <= 0) return
+        if (seconds < 1) {
+            runCatching { file.delete() }
+            vm.showToast("录音太短，请按住麦克风说久一点")
+            return
         }
-        runCatching { File(context.cacheDir, "voice").listFiles()?.forEach { it.delete() } }
-        // Telegram sends a voice note as soon as recording stops, so do the same here.
-        if (staged) onSend()
+        // Reading the note and Base64-encoding it is the same work the file picker moved off this
+        // thread, and it used to run on the finger that had just released the microphone button.
+        vm.stageVoiceNote(context, file) { onSend() }
     }
 
     fun startRecording() {
@@ -1115,18 +1125,20 @@ private fun ChatInputBar(
         cameraTarget.value = null
         if (ok && uri != null) stage(context, vm, uri)
     }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchCameraShot(cameraTarget, cameraLauncher, context, vm)
+        else vm.connectionError = "需要相机权限才能拍照"
+    }
     fun takePhoto() {
-        runCatching {
-            val dir = File(context.cacheDir, "camera").apply { mkdirs() }
-            // Only one shot is pending at a time and its bytes are staged in memory.
-            dir.listFiles()?.forEach { it.delete() }
-            val file = File.createTempFile("shot-", ".jpg", dir)
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-            cameraTarget.value = uri
-            cameraLauncher.launch(uri)
-        }.onFailure {
-            cameraTarget.value = null
-            vm.connectionError = "无法启动相机：${it.message}"
+        // The manifest declares CAMERA for the pairing scanner, and an app that declares it does
+        // not get a camera on loan: ACTION_IMAGE_CAPTURE comes back refused, which read as "the
+        // camera is broken" on a fresh install until the user happened to scan a QR once.
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        } else {
+            launchCameraShot(cameraTarget, cameraLauncher, context, vm)
         }
     }
 
@@ -1487,9 +1499,7 @@ private fun EngineOptionRow(label: String, detail: String?, selected: Boolean, o
 }
 
 private fun stage(context: android.content.Context, vm: AppViewModel, uri: Uri) {
-    runCatching { LocalStore.read(context, uri) }
-        .onSuccess { vm.stageAttachment(it) }
-        .onFailure { vm.connectionError = "读取附件失败：${it.message}" }
+    vm.stageAttachmentFrom(context, uri)
 }
 
 /** ACTION_IMAGE_CAPTURE with URI grants; a FileProvider output needs read/write flags. */

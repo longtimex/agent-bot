@@ -208,7 +208,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    await tgBridge.start({
+    const started = await tgBridge.start({
       // A polling loop that stopped for good must not linger: systemd/the restart
       // script only recover when the process actually exits.
       onFatal: (err) => {
@@ -218,6 +218,13 @@ async function main(): Promise<void> {
         })
       },
     })
+    if (started.reconnecting && !apiServer) {
+      // Telegram is down and there is no HTTP API to serve (disabled, or the port was taken):
+      // nothing would answer on either channel, so the supervisor's restart is the way back.
+      log.error("Telegram 未连接，且 HTTP API 不可用，退出以便重启恢复")
+      await shutdown("Telegram unavailable and no HTTP API to serve", 1).catch(() => {})
+      return
+    }
   } catch (err) {
     log.error((err as Error).message)
     await shutdown("startup failure", 1).catch(() => {})

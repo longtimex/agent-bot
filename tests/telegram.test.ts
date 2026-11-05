@@ -2,8 +2,8 @@ import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import test from "node:test"
-import { Bot } from "grammy"
+import test, { mock } from "node:test"
+import { Bot, GrammyError, HttpError } from "grammy"
 import type { Update } from "grammy/types"
 import { AgentCliRegistry, AgentCliService } from "../src/agentCli.js"
 import { AgentCliInstaller } from "../src/agentInstaller.js"
@@ -33,6 +33,7 @@ interface Harness {
   lastText(): string
   waitFor(predicate: () => boolean, timeoutMs?: number): Promise<void>
   errors: string[]
+  bridge: TelegramBridge
   close(): Promise<void>
 }
 
@@ -43,6 +44,10 @@ interface HarnessOptions {
   agents?: Record<string, unknown>
   installer?: (registry: AgentCliRegistry, dir: string, log: Logger) => AgentCliInstaller
   ops?: (dir: string, log: Logger) => OpsService
+  /** Use this Bot instead of the talking test bot (a stub whose init() fails). */
+  bot?: Bot
+  /** Leave start() to the test: connect behaviour is what is under test then. */
+  skipStart?: boolean
 }
 
 async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): Promise<Harness> {
@@ -72,17 +77,19 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
     logLevel: "error",
   }
 
-  const bot = new Bot(cfg.telegram.token as string, {
-    botInfo: {
-      id: 1,
-      is_bot: true,
-      first_name: "Test",
-      username: "test_bot",
-      can_join_groups: false,
-      can_read_all_group_messages: false,
-      supports_inline_queries: false,
-    },
-  })
+  const bot =
+    options.bot ??
+    new Bot(cfg.telegram.token as string, {
+      botInfo: {
+        id: 1,
+        is_bot: true,
+        first_name: "Test",
+        username: "test_bot",
+        can_join_groups: false,
+        can_read_all_group_messages: false,
+        supports_inline_queries: false,
+      },
+    })
   const calls: ApiCall[] = []
   bot.api.config.use(async (_prev, method, payload) => {
     calls.push({ method, payload: payload as Record<string, unknown> })
@@ -118,7 +125,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
     installer,
     ops,
   )
-  await bridge.start({ polling: false })
+  if (!options.skipStart) await bridge.start({ polling: false })
 
   let updateId = 0
   return {
@@ -207,6 +214,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
       }
     },
     errors,
+    bridge,
     async close(): Promise<void> {
       await bridge.stop()
       proxies.dispose()
@@ -1926,4 +1934,114 @@ test("parseProviderAdd reads the friendly key=value form", () => {
   assert.match(parseProviderAdd([]) as string, /用法：`\/cc provider add/)
   assert.match(parseProviderAdd(["p", "note=hello"]) as string, /未知参数 `note`/)
   assert.match(parseProviderAdd(["p", "id="]) as string, /无法解析参数 `id=`/)
+})
+
+/**
+ * A Bot stand-in for connect tests: init() is whatever the scenario needs, start() records that
+ * polling began, and every other call resolves to a no-op so handler registration, the command
+ * menu and the startup notice all stay harmless.
+ */
+function stubTelegramBot(init: () => Promise<unknown>): { bot: Bot; polls: () => number } {
+  const noop = (): unknown =>
+    new Proxy(function () {}, {
+      // "then" must stay undefined or awaiting any call would hang forever
+      get: (_t, key) => (key === "then" || typeof key === "symbol" ? undefined : noop()),
+      apply: () => Promise.resolve(undefined),
+    })
+  let polls = 0
+  const base: Record<string, unknown> = {
+    init,
+    catch: () => undefined,
+    stop: () => Promise.resolve(),
+    start: (options?: { onStart?: (info: { username: string; id: number }) => void }) => {
+      polls += 1
+      options?.onStart?.({ username: "test_bot", id: 1 })
+      return Promise.resolve()
+    },
+  }
+  const bot = new Proxy(base, {
+    get: (target, key) => (typeof key === "string" && key in target ? target[key] : noop()),
+  }) as unknown as Bot
+  return { bot, polls: () => polls }
+}
+
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/** Transport failure: grammy could not reach the Bot API at all. */
+function telegramUnreachable(): Error {
+  return new HttpError("Call to 'getMe' failed!", new Error("socket hang up"))
+}
+
+/** The Bot API answered and rejected the credential. */
+function telegramTokenRejected(): Error {
+  return new GrammyError("Call to 'getMe' failed!", { ok: false, error_code: 401, description: "Unauthorized" }, "getMe", {})
+}
+
+test("a Telegram outage degrades to the HTTP API instead of killing the bot", async () => {
+  const { bot } = stubTelegramBot(() => Promise.reject(telegramUnreachable()))
+  const h = await createHarness(["7"], { bot, skipStart: true })
+  const fatal: Error[] = []
+  try {
+    const started = await h.bridge.start({ onFatal: (err) => fatal.push(err) })
+    assert.deepEqual(started, { reconnecting: true })
+    assert.deepEqual(fatal, [], "a transport failure must not be treated as fatal")
+  } finally {
+    await h.close()
+  }
+})
+
+test("a revoked Telegram token still fails fast", async () => {
+  const { bot } = stubTelegramBot(() => Promise.reject(telegramTokenRejected()))
+  const h = await createHarness(["7"], { bot, skipStart: true })
+  try {
+    await assert.rejects(() => h.bridge.start(), /无法连接 Telegram/)
+  } finally {
+    await h.close()
+  }
+})
+
+/**
+ * The App drives the HTTP API, so a boot that found Telegram unreachable has to recover on its
+ * own: back off, retry, and start polling once the endpoint answers again — without the operator
+ * restarting anything.
+ */
+test("polling resumes by itself after Telegram comes back", async () => {
+  let attempts = 0
+  const { bot, polls } = stubTelegramBot(async () => {
+    attempts += 1
+    if (attempts < 3) throw telegramUnreachable()
+    return undefined
+  })
+  const h = await createHarness(["7"], { bot, skipStart: true })
+  mock.timers.enable({ apis: ["setTimeout"] })
+  try {
+    const started = await h.bridge.start()
+    assert.equal(started.reconnecting, true)
+    mock.timers.tick(5_000)
+    await flush()
+    assert.equal(polls(), 0, "still down after the first retry")
+    mock.timers.tick(10_000)
+    await flush()
+    assert.equal(polls(), 1, "the doubled backoff retried until Telegram answered")
+    assert.equal(attempts, 3)
+  } finally {
+    mock.reset()
+    await h.close()
+  }
+})
+
+test("stopping during a reconnect window does not leave a retry armed", async () => {
+  const { bot, polls } = stubTelegramBot(() => Promise.reject(telegramUnreachable()))
+  const h = await createHarness(["7"], { bot, skipStart: true })
+  mock.timers.enable({ apis: ["setTimeout"] })
+  try {
+    assert.equal((await h.bridge.start()).reconnecting, true)
+    await h.bridge.stop()
+    mock.timers.tick(60_000)
+    await flush()
+    assert.equal(polls(), 0, "no polling after an explicit stop")
+  } finally {
+    mock.reset()
+    await h.close()
+  }
 })

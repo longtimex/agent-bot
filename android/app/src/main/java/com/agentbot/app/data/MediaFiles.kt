@@ -15,23 +15,17 @@ internal object MediaCache {
         val safeName = name.replace(unsafeChars, "_").takeLast(80).ifEmpty { "media" }
         return File(dir, "$safeId-$index-$safeName")
     }
-
-    fun read(context: Context, taskId: String, index: Int, name: String): ByteArray? =
-        file(context, taskId, index, name).takeIf { it.isFile }?.readBytes()
-
-    fun write(context: Context, taskId: String, index: Int, name: String, bytes: ByteArray): File =
-        file(context, taskId, index, name).also { it.writeBytes(bytes) }
 }
 
-/** Decodes a reply image, downsampling so huge screenshots cannot exhaust the heap. */
-fun decodeMediaBitmap(bytes: ByteArray, maxDim: Int = 1600): Bitmap? {
+/** Decodes a cached reply image from disk, downsampling so huge screenshots cannot exhaust the heap. */
+fun decodeMediaFile(file: File, maxDim: Int = 1600): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    BitmapFactory.decodeFile(file.path, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
     while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    return BitmapFactory.decodeFile(file.path, opts)
 }
 
 /** Best-effort MIME by extension; viewers pick the right handler from this. */

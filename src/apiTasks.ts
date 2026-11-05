@@ -385,9 +385,12 @@ export class ApiTaskManager {
     const listener = (payload: string): void => {
       if (closed) return
       res.write(`data: ${payload}\n\n`)
-      // The emitter drops the listener set on terminal states; end the response so
-      // the client sees a clean stream close instead of waiting for a heartbeat
-      if (payload.includes('"status":"done"') || payload.includes('"status":"failed"') || payload.includes('"status":"cancelled"')) {
+      // The emitter drops the listener set on terminal states; end the response so the client
+      // sees a clean stream close instead of waiting for a heartbeat. This reads the task's own
+      // state rather than pattern-matching the serialized frame: today the frame's escaping keeps
+      // a CLI that prints {"status":"done"} from matching, but any change to how the frame is
+      // built would turn that coincidence into a live stream cut at its first frame.
+      if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
         cleanup()
       }
     }
@@ -437,9 +440,10 @@ export class ApiTaskManager {
 
   /** Strips media directives from the reply and resolves what Telegram would send. */
   #settleReply(reply: string): { text: string; media: ApiTaskMedia[] } {
-    const { parts } = parseReply(reply)
-    const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")
+    const { parts, dropped } = parseReply(reply)
+    let text = parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")
     const media: ApiTaskMedia[] = []
+    const warnings: string[] = []
     for (const part of parts) {
       if (part.type !== "media") continue
       try {
@@ -452,11 +456,15 @@ export class ApiTaskManager {
           target: resolved.target,
         })
       } catch (err) {
-        this.#deps.log.warn(
-          `api media skipped (${part.kind}): ${err instanceof Error ? err.message : String(err)}`,
-        )
+        const detail = redactSecrets(err instanceof Error ? err.message : String(err))
+        this.#deps.log.warn(`api media skipped (${part.kind}): ${detail}`)
+        // Telegram sends "⚠️ 图片发送失败：…" as its own message. Silence here would leave the
+        // App with an answer that just stops short of the attachment the user asked for.
+        warnings.push(`⚠️ ${mediaLabel(part.kind)}发送失败：${detail}`)
       }
     }
+    if (dropped > 0) warnings.push(`⚠️ 有 ${dropped} 个附件标记无法识别或超出 5 个上限，已忽略`)
+    if (warnings.length > 0) text = [text, ...warnings].filter(Boolean).join("\n")
     return { text, media }
   }
 

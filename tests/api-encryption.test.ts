@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { gunzipSync } from "node:zlib"
 import { decryptPayload, encryptPayload, randomEncKey, decodeEncKey } from "../src/apiCrypto.js"
 import { loadConfig } from "../src/config.js"
 import { resolveEncKey } from "../src/api.js"
@@ -101,6 +103,15 @@ test("encrypted request bodies get encrypted responses end to end", async () => 
         assert.equal(tampered.status, 400)
         const err = await tampered.text()
         assert.doesNotMatch(err, /喝水/)
+        // 密钥对不上时客户端连错误都解不开，所以这个说明必须以明文返回
+        assert.notEqual(tampered.headers.get("x-enc"), "v1", "an answer the peer cannot decrypt stays readable")
+        assert.match(err, /解密请求体失败/)
+        assert.match(err, /重新扫码/, "the stale-key advice reaches the user")
+        // The App only falls back to plaintext on the *other* 400 (a server that turned
+        // encryption off), which names both the header and the switch. A key mismatch must not
+        // match, or a stale key would silently downgrade every request.
+        assert.doesNotMatch(err, /x-enc/, "a key mismatch is not the encryption-off reply")
+        assert.doesNotMatch(err, /API_ENCRYPTION/)
 
         // 服务器未启用加密时，带 x-enc 的请求得到明确的 400（不是 500）
         const plainServer = await fetch(`${h.base}/api/v1/health`, {
@@ -113,4 +124,97 @@ test("encrypted request bodies get encrypted responses end to end", async () => 
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/** Raw GET: `fetch` inflates gzip by itself, which would hide the byte order checked below. */
+function rawGet(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { method: "GET", headers }, (res) => {
+      const chunks: Buffer[] = []
+      res.on("data", (chunk: Buffer) => chunks.push(chunk))
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }))
+    })
+    req.on("error", reject)
+    req.end()
+  })
+}
+
+test("encrypted responses get gzipped after encryption, the order OkHttp unpacks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-enc-gzip-"))
+  try {
+    const encKey = resolveEncKey({
+      ...loadConfig({ TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_ALLOW_USERS: "7", API_ENCRYPTION: "1" }),
+      dataDir: dir,
+    })!
+    // Four ~485-character reminders put the list well past the 1024-byte compression threshold.
+    const long = "提醒".repeat(240)
+    await withApi(
+      async () => "回复",
+      async (h) => {
+        for (let i = 0; i < 4; i++) {
+          const created = await fetch(`${h.base}/api/v1/reminders`, {
+            method: "POST",
+            headers: { ...authHeaders(), "x-enc": "v1" },
+            body: encryptPayload(encKey, JSON.stringify({ text: `10m ${long}${i}` })),
+          })
+          const answer = await created.text()
+          assert.equal(created.status, 201, answer)
+        }
+
+        const wire = await rawGet(`${h.base}/api/v1/reminders`, {
+          ...authHeaders(),
+          "x-enc": "v1",
+          "accept-encoding": "gzip",
+        })
+        assert.equal(wire.status, 200)
+        assert.equal(wire.headers["x-enc"], "v1")
+        assert.equal(wire.headers["content-encoding"], "gzip", "a body over the threshold is compressed")
+        assert.deepEqual(
+          [...wire.body.subarray(0, 2)],
+          [0x1f, 0x8b],
+          "the wire bytes are a real gzip stream, not ciphertext claiming to be one",
+        )
+
+        // The App's HTTP stack inflates first and decrypts after, so the compressed layer
+        // has to be the ciphertext. Compressing before encrypting would hand OkHttp a body
+        // it cannot inflate, and every encrypted reply over 1 KB would fail to decode.
+        const inflated = gunzipSync(wire.body).toString("utf8")
+        assert.ok(inflated.length > 1024, `the encrypted payload should clear the threshold, got ${inflated.length}`)
+        assert.doesNotMatch(inflated, /提醒/, "inflating alone must not reveal the answer")
+        const decrypted = JSON.parse(decryptPayload(encKey, inflated)) as { reminders: Array<{ text: string }> }
+        assert.equal(decrypted.reminders.length, 4)
+        assert.ok(decrypted.reminders[0]!.text.includes("提醒"), "the content survives compression and encryption intact")
+      },
+      encKey,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Paired while encryption was on, then the operator turned it off (`API_ENCRYPTION=0`, or a
+ * reinstall that left the key file behind). The App still sends x-enc, and every screen would fail
+ * on a message about a header the user cannot remove — so ApiClient drops the key and repeats the
+ * call. That fallback keys on the two names in this reply, which is what pins it to the server.
+ */
+test("a server without a pairing key answers the 400 the App falls back past", async () => {
+  await withApi(async () => "回复", async (h) => {
+    const encrypted = await fetch(`${h.base}/api/v1/health`, {
+      headers: { ...authHeaders(), "x-enc": "v1" },
+    })
+    assert.equal(encrypted.status, 400, "the encrypted request is refused, not served and not a 500")
+    const text = await encrypted.text()
+    assert.match(text, /x-enc/)
+    assert.match(text, /API_ENCRYPTION/)
+
+    // What the App's retry sends: the same call without the header works, so the chat keeps
+    // running against a server that simply does not encrypt.
+    const retry = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders() })
+    assert.equal(retry.status, 200)
+    assert.ok(!retry.headers.get("x-enc"))
+  })
 })

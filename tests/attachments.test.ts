@@ -10,8 +10,9 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import test from "node:test"
+import { buildAttachmentSections } from "../src/attachmentInput.js"
 import {
   isTextAttachment,
   pruneInbox,
@@ -125,6 +126,32 @@ test("saveAttachment keeps uploads private to the service account", () => {
     const saved = saveAttachment(inbox, 42, ".env", Buffer.from("API_KEY=x"))
     assert.equal(statSync(saved.path).mode & 0o777, 0o600)
     assert.equal(statSync(inbox).mode & 0o777, 0o700)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A CLI engine is spawned in the session work dir, which /dir (and the App's picker) can point
+ * anywhere. A manifest path relative to the Bot's own cwd names nothing there, so the file the
+ * user sent stops existing for the engine.
+ */
+test("the manifest names attachments by absolute path so any engine cwd resolves them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-manifest-"))
+  try {
+    const text = saveAttachment(dir, 7, "notes.txt", Buffer.from("inline me"))
+    const image = saveAttachment(dir, 7, "pixel.png", Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const input = buildAttachmentSections("看一下", {
+      saved: [
+        { fileId: "f1", kind: "document", name: "notes.txt", mime: "text/plain", path: text.path, bytes: 9, text: "inline me" },
+        { fileId: "f2", kind: "image", name: "pixel.png", mime: "image/png", path: image.path, bytes: 4 },
+      ],
+    })
+    const listed = [...input.text.matchAll(/^- (?:文件|图片|音频): (\S+) /gm)].map((m) => m[1]!)
+    assert.equal(listed.length, 2, "both attachments are listed for the engine")
+    assert.ok(listed.every((p) => isAbsolute(p)), `manifest paths must be absolute, got ${listed.join(", ")}`)
+    assert.ok(input.text.includes(`<file name="${text.path}">`), "the inlined copy carries the same path")
+    assert.equal(input.files.length, 1, "the image still rides as a data file")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

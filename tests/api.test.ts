@@ -1,8 +1,11 @@
 import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
 import { lstatSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { createServer, type Server } from "node:http"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
+import { fileURLToPath } from "node:url"
 import { ApiServer, resolveApiToken, CC_EXEC_COMMANDS, CC_VIEWS } from "../src/api.js"
 import { ccBlockedReason, ccConfirmPlan } from "../src/ccGuards.js"
 import { AgentCliRegistry } from "../src/agentCli.js"
@@ -22,7 +25,8 @@ import { ScheduleService } from "../src/scheduler.js"
 import { SessionStore } from "../src/store.js"
 import type { AgentCliService } from "../src/agentCli.js"
 import { UsageStore } from "../src/usage.js"
-import { appModelShape } from "./support/appModels.js"
+import { appModelNames, appModelShape } from "./support/appModels.js"
+import { appRequestUrl, normalizeAppBaseUrl } from "./support/appBaseUrl.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error(...a: unknown[]) { console.error("LOG-ERR", ...a) } }
 const TOKEN = "test-token-0123456789abcdef"
@@ -150,6 +154,17 @@ export async function withApi(
     startOpencode: async () => ({ ok: true, message: "OpenCode 已启动。", steps: [] }),
     stopOpencode: async () => ({ ok: true, message: "OpenCode 已停止。", steps: [] }),
     restartOpencode: async () => ({ ok: true, message: "OpenCode 已重启。", steps: [] }),
+    // The App's 检查更新 and 备份下载 buttons read these two; without them those routes 500.
+    checkUpdate: async () => ({
+      ok: true,
+      message: "落后 2 个提交。",
+      steps: [{ label: "git fetch", ok: true, code: 0, output: "behind 2" }],
+    }),
+    backupData: async () => {
+      const file = join(dir, "backup.tar.gz")
+      writeFileSync(file, Buffer.from([0x1f, 0x8b, 0x08, 0x00]))
+      return { ok: true, message: "备份已生成。", steps: [], file }
+    },
     installCcSwitch: async (update: boolean) => {
       ccCalls.push(update ? "ops:cc-update" : "ops:cc-install")
       return { ok: true, message: update ? "cc-switch 已更新。" : "cc-switch 已安装。", steps: [] }
@@ -418,7 +433,20 @@ test("api adds security headers and gzips large JSON when the client asks", asyn
   })
 })
 
-test("api rate-limits repeated bad bearer tokens", async () => {
+test("api answers with a Date the App can turn into a clock offset", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const res = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders() })
+    const date = res.headers.get("date")
+    // The App reads its server-clock offset off this one header on every response: a body field
+    // would need a new endpoint, and an SSE frame carries no such field at all. Kotlin parses it
+    // with RFC_1123_DATE_TIME, so the shape has to stay exactly that.
+    assert.ok(date, "every JSON answer has to carry a Date header")
+    assert.match(date, /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/)
+    assert.ok(Math.abs(Date.parse(date) - Date.now()) < 1_500, `${date} is more than a second away from now`)
+  })
+})
+
+test("api rate-limits repeated bad bearer tokens without locking out the right one", async () => {
   await withApi(async () => "ok", async (h) => {
     for (let attempt = 0; attempt < 10; attempt++) {
       const res = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders("not-the-token") })
@@ -427,9 +455,14 @@ test("api rate-limits repeated bad bearer tokens", async () => {
     const blocked = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders("not-the-token") })
     assert.equal(blocked.status, 429)
     assert.ok(Number(blocked.headers.get("retry-after")) >= 1)
-    // The correct token still cannot jump the block for the same address
+    // Every phone behind one nginx is the same socket address, which is what this budget is
+    // keyed on: a device holding the correct token must not be refused for another's failures,
+    // or the App goes silent for the whole cooldown and re-scanning the QR changes nothing.
     const correct = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders() })
-    assert.equal(correct.status, 429)
+    assert.equal(correct.status, 200)
+    // …and the attacker's cooldown survives that success, so it cannot be laundered away.
+    const still = await fetch(`${h.base}/api/v1/health`, { headers: authHeaders("not-the-token") })
+    assert.equal(still.status, 429)
   })
 })
 
@@ -528,6 +561,55 @@ test("api surfaces task media and serves local and remote files", async () => {
       assert.equal(remoteFile.status, 200)
       assert.equal(remoteFile.headers.get("content-type"), "application/pdf")
       assert.equal(await remoteFile.text(), "remote:https://example.com/report.pdf")
+    },
+  )
+})
+
+/**
+ * Telegram answers "⚠️ 图片发送失败：…" when a media directive cannot be delivered. An App user
+ * would otherwise read a reply that simply stops short of the attachment they asked for.
+ */
+test("api tells the client when a media directive cannot be delivered", async () => {
+  await withApi(
+    async (_key, _engine, text) =>
+      text === "missing"
+        ? "图在这儿 [[image:gone.png]]"
+        : text === "escape"
+          ? "看图 [[image:/etc/hostname]]"
+          : "多张 [[image:a.png]] [[image:b.png]] [[image:c.png]] [[image:d.png]] [[image:e.png]] [[image:f.png]]",
+    async (h) => {
+      const outbox = join(h.dataDir, "outbox")
+      mkdirSync(outbox, { recursive: true })
+      for (const name of ["a.png", "b.png", "c.png", "d.png", "e.png"]) {
+        writeFileSync(join(outbox, name), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+      }
+      const settle = async (prompt: string): Promise<{ reply: string; media?: unknown[] }> => {
+        const res = await fetch(`${h.base}/api/v1/task`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ text: prompt }),
+        })
+        const { task } = (await res.json()) as { task: { id: string } }
+        for (let i = 0; i < 50; i++) {
+          const poll = await fetch(`${h.base}/api/v1/task/${task.id}`, { headers: authHeaders() })
+          const done = ((await poll.json()) as { task: { status: string; reply?: string; media?: unknown[] } }).task
+          if (done.status === "done") return { reply: done.reply ?? "", media: done.media }
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        throw new Error("task did not finish")
+      }
+
+      const missing = await settle("missing")
+      assert.match(missing.reply, /图片发送失败：文件不存在/)
+      assert.equal(missing.media?.length ?? 0, 0, "an undeliverable file stays off the media list")
+
+      const escape = await settle("escape")
+      assert.match(escape.reply, /本地媒体必须放在 data\/outbox 目录内/, "the note names the containment rule")
+      assert.equal(escape.media?.length ?? 0, 0)
+
+      const many = await settle("many")
+      assert.match(many.reply, /有 1 个附件标记无法识别或超出 5 个上限/)
+      assert.equal(many.media?.length, 5)
     },
   )
 })
@@ -1160,6 +1242,63 @@ test("api queue clear cancels queued tasks but keeps the running one", async () 
       assert.equal(tasks[0]?.status, "running")
 
       await fetch(`${h.base}/api/v1/stop`, { method: "POST", headers: authHeaders() })
+    },
+  )
+})
+
+/**
+ * One phone can send three messages in a second, and a CLI engine keeps its conversation in a
+ * single session file: two of its processes writing the same session at once corrupts the context
+ * the user is paying for. Rapid-fire sends must therefore run one at a time and all answer.
+ */
+test("api runs tasks from one session one at a time and answers every one", async () => {
+  let live = 0
+  let overlap = 0
+  await withApi(
+    async (_key, _engine, text, onProgress) => {
+      live++
+      if (live > 1) overlap++
+      onProgress?.(`处理中：${text}`)
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      live--
+      return `答复 ${text}`
+    },
+    async (h) => {
+      const submit = async (text: string): Promise<string> => {
+        const res = await fetch(`${h.base}/api/v1/task`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ text }),
+        })
+        assert.equal(res.status, 202)
+        return ((await res.json()) as { task: { id: string } }).task.id
+      }
+      const ids = [await submit("第一条"), await submit("第二条"), await submit("第三条")]
+
+      const settled: Array<{ id: string; status: string; reply: string; progress?: string }> = []
+      for (const id of ids) {
+        for (let i = 0; i < 100; i++) {
+          const res = await fetch(`${h.base}/api/v1/task/${id}`, { headers: authHeaders() })
+          const task = (
+            (await res.json()) as {
+              task: { status: string; reply: string; progress?: string }
+            }
+          ).task
+          if (task.status === "done" || task.status === "failed") {
+            settled.push({ id, status: task.status, reply: task.reply, progress: task.progress })
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+      }
+
+      assert.equal(overlap, 0, "two engine runs shared one session")
+      assert.equal(settled.length, 3, "every queued task answered")
+      assert.deepEqual(
+        settled.map((task) => task.reply),
+        ["答复 第一条", "答复 第二条", "答复 第三条"],
+      )
+      assert.deepEqual(settled.map((task) => task.id), ids, "tasks settle in submission order")
     },
   )
 })
@@ -2939,6 +3078,13 @@ test("api searches cc-switch sessions, imports deep links and installs skills", 
     assert.equal(blank.status, 400)
     const option = await fetch(`${h.base}/api/v1/cc/sessions?q=--help`, { headers: authHeaders() })
     assert.equal(option.status, 400)
+    // Session titles are mostly Chinese and both clients invite a Chinese keyword, so the
+    // guard rejects control characters rather than everything outside ASCII.
+    const chinese = await fetch(`${h.base}/api/v1/cc/sessions?q=${encodeURIComponent("修复登录")}`, { headers: authHeaders() })
+    assert.equal(chinese.status, 200)
+    assert.equal(((await chinese.json()) as { query: string }).query, "修复登录")
+    const newline = await fetch(`${h.base}/api/v1/cc/sessions?q=a%0Ab`, { headers: authHeaders() })
+    assert.equal(newline.status, 400)
 
     const https = await fetch(`${h.base}/api/v1/cc/deeplink`, {
       method: "POST",
@@ -3175,6 +3321,78 @@ test("api streams task events over SSE until the terminal state", async () => {
   )
 })
 
+/**
+ * Only the task's own state may end an event stream. Progress frames carry the CLI's output, so a
+ * run that prints {"status":"done"} travels through the same path as a real settlement; the server
+ * reads `task.status` rather than the serialized frame, and this pins the behaviour that holds
+ * either way: the fake frame reaches the client, the stream stays open, and the task settles only
+ * when the engine actually returns.
+ */
+test("api keeps streaming a task whose output looks like a terminal state", async () => {
+  let finish: (() => void) | undefined
+  await withApi(
+    (_key, _engine, text, onProgress) =>
+      new Promise<string>((resolve) => {
+        setTimeout(() => onProgress?.('解析结果 {"status":"done"}'), 120)
+        setTimeout(() => onProgress?.("第二步还在跑"), 500)
+        finish = () => resolve(`回复：${text}`)
+      }),
+    async (h) => {
+      const created = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "会打印状态的 Agent" }),
+      })
+      const { task } = (await created.json()) as { task: { id: string } }
+
+      const stream = await fetch(`${h.base}/api/v1/task/${task.id}/events`, { headers: authHeaders() })
+      assert.equal(stream.status, 200)
+      const reader = stream.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      const events: Array<{ task: { status: string; progress?: string; reply?: string } }> = []
+      const pump = (async () => {
+        for (;;) {
+          const { value, done: closed } = await reader.read()
+          if (closed) break
+          buffer += decoder.decode(value, { stream: true })
+          let sep: number
+          while ((sep = buffer.indexOf("\n\n")) >= 0) {
+            const frame = buffer.slice(0, sep)
+            buffer = buffer.slice(sep + 2)
+            const data = frame
+              .split("\n")
+              .filter((line) => line.startsWith("data: "))
+              .map((line) => line.slice(6))
+              .join("")
+            if (data) events.push(JSON.parse(data))
+          }
+        }
+      })()
+
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      assert.ok(
+        events.some((event) => event.task.progress === '解析结果 {"status":"done"}'),
+        "the fake frame should still reach the client",
+      )
+      assert.ok(
+        events.some((event) => event.task.progress === "第二步还在跑"),
+        "a frame after the fake terminal payload must still arrive",
+      )
+      assert.ok(
+        events.every((event) => event.task.status === "running"),
+        `nothing may settle a live task: ${JSON.stringify(events.map((event) => event.task.status))}`,
+      )
+
+      finish?.()
+      await Promise.race([pump, new Promise((_, reject) => setTimeout(() => reject(new Error("SSE 流未关闭")), 5_000))])
+      const final = events[events.length - 1]!.task
+      assert.equal(final.status, "done")
+      assert.equal(final.reply, "回复：会打印状态的 Agent")
+    },
+  )
+})
+
 test("api returns a snapshot instead of a stream for settled tasks", async () => {
   await withApi(async () => "ok", async (h) => {
     const created = await fetch(`${h.base}/api/v1/task`, {
@@ -3255,27 +3473,21 @@ interface WireCase {
 }
 
 /**
- * Objects the App reaches through a parent model. Walking them is what catches a field that
- * only appears in a nested row — an engine's model list, a peer's session, a task's media.
+ * Objects the App reaches through a parent model. This is read off the Kotlin field types rather
+ * than a hand-kept list, because a list is exactly the thing that goes stale: the diagnostics
+ * panel's `git`/`log`/`disk`/`memory` rows were declared in `ApiModels.kt` and named in the
+ * registry for none of them, so a rename on either side read back as a dash with every gate green.
  */
-const NESTED_FIELDS: Record<string, Array<{ field: string; model: string }>> = {
-  Status: [{ field: "usageToday", model: "UsageDay" }, { field: "activeTask", model: "Task" }],
-  Usage: [{ field: "today", model: "UsageDay" }],
-  Task: [{ field: "media", model: "TaskMedia" }],
-  DirListing: [{ field: "dirs", model: "DirEntry" }],
-  Session: [{ field: "modelRef", model: "ModelRef" }],
-  EngineSwitch: [{ field: "session", model: "Session" }],
-  Peer: [{ field: "session", model: "Session" }, { field: "activity", model: "PeerActivity" }],
-  AgentInfo: [{ field: "models", model: "AgentModelOption" }],
-  ModelChoices: [{ field: "models", model: "ModelEntry" }],
-  Reminder: [{ field: "repeat", model: "Repeat" }],
-  Schedule: [{ field: "repeat", model: "Repeat" }],
-  DailyReport: [
-    { field: "totals", model: "UsageDay" },
-    { field: "byChat", model: "DailyReportSource" },
-    { field: "trend", model: "UsageTrendDay" },
-  ],
-  DailyReportSource: [{ field: "usage", model: "UsageDay" }],
+const KNOWN_MODELS = new Set(appModelNames())
+
+/** The model behind a Kotlin field type, and how the payload wraps it. */
+function elementModel(type: string): { model: string; kind: "list" | "map" | "one" } | null {
+  const bare = type.replace(/\?$/, "").replace(/\s+/g, "")
+  const list = /^(?:Array)?List<(.+)>$/.exec(bare)
+  if (list) return KNOWN_MODELS.has(list[1]!) ? { model: list[1]!, kind: "list" } : null
+  const map = /^Map<\w+,(.+)>$/.exec(bare)
+  if (map) return KNOWN_MODELS.has(map[1]!) ? { model: map[1]!, kind: "map" } : null
+  return KNOWN_MODELS.has(bare) ? { model: bare, kind: "one" } : null
 }
 
 function pickPath(payload: unknown, pick: string): unknown {
@@ -3374,7 +3586,7 @@ test("api responses fill every field the App's models decode", async () => {
         const problems: string[] = []
         const compared = new Set<string>()
 
-        const compare = (value: unknown, model: string, label: string): void => {
+        const compare = (value: unknown, model: string, label: string, depth = 0): void => {
           if (value === null || typeof value !== "object" || Array.isArray(value)) {
             problems.push(`${label}: no object to compare (got ${JSON.stringify(value)})`)
             return
@@ -3387,12 +3599,22 @@ test("api responses fill every field the App's models decode", async () => {
           const silent = fields.filter((field) => field.required && !sent.includes(field.name)).map((field) => field.name)
           if (dropped.length) problems.push(`${model} (${label}): server sends ${dropped.join(", ")} the App never decodes`)
           if (silent.length) problems.push(`${model} (${label}): App requires ${silent.join(", ")} but the server omits it (reads back as zero)`)
-          for (const nested of NESTED_FIELDS[model] ?? []) {
-            const child = (value as Record<string, unknown>)[nested.field]
-            if (Array.isArray(child)) {
-              child.forEach((row, index) => compare(row, nested.model, `${label}.${nested.field}.${index}`))
-            } else if (child !== undefined && child !== null) {
-              compare(child, nested.model, `${label}.${nested.field}`)
+          if (depth >= 4) return
+          for (const field of fields) {
+            const child = (value as Record<string, unknown>)[field.name]
+            if (child === undefined || child === null) continue
+            const nested = elementModel(field.type)
+            if (!nested) continue
+            if (nested.kind === "list") {
+              if (Array.isArray(child)) {
+                child.forEach((row, index) => compare(row, nested.model, `${label}.${field.name}.${index}`, depth + 1))
+              }
+            } else if (nested.kind === "map") {
+              for (const [key, row] of Object.entries(child as Record<string, unknown>)) {
+                if (row && typeof row === "object" && !Array.isArray(row)) compare(row, nested.model, `${label}.${field.name}.${key}`, depth + 1)
+              }
+            } else {
+              compare(child, nested.model, `${label}.${field.name}`, depth + 1)
             }
           }
         }
@@ -3514,6 +3736,100 @@ test("identity and config endpoints never leak the token or secret values", asyn
       }
       for (const entry of config.config?.entries ?? []) {
         if (entry.secret) assert.equal(entry.value, undefined, `secret entry ${entry.key} must not carry a value`)
+      }
+    },
+  )
+})
+
+test("the phone-side deployment script passes against this exact wire", async () => {
+  // scripts/app-smoke.mjs is what the README tells a user to run before installing the APK,
+  // and it reimplements ApiClient.kt's request sequence by hand. Nothing else executes it, so
+  // without this test a drifted path, body key or encryption rule would only surface on the
+  // phone. Running it against the harness server proves the whole App-visible surface answers
+  // over a real socket, pairing token included.
+  const script = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "app-smoke.mjs")
+  await withApi(
+    async (_key, _engine, text, onProgress) => {
+      if (!text.includes("慢慢想")) return "smoke 回答"
+      // The two steps that need a live task: SSE wants frames to arrive, stop wants to catch
+      // the task before it settles.
+      onProgress?.("第 1 步：读取上下文")
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      onProgress?.("第 2 步：组织回答")
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      return "smoke 慢任务回答"
+    },
+    async (h) => {
+      const output = await new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
+        // Async on purpose: the server under test runs on this thread, so a synchronous spawn
+        // would block it and every step would time out.
+        const child = spawn(process.execPath, [script, "--base", h.base, "--token", TOKEN], {
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.setEncoding("utf8")
+        child.stderr.setEncoding("utf8")
+        child.stdout.on("data", (chunk: string) => (stdout += chunk))
+        child.stderr.on("data", (chunk: string) => (stderr += chunk))
+        child.on("close", (status) => resolve({ status: status ?? -1, stdout, stderr }))
+      })
+      assert.equal(output.status, 0, `app-smoke.mjs failed:\n${output.stdout}\n${output.stderr}`)
+      assert.match(output.stdout, /步通过/)
+      // The steps that would silently degrade into a warning still have to have run
+      assert.match(output.stdout, /收到终态/)
+      assert.doesNotMatch(output.stdout, /停止步骤跳过/)
+    },
+  )
+})
+
+test("a bot behind a path-prefixing proxy answers the address the App stores", async () => {
+  await withApi(
+    async () => "proxy 回答",
+    async (h) => {
+      // nginx `location /agent-bot/ { proxy_pass http://127.0.0.1:<port>/; }`: the prefix is gone
+      // by the time the bot sees the path, which is what makes API_PUBLIC_URL carry a subpath and
+      // what /api then prints back as `<public>/api/v1` for the user to paste into the App.
+      const proxy: Server = createServer((req, res) => {
+        const path = req.url ?? "/"
+        if (!path.startsWith("/agent-bot/")) {
+          res.writeHead(404, { "content-type": "application/json" })
+          res.end(JSON.stringify({ error: "代理根路径" }))
+          return
+        }
+        void fetch(h.base + (path.slice("/agent-bot".length) || "/"), {
+          headers: { authorization: req.headers.authorization ?? "" },
+        })
+          .then(async (up) => {
+            res.writeHead(up.status, { "content-type": up.headers.get("content-type") ?? "application/json" })
+            res.end(Buffer.from(await up.arrayBuffer()))
+          })
+          .catch(() => {
+            res.writeHead(502)
+            res.end()
+          })
+      })
+      await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", () => resolve()))
+      const address = proxy.address()
+      if (address === null || typeof address === "string") throw new Error("proxy did not bind a TCP port")
+      try {
+        const pairing = `http://127.0.0.1:${address.port}/agent-bot`
+        const stored = normalizeAppBaseUrl(`${pairing}/api/v1`)
+        assert.equal(stored, pairing, "the printed endpoint must normalize back to the pairing URL")
+        const answered = await fetch(appRequestUrl(stored, "/health"), { headers: authHeaders() })
+        assert.equal(answered.status, 200, await answered.text())
+        // The two ways this deployment used to break: stripping to the origin lands on the
+        // proxy's root, and keeping the printed suffix doubles the API prefix.
+        const origin = await fetch(appRequestUrl(`http://127.0.0.1:${address.port}`, "/health"), {
+          headers: authHeaders(),
+        })
+        assert.equal(origin.status, 404, "dropping the subpath must not reach the bot")
+        const doubled = await fetch(appRequestUrl(`${pairing}/api/v1`, "/health"), { headers: authHeaders() })
+        assert.equal(doubled.status, 404, "the pasted suffix has to be stripped")
+      } finally {
+        await new Promise<void>((resolve) => {
+          proxy.close(() => resolve())
+        })
       }
     },
   )

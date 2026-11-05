@@ -1,6 +1,9 @@
 package com.agentbot.app.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,7 +24,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.agentbot.app.data.ApiFormat
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -41,16 +46,33 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
         val raw = result.contents ?: return@rememberLauncherForActivityResult
         runCatching {
             val obj = Json.parseToJsonElement(raw).jsonObject
-            val scannedUrl = obj["url"]?.jsonPrimitive?.content.orEmpty()
-            val scannedToken = obj["token"]?.jsonPrimitive?.content.orEmpty()
+            val scannedUrl = obj["url"]?.jsonPrimitive?.content.orEmpty().trim()
+            val scannedToken = obj["token"]?.jsonPrimitive?.content.orEmpty().trim()
             if (scannedUrl.isBlank() || scannedToken.isBlank()) throw IllegalStateException("二维码缺少 url/token")
-            val scannedEnc = obj["enc"]?.jsonPrimitive?.content.orEmpty()
+            val scannedEnc = obj["enc"]?.jsonPrimitive?.content.orEmpty().trim()
             val normalized = ApiFormat.normalizeBaseUrl(scannedUrl)
             baseUrl = normalized
             token = scannedToken
             encKey = scannedEnc
             vm.saveConnection(normalized, scannedToken, scannedEnc.ifBlank { null })
         }.onFailure { message = "二维码无效：${it.message}" }
+    }
+
+    val context = LocalContext.current
+    val startScan = {
+        scanner.launch(
+            ScanOptions().apply {
+                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                setPrompt("对准 Bot 通过 /api 发来的配对二维码")
+                setBeepEnabled(false)
+                setOrientationLocked(true)
+            },
+        )
+    }
+    // zxing's CaptureActivity opens the camera inside this process, so the declared CAMERA
+    // permission has to be granted at runtime first or the preview dies on SecurityException.
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startScan() else message = "需要相机权限才能扫码配对"
     }
 
     Column(
@@ -111,14 +133,9 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             OutlinedButton(
                 onClick = {
                     message = null
-                    scanner.launch(
-                        ScanOptions().apply {
-                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            setPrompt("对准 Bot 通过 /api 发来的配对二维码")
-                            setBeepEnabled(false)
-                            setOrientationLocked(true)
-                        },
-                    )
+                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED
+                    if (granted) startScan() else cameraPermission.launch(Manifest.permission.CAMERA)
                 },
                 modifier = Modifier.padding(start = 12.dp),
             ) {

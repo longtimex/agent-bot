@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { relative, sep } from "node:path"
+import { sep } from "node:path"
 import { formatBytes, type SavedAttachment } from "./attachments.js"
 import type { PromptFile } from "./opencode.js"
 
@@ -38,9 +38,11 @@ export function buildAttachmentSections(text: string, opts: AttachmentSectionsOp
   let inlineChars = 0
 
   for (const item of saved) {
-    const rel = relative(process.cwd(), item.path).split(sep).join("/")
+    // CLI engines run in the session work dir, which /dir can point anywhere: only an
+    // absolute path names this file for every cwd a task can start in.
+    const shown = item.path.split(sep).join("/")
     const label = item.kind === "image" ? "图片" : item.kind === "audio" ? "音频" : "文件"
-    notes.push(`- ${label}: ${rel} (${item.mime}, ${formatBytes(item.bytes)})`)
+    notes.push(`- ${label}: ${shown} (${item.mime}, ${formatBytes(item.bytes)})`)
 
     if (item.text !== undefined) {
       if (inlineChars + item.text.length > MAX_INLINE_TEXT_TOTAL) {
@@ -49,7 +51,7 @@ export function buildAttachmentSections(text: string, opts: AttachmentSectionsOp
       }
       inlineChars += item.text.length
       const suffix = item.truncated ? ' truncated="true"' : ""
-      blocks.push(`<file name="${rel}"${suffix}>\n${item.text}\n</file>`)
+      blocks.push(`<file name="${shown}"${suffix}>\n${item.text}\n</file>`)
       continue
     }
 

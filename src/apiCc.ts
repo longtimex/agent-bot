@@ -359,10 +359,16 @@ export async function routeCc(
           throw new ApiError(502, redactSecrets(err instanceof Error ? err.message : String(err)))
         }
       })
-      deps.json(ctx.res, result.code === 0 ? 200 : 502, {
-        ok: result.code === 0,
+      const failed = result.code !== 0
+      const failure = `创建 Provider 失败（退出码 ${result.code}）`
+      const detail = stripAnsi(redactSecrets(result.stderr || result.stdout)).trim()
+      deps.json(ctx.res, failed ? 502 : 200, {
+        ok: !failed,
         name: draft.name,
-        message: result.code === 0 ? `已创建 Provider「${draft.name}」。` : `创建 Provider 失败（退出码 ${result.code}）`,
+        message: failed ? failure : `已创建 Provider「${draft.name}」。`,
+        // Every other failure body carries `error`, the only key the App reads on a non-2xx
+        // status; without it cc-switch's actual complaint shows up as the text "HTTP 502".
+        ...(failed ? { error: detail || failure } : {}),
         text: clipCcOutput(redactSecrets(stripAnsi(result.stdout || result.stderr))),
       })
       return

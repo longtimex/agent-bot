@@ -17,6 +17,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** A request the server answered with a non-2xx status; message carries the API error text. */
@@ -24,6 +25,25 @@ class ApiException(val code: Int, message: String) : Exception(message)
 
 /** Thrown when the app has no usable server settings yet. */
 class NotConfiguredException : Exception("尚未配置服务器地址与令牌")
+
+/**
+ * What a rejected token means in the UI. The server's own 401 body explains the
+ * `Authorization` header, which is true but useless: every request here carries one, so a
+ * rejection can only mean the stored token stopped matching the bot (rotated, or the bot was
+ * reinstalled and regenerated it). Rewritten at the throw site because a dozen screens render
+ * `err.message` verbatim.
+ */
+private const val UNAUTHORIZED_HINT = "访问令牌已失效，请在「设置」重新填写或扫码配对"
+
+/**
+ * Shown when the stored pairing key cannot be used at all. Copying the key out of Telegram's
+ * code block tends to add a line break, and a key that is one character short is rejected by
+ * the JCE layer with a message about key length — neither tells the user which field to fix.
+ */
+private const val PAIRING_KEY_HINT = "配对密钥无效：应为服务端下发的 44 位 base64（32 字节），请在「设置」重新扫码或完整粘贴"
+
+/** Beyond this, the answer's `Date` is not a clock worth following. */
+private const val DAY_MS = 24L * 3600_000
 
 data class Connection(
     val baseUrl: String,
@@ -39,6 +59,33 @@ data class Connection(
  */
 class ApiClient {
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Server clock minus this device's clock, in ms, learned from the `Date` header of the last
+     * answered request. Task and history timestamps are written by that other clock, so an elapsed
+     * or "…前" label measured against `System.currentTimeMillis()` is off by whatever the phone is
+     * off by — a device one hour behind shows a task that started minutes ago as 「已运行 0 秒」 and
+     * looks hung rather than slow.
+     */
+    @Volatile
+    var clockOffsetMs: Long = 0L
+        private set
+
+    /** The server's clock as this device reads it. */
+    fun serverNow(): Long = System.currentTimeMillis() + clockOffsetMs
+
+    /** Ignores an absent or absurd header: a proxy with a broken clock is worse than no clock. */
+    private fun observeServerClock(res: okhttp3.Response) {
+        val header = res.header("Date") ?: return
+        val millis = runCatching { java.time.Instant.from(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME.parse(header)).toEpochMilli() }
+            .getOrNull() ?: return
+        val delta = millis - System.currentTimeMillis()
+        if (kotlin.math.abs(delta) < DAY_MS) clockOffsetMs = delta
+    }
+
+    /** The saved pairing key this server refuses because it no longer encrypts; see [executeEncryptedFallback]. */
+    @Volatile
+    private var refusedEncKey: String? = null
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -59,21 +106,47 @@ class ApiClient {
     // 用段判断而非带引号的斜杠字面量，避免 appParity 的路径扫描把辅助函数当成端点。
     private fun encryptionSkipped(path: String): Boolean {
         val segments = path.split('?').first().split('/')
-        return segments.contains("events") || segments.contains("media") || segments.lastOrNull() == "backup"
+        // /export is sent as a raw attachment too, so the server never encrypts its body
+        return segments.contains("events") ||
+            segments.contains("media") ||
+            segments.contains("export") ||
+            segments.lastOrNull() == "backup"
     }
 
-    private fun encryptionKeyBytes(encKey: String): ByteArray =
-        java.util.Base64.getDecoder().decode(encKey)
+    /**
+     * 配对密钥的字节形式。`/api` 的二维码给的是标准 base64（32 字节、44 字符），但从 Telegram
+     * 里长按复制几乎总会夹进换行：Base64 解码器把它报成「Illegal character」，SecretKeySpec 把
+     * 长度差一位的键报成「Invalid key length」，于是每个请求都死在本地、连不上服务端，而界面上
+     * 只留下半句 JCE 的话，用户完全不知道是自己粘贴的密钥坏了。空白去掉、长度验掉，失败就说清
+     * 该怎么做。
+     */
+    private fun encryptionKeyBytes(encKey: String): ByteArray {
+        val cleaned = encKey.filterNot { it.isWhitespace() }
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(cleaned) }
+            .getOrElse { throw ApiException(0, PAIRING_KEY_HINT) }
+        if (bytes.size != 32) throw ApiException(0, PAIRING_KEY_HINT)
+        return bytes
+    }
 
-    private fun encryptBody(encKey: String, plaintext: String): String {
+    /**
+     * `base64(iv || ciphertext || tag)` of the request body. Bytes all the way through: one picked
+     * video already costs its size twice on a phone heap (the file, then its Base64), and routing
+     * the request through a JSON String and a Base64 String would add two more copies of it before
+     * the socket ever sees a byte.
+     */
+    private fun encryptBody(encKey: String, plaintext: ByteArray): ByteArray {
         val keyBytes = encryptionKeyBytes(encKey)
         val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(keyBytes, "AES"))
-        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        val out = ByteArray(cipher.iv.size + ciphertext.size)
-        cipher.iv.copyInto(out)
-        ciphertext.copyInto(out, cipher.iv.size)
-        return java.util.Base64.getEncoder().encodeToString(out)
+        val iv = cipher.iv
+        val out = ByteArray(iv.size + cipher.getOutputSize(plaintext.size))
+        iv.copyInto(out)
+        // Encrypt straight into the tail of the wire buffer instead of a second array.
+        cipher.doFinal(plaintext, 0, plaintext.size, out, iv.size)
+        val encoder = java.util.Base64.getEncoder()
+        val sink = java.io.ByteArrayOutputStream((out.size + 2) / 3 * 4)
+        encoder.wrap(sink).use { it.write(out) }
+        return sink.toByteArray()
     }
 
     private fun decryptBody(encKey: String, payload: String): String {
@@ -93,7 +166,9 @@ class ApiClient {
         val builder = Request.Builder()
             .url(url(connection, path))
             .header("Authorization", "Bearer ${connection.token}")
-        val encKey = connection.encKey?.takeIf { it.isNotBlank() && !encryptionSkipped(path) }
+        val encKey = connection.encKey?.takeIf {
+            it.isNotBlank() && it != refusedEncKey && !encryptionSkipped(path)
+        }
         if (encKey != null) {
             builder.header("x-enc", "v1")
             // 响应解密时 execute 只拿得到 Request，把密钥挂在 tag 上随身携带
@@ -101,7 +176,7 @@ class ApiClient {
         }
         when {
             body != null -> {
-                val plaintext = json.encodeToString(JsonObject.serializer(), body)
+                val plaintext = json.encodeToString(JsonObject.serializer(), body).toByteArray(Charsets.UTF_8)
                 val wire = if (encKey != null) encryptBody(encKey, plaintext) else plaintext
                 builder.method(
                     method,
@@ -116,24 +191,64 @@ class ApiClient {
 
     private suspend fun execute(request: Request, client: OkHttpClient = http): String = withContext(Dispatchers.IO) {
         client.newCall(request).execute().use { res ->
+            observeServerClock(res)
             val text = res.body?.string().orEmpty()
             // 错误响应同样可能是密文（服务端对所有 JSON 应答一视同仁），先还原再提取消息
             val encKey = request.header("x-enc")?.let { connectionKeyFor(request) }
             val plain = if (res.header("x-enc") == "v1" && encKey != null) decryptWithGuard(encKey, text) else text
             if (!res.isSuccessful) {
-                val detail = runCatching {
-                    (json.parseToJsonElement(plain).jsonObject)["error"]?.jsonPrimitive?.content
-                }.getOrNull()
-                throw ApiException(res.code, detail ?: "HTTP ${res.code}")
+                if (res.code == 400 && encKey != null && encKeyRejected(plain)) {
+                    throw EncryptionRefused(encKey)
+                }
+                throw ApiException(res.code, serverFailure(res.code, plain))
             }
             // 发起时带了加密头且服务端同样以加密应答，才解密
             if (res.header("x-enc") == "v1" && encKey != null) plain else text
         }
     }
 
-    /** 解密失败统一转成 ApiException，避免裸 crypto 异常冒泡到界面。 */
+    /**
+     * Sends with the plaintext fallback applied: the key on this phone has stopped matching the
+     * server's — encryption switched off (`API_ENCRYPTION=0`), a reinstall that regenerated it, or
+     * simply a different one. Every way that shows up is answered the same way: drop the key for
+     * this session and repeat the call once, which happens before routing, so the retried POST
+     * cannot start a second task. Without it the App is bricked until the user think to re-scan.
+     */
+    private suspend fun executeEncryptedFallback(
+        connection: Connection,
+        method: String,
+        path: String,
+        body: JsonObject? = null,
+        client: OkHttpClient = http,
+    ): String = try {
+        execute(request(connection, method, path, body), client)
+    } catch (err: EncryptionRefused) {
+        refusedEncKey = err.encKey
+        execute(request(connection, method, path, body), client)
+    }
+
+    /**
+     * The two 400s that mean *this key* is the problem: the server turned message encryption off
+     * and lectures about a request header the user cannot remove, or it could not decrypt the body
+     * we sent because its own key changed. Both say what to do, and both are returned in plaintext.
+     */
+    private fun encKeyRejected(body: String): Boolean =
+        (body.contains("x-enc") && body.contains("API_ENCRYPTION")) || body.contains("解密请求体失败")
+
+    private class EncryptionRefused(val encKey: String) : Exception()
+
+    /**
+     * 解密失败统一转成 ApiException，避免裸 crypto 异常冒泡到界面；已经说明白的密钥问题原样抛出。
+     * 认证标签对不上是另一回事：那把密钥确实不是服务器那把，所以交给 [EncryptionRefused] 走明文
+     * 重试，界面才不会停在「解密响应失败：Tag mismatch」上——GET 没有请求体，服务器那句提示永远
+     * 到不了手机，历史上每一个界面都会这样死掉。
+     */
     private fun decryptWithGuard(encKey: String, payload: String): String =
         runCatching { decryptBody(encKey, payload) }.getOrElse {
+            if (it is ApiException) throw it
+            if (it is javax.crypto.AEADBadTagException || it is javax.crypto.BadPaddingException) {
+                throw EncryptionRefused(encKey)
+            }
             throw ApiException(0, "解密响应失败：${it.message}")
         }
 
@@ -142,24 +257,21 @@ class ApiClient {
 
     class EncKeyTag(val value: String)
 
-    private suspend fun getBody(connection: Connection, path: String): JsonObject =
-        json.parseToJsonElement(execute(request(connection, "GET", path))).jsonObject
+    /**
+     * 非 2xx 的响应体：能按 JSON 读出 `error` 就用 Bot 给的说明；读不出来（反向代理或隧道在
+     * Bot 重启期间回的 HTML 502 页面）就只留状态码，不把一坨标签刷到界面上。401 不看响应体，
+     * 直接换成 [UNAUTHORIZED_HINT]——那句「请携带 Authorization」对带着令牌的用户毫无帮助。
+     */
+    private fun serverFailure(code: Int, body: String?): String =
+        if (code == 401) UNAUTHORIZED_HINT else runCatching {
+            body?.let { json.parseToJsonElement(it).jsonObject["error"]?.jsonPrimitive?.content }
+        }.getOrNull() ?: "HTTP $code"
 
-    private suspend fun getBytes(connection: Connection, path: String): ByteArray = withContext(Dispatchers.IO) {
-        http.newCall(request(connection, "GET", path)).execute().use { res ->
-            val bytes = res.body?.bytes() ?: ByteArray(0)
-            if (!res.isSuccessful) {
-                val detail = runCatching {
-                    (json.parseToJsonElement(bytes.decodeToString()).jsonObject)["error"]?.jsonPrimitive?.content
-                }.getOrNull()
-                throw ApiException(res.code, detail ?: "HTTP ${res.code}")
-            }
-            bytes
-        }
-    }
+    private suspend fun getBody(connection: Connection, path: String): JsonObject =
+        json.parseToJsonElement(executeEncryptedFallback(connection, "GET", path)).jsonObject
 
     private suspend fun send(connection: Connection, method: String, path: String, body: JsonObject? = null): JsonObject =
-        json.parseToJsonElement(execute(request(connection, method, path, body))).jsonObject
+        json.parseToJsonElement(executeEncryptedFallback(connection, method, path, body)).jsonObject
 
     private fun <T> parseList(obj: JsonObject, field: String, deserializer: kotlinx.serialization.KSerializer<T>): List<T> {
         val array = obj[field]?.jsonArray ?: return emptyList()
@@ -240,11 +352,20 @@ class ApiClient {
      * Returns normally on done/failed/cancelled; throws when the stream cannot
      * be established or closes early, so the caller can fall back to polling.
      */
-    suspend fun streamTask(connection: Connection, id: String, onEvent: (Task) -> Unit): Unit =
+    suspend fun streamTask(connection: Connection, id: String, onEvent: suspend (Task) -> Unit): Unit =
         withContext(Dispatchers.IO) {
             val call = http.newCall(request(connection, "GET", "/task/$id/events"))
             call.execute().use { res ->
-                if (!res.isSuccessful) throw ApiException(res.code, res.body?.string()?.take(200) ?: "HTTP ${res.code}")
+                if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
+                // A task that had already settled when the request arrived answers with one
+                // plain JSON snapshot instead of a stream (src/api.ts), so read that too.
+                if (res.header("content-type")?.contains("text/event-stream") != true) {
+                    val snapshot = json.parseToJsonElement(res.body?.string().orEmpty()).jsonObject
+                    val settled = snapshot["task"]?.jsonObject?.let { json.decodeFromJsonElement(Task.serializer(), it) }
+                        ?: throw ApiException(500, "快照响应缺少 task 字段")
+                    onEvent(settled)
+                    return@use
+                }
                 val source = res.body?.source() ?: throw ApiException(500, "空的事件流")
                 while (true) {
                     // Heartbeats arrive as ": ping" comments; data frames as "data: {json}"
@@ -307,9 +428,31 @@ class ApiClient {
         return res["cleared"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
     }
 
-    /** Raw bytes of one reply media item; same auth and SSRF guards as Telegram delivery. */
-    suspend fun taskMedia(connection: Connection, taskId: String, index: Int): ByteArray =
-        getBytes(connection, "/task/$taskId/media/$index")
+    /**
+     * One reply media item, streamed into [dest] and returned when complete; same auth and SSRF
+     * guards as Telegram delivery. Nothing here goes through the heap: a video at the server's
+     * `MAX_MEDIA_MB=100` ceiling buffered as a ByteArray took two copies to open and killed the
+     * process on most devices before the viewer ever appeared.
+     */
+    suspend fun taskMediaTo(connection: Connection, taskId: String, index: Int, dest: File): File =
+        withContext(Dispatchers.IO) {
+            http.newCall(request(connection, "GET", "/task/$taskId/media/$index")).execute().use { res ->
+                if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
+                val input = res.body?.byteStream() ?: throw ApiException(500, "空的媒体响应")
+                // A distinct scratch name per call: the bubble's thumbnail and an explicit tap can
+                // fetch the same item at once, and two sequential writers would interleave it.
+                val part = File(dest.parentFile, "${dest.name}.${System.nanoTime()}.part")
+                try {
+                    part.outputStream().use { out -> input.copyTo(out) }
+                    // Renaming keeps a dropped connection's half file out of the cache: the caller
+                    // treats any existing file as complete and would never re-download it.
+                    if (!part.renameTo(dest)) throw ApiException(500, "无法写入媒体缓存")
+                    dest
+                } finally {
+                    part.delete()
+                }
+            }
+        }
 
     // ---- work dir and timezone ----
 
@@ -369,8 +512,7 @@ class ApiClient {
 
     /** Install/update/uninstall an Agent CLI; may run for several minutes. */
     suspend fun agentAction(connection: Connection, engine: String, action: String): AgentActionResult {
-        val request = request(connection, "POST", "/agents/$engine/$action")
-        val text = execute(request, longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/agents/$engine/$action", client = longHttp)
         return json.decodeFromJsonElement(AgentActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
@@ -456,7 +598,7 @@ class ApiClient {
 
     /** `path` is the server's action id, e.g. `check`, `update`, `restart`, `service/start`. */
     suspend fun runOps(connection: Connection, path: String): OpsResult {
-        val text = execute(request(connection, "POST", "/ops/$path"), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/ops/$path", client = longHttp)
         val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
             ?: throw ApiException(500, "响应缺少 result 字段")
         return json.decodeFromJsonElement(OpsResult.serializer(), result)
@@ -464,7 +606,7 @@ class ApiClient {
 
     /** 干跑检查更新：GET /ops/check-update，只列出落后提交，不改服务器工作区。 */
     suspend fun checkUpdate(connection: Connection): OpsResult {
-        val text = execute(request(connection, "GET", "/ops/check-update"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/ops/check-update", client = longHttp)
         val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
             ?: throw ApiException(500, "响应缺少 result 字段")
         return json.decodeFromJsonElement(OpsResult.serializer(), result)
@@ -520,7 +662,7 @@ class ApiClient {
 
     /** Lists providers and runs `--version`; each cc-switch call may take up to 20s. */
     suspend fun ccStatus(connection: Connection): CcStatus {
-        val text = execute(request(connection, "GET", "/cc"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/cc", client = longHttp)
         return json.decodeFromJsonElement(CcStatus.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
@@ -532,14 +674,14 @@ class ApiClient {
     /** Omitting [id] tests the current provider, mirroring `/cc test`. */
     suspend fun ccTest(connection: Connection, id: String?): CcTestResult {
         val body = buildJsonObject { id?.takeIf { it.isNotBlank() }?.let { put("id", it) } }
-        val text = execute(request(connection, "POST", "/cc/test", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/test", body, client = longHttp)
         return json.decodeFromJsonElement(CcTestResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     /** `/cc stream <id>` and `/cc models <id>` — both talk to the provider, so they are slow. */
     private suspend fun ccProviderText(connection: Connection, kind: String, id: String): CcText {
         val path = "/cc/$kind?id=" + Uri.encode(id)
-        val text = execute(request(connection, "GET", path), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", path, client = longHttp)
         return json.decodeFromJsonElement(CcText.serializer(), json.parseToJsonElement(text))
     }
 
@@ -555,50 +697,53 @@ class ApiClient {
 
     /** Read-only cc-switch views offered by the server, with their target prompts. */
     suspend fun ccViews(connection: Connection): List<CcViewSpec> {
-        val text = execute(request(connection, "GET", "/cc/views"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/cc/views", client = longHttp)
         return parseList(json.parseToJsonElement(text).jsonObject, "views", CcViewSpec.serializer())
     }
 
     /** One view from [ccViews]; [target] is the id/keyword the view asks for. */
     suspend fun ccView(connection: Connection, name: String, target: String? = null): String {
         val suffix = target?.takeIf { it.isNotBlank() }?.let { "&target=" + Uri.encode(it) } ?: ""
-        val text = execute(request(connection, "GET", "/cc/view?name=${Uri.encode(name)}$suffix"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/cc/view?name=${Uri.encode(name)}$suffix", client = longHttp)
         return json.parseToJsonElement(text).jsonObject["text"]?.jsonPrimitive?.content.orEmpty()
     }
 
     /** `env check`/`env tools` shell out to cc-switch, so this shares the long client. */
     suspend fun ccEnv(connection: Connection, mode: String): CcText {
-        val text = execute(request(connection, "GET", "/cc/env?mode=$mode"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/cc/env?mode=$mode", client = longHttp)
         return json.decodeFromJsonElement(CcText.serializer(), json.parseToJsonElement(text))
     }
 
     private suspend fun ccTextResource(connection: Connection, path: String): String {
-        val text = execute(request(connection, "GET", path), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", path, client = longHttp)
         return json.parseToJsonElement(text).jsonObject["text"]?.jsonPrimitive?.content.orEmpty()
     }
 
     suspend fun ccSyncMcp(connection: Connection): CcActionResult {
-        val text = execute(request(connection, "POST", "/cc/mcp/sync"), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/mcp/sync", client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     suspend fun ccActivatePrompt(connection: Connection, id: String): CcActionResult {
-        val text = execute(
-            request(connection, "POST", "/cc/prompts/activate", buildJsonObject { put("id", id) }),
+        val text = executeEncryptedFallback(
+            connection,
+            "POST",
+            "/cc/prompts/activate",
+            buildJsonObject { put("id", id) },
             longHttp,
         )
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     suspend fun ccDeactivatePrompt(connection: Connection): CcActionResult {
-        val text = execute(request(connection, "POST", "/cc/prompts/deactivate"), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/prompts/deactivate", client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     /** `/cc mcp import <json>` — paste a full mcpServers block. */
     suspend fun ccImportMcp(connection: Connection, raw: String): CcActionResult {
         val body = buildJsonObject { put("json", raw) }
-        val text = execute(request(connection, "POST", "/cc/mcp/import", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/mcp/import", body, client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
@@ -608,14 +753,14 @@ class ApiClient {
             put("name", name)
             put("content", content)
         }
-        val text = execute(request(connection, "POST", "/cc/prompts/create", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/prompts/create", body, client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     /** `/cc sessions search <关键词>`: cc-switch scans its session index, so this is slow. */
     suspend fun ccSessionsSearch(connection: Connection, query: String): CcText {
         val path = "/cc/sessions?q=" + Uri.encode(query)
-        val text = execute(request(connection, "GET", path), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", path, client = longHttp)
         return json.decodeFromJsonElement(CcText.serializer(), json.parseToJsonElement(text))
     }
 
@@ -625,7 +770,7 @@ class ApiClient {
             put("url", url)
             put("confirm", true)
         }
-        val text = execute(request(connection, "POST", "/cc/deeplink", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/deeplink", body, client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
@@ -648,13 +793,13 @@ class ApiClient {
             draft.apiFormat?.let { put("apiFormat", it) }
             draft.config?.let { put("config", it) }
         }
-        val text = execute(request(connection, "POST", "/cc/providers", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/providers", body, client = longHttp)
         return json.decodeFromJsonElement(CcActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 
     /** Mutating cc-switch commands the server allows; drives the app's danger zone. */
     suspend fun ccExecCommands(connection: Connection): List<CcExecCommand> {
-        val text = execute(request(connection, "GET", "/cc/exec"), longHttp)
+        val text = executeEncryptedFallback(connection, "GET", "/cc/exec", client = longHttp)
         return parseList(json.parseToJsonElement(text).jsonObject, "commands", CcExecCommand.serializer())
     }
 
@@ -664,7 +809,7 @@ class ApiClient {
             arg?.takeIf { it.isNotBlank() }?.let { put("arg", it) }
             if (confirm) put("confirm", true)
         }
-        val text = execute(request(connection, "POST", "/cc/exec", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/exec", body, client = longHttp)
         return json.decodeFromJsonElement(CcExecResult.serializer(), json.parseToJsonElement(text))
     }
 
@@ -677,13 +822,18 @@ class ApiClient {
             put("args", buildJsonArray { args.forEach { add(it) } })
             if (confirm) put("confirm", true)
         }
-        val text = execute(request(connection, "POST", "/cc/run", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/run", body, client = longHttp)
         return json.decodeFromJsonElement(CcRunResult.serializer(), json.parseToJsonElement(text))
     }
 
-    /** Both Hermes memory blobs plus cc-switch's limits summary, in one read. */
-    suspend fun hermes(connection: Connection): HermesMemory =
-        json.decodeFromJsonElement(HermesMemory.serializer(), getBody(connection, "/cc/hermes"))
+    /**
+     * Both Hermes memory blobs plus cc-switch's limits summary, in one read. Three CLI calls
+     * behind it, so it gets the long client like every other cc-switch view.
+     */
+    suspend fun hermes(connection: Connection): HermesMemory {
+        val text = executeEncryptedFallback(connection, "GET", "/cc/hermes", client = longHttp)
+        return json.decodeFromJsonElement(HermesMemory.serializer(), json.parseToJsonElement(text).jsonObject)
+    }
 
     /**
      * `set` and `clear` overwrite the blob and `enable`/`disable` decide whether Hermes loads
@@ -703,7 +853,7 @@ class ApiClient {
             content?.let { put("content", it) }
             if (confirm) put("confirm", true)
         }
-        val text = execute(request(connection, "POST", "/cc/hermes", body), longHttp)
+        val text = executeEncryptedFallback(connection, "POST", "/cc/hermes", body, client = longHttp)
         return json.decodeFromJsonElement(HermesResult.serializer(), json.parseToJsonElement(text))
     }
 
@@ -742,7 +892,7 @@ class ApiClient {
         withContext(Dispatchers.IO) {
             http.newCall(request(connection, "GET", "/export?format=$format")).execute().use { res ->
                 val text = res.body?.string().orEmpty()
-                if (!res.isSuccessful) throw ApiException(res.code, text.take(200).ifEmpty { "HTTP ${res.code}" })
+                if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, text))
                 text
             }
         }
@@ -763,7 +913,7 @@ class ApiClient {
             http.newCall(request(connection, "GET", "/ops/backup")).execute().use { res ->
                 val bytes = res.body?.bytes() ?: ByteArray(0)
                 if (!res.isSuccessful) {
-                    throw ApiException(res.code, bytes.decodeToString().take(200).ifEmpty { "HTTP ${res.code}" })
+                    throw ApiException(res.code, serverFailure(res.code, bytes.decodeToString()))
                 }
                 bytes
             }
@@ -836,13 +986,27 @@ class ApiClient {
 
 /** Parse helpers shared with the settings screen. */
 object ApiFormat {
-    /** Normalizes user input like "1.2.3.4:3080" or "agent-bot.example.com" to a full base URL. */
+    /**
+     * Normalizes user input like "1.2.3.4:3080" or "agent-bot.example.com" to a full base URL.
+     * `/api` prints the endpoint as `.../api/v1`, and that is what people paste here, so a
+     * trailing API prefix is dropped: requests append it themselves.
+     *
+     * Only the prefix is dropped, never the path in front of it. A bot behind nginx on a shared
+     * domain runs at `https://example.com/agent-bot` (that is what `API_PUBLIC_URL` holds), and
+     * stripping back to the origin would send every request to `https://example.com/api/v1/...`,
+     * which is another site's router or a 404. The result still has to be an address with a host,
+     * so a pasted "http://api" is left alone rather than reduced to "http://".
+     */
     fun normalizeBaseUrl(raw: String): String {
         var value = raw.trim()
         if (value.isEmpty()) return value
         if (!value.startsWith("http://") && !value.startsWith("https://")) value = "http://$value"
-        return value.trimEnd('/')
+        value = value.trimEnd('/')
+        val stripped = value.removeSuffix("/api/v1").removeSuffix("/api")
+        return if (HOST_WITH_PATH.matches(stripped)) stripped else value
     }
+
+    private val HOST_WITH_PATH: Regex = Regex("https?://[^/]+(/[^/]+)*$")
 
     fun epochMsToUtcString(ms: Long): String =
         java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)

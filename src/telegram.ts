@@ -3,7 +3,7 @@ import QRCode from "qrcode"
 import { unlinkSync } from "node:fs"
 import { resolve } from "node:path"
 import { Agent, fetch as undiciFetch } from "undici"
-import { Bot, InlineKeyboard, InputFile } from "grammy"
+import { Bot, GrammyError, InlineKeyboard, InputFile } from "grammy"
 import type { Context } from "grammy"
 import type { Message } from "grammy/types"
 import {
@@ -39,9 +39,8 @@ import {
   type ModelInfo,
 } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
-import { resolveApiToken } from "./api.js"
+import { pairingQrPayload, resolveApiToken, resolveEncKey, resolvePairingUrl } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
-import { resolveEncKey } from "./api.js"
 import { OpsService } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
 import { maskProxyUrl, ProxyService } from "./proxy.js"
@@ -66,12 +65,25 @@ const MAX_ATTACH_TOTAL_BYTES = 15 * 1024 * 1024
 const CHUNK_DELAY_MS = 250
 const TELEGRAM_MAX_TEXT = 4000
 const SHUTDOWN_DRAIN_MS = 3_000
+/** Reconnect attempts after a transport failure to api.telegram.org: 5s, 10s, 20s… capped. */
+const RECONNECT_DELAY_MS = 5_000
+const RECONNECT_MAX_DELAY_MS = 60_000
 /** Per-chat bookkeeping is pruned past this many chats so an allow-all bot cannot grow without bound. */
 const CHAT_STATE_LIMIT = 500
 
 /** Failure cards keep their prompt for the 重试 button; only the newest ones survive. */
 const RETRY_CARD_LIMIT = 100
 
+
+/**
+ * Only a rejected credential is worth dying for: 401/404 from the Bot API cannot heal, and a
+ * process that stays up holding the lock answers nothing. A GrammyError means Telegram actually
+ * replied; everything else (HttpError, DNS failure, reset connection) is transport, and the App
+ * drives the HTTP API rather than Telegram, so that channel must survive the outage.
+ */
+function isFatalTelegramCredentialError(err: unknown): boolean {
+  return err instanceof GrammyError && (err.error_code === 401 || err.error_code === 404)
+}
 
 // Control commands routed through the per-chat queue (they touch session state);
 // everything else that reaches the queue is a prompt and must respect the cap.
@@ -146,6 +158,9 @@ export class TelegramBridge {
   >()
   #startedAt = Date.now()
   #running = false
+  #reconnectTimer?: ReturnType<typeof setTimeout>
+  #reconnectDelayMs = RECONNECT_DELAY_MS
+  #servicesStarted = false
   /** Live-overridable via /timezone; the reminder, schedule and usage stores all follow it. */
   #timezone: string
 
@@ -388,7 +403,12 @@ export class TelegramBridge {
     return Number.isInteger(parsed) ? parsed : undefined
   }
 
-  async start(options: { polling?: boolean; onFatal?: (err: Error) => void } = {}): Promise<void> {
+  /**
+   * `reconnecting` tells the caller what happened: the Bot API never answered, the credential was
+   * not necessarily rejected, and polling will be picked up in the background. A deployment that
+   * also serves the App keeps serving it; a Telegram-only one has nothing left to do and exits.
+   */
+  async start(options: { polling?: boolean; onFatal?: (err: Error) => void } = {}): Promise<{ reconnecting: boolean }> {
     this.#running = true
     this.#startedAt = Date.now()
     this.#setupHandlers()
@@ -399,7 +419,7 @@ export class TelegramBridge {
 
     if (options.polling === false) {
       this.#log.info("Telegram handlers registered (polling disabled)")
-      return
+      return { reconnecting: false }
     }
 
     // bot.start() resolves only when polling ends, so awaiting it would say nothing
@@ -408,10 +428,22 @@ export class TelegramBridge {
     try {
       await this.#bot.init()
     } catch (err) {
-      this.#running = false
-      throw new Error(`无法连接 Telegram：${(err as Error).message}`)
+      if (isFatalTelegramCredentialError(err)) {
+        this.#running = false
+        throw new Error(`无法连接 Telegram：${(err as Error).message}`)
+      }
+      this.#log.error(
+        `Telegram 暂时连不上，转为后台重连（HTTP API 与安卓端不受影响）：${(err as Error).message}`,
+      )
+      this.#scheduleReconnect(options)
+      return { reconnecting: true }
     }
 
+    this.#poll(options)
+    return { reconnecting: false }
+  }
+
+  #poll(options: { onFatal?: (err: Error) => void }): void {
     this.#log.info("starting Telegram Bot (long polling)...")
     this.#bot
       .start({
@@ -420,9 +452,7 @@ export class TelegramBridge {
           this.#bot.api
             .setMyCommands(BOT_MENU_COMMANDS)
             .catch((err: unknown) => this.#log.warn("failed to register Telegram command menu:", (err as Error).message))
-          this.#reminders.start()
-          this.#schedules.start()
-          if (this.ownerChatId !== undefined) this.#usageReport.start()
+          this.#startServices()
           void this.#sendStartupNotice(botInfo.username)
         },
       })
@@ -433,6 +463,49 @@ export class TelegramBridge {
         // would keep the lock and supervise nothing, so let the caller exit and restart.
         options.onFatal?.(err)
       })
+  }
+
+  /** Reminders, schedules and the usage report all deliver into Telegram, so they wait for the
+   * first successful connect — and only run once, however many reconnects follow. */
+  #startServices(): void {
+    if (this.#servicesStarted) return
+    this.#servicesStarted = true
+    this.#reminders.start()
+    this.#schedules.start()
+    if (this.ownerChatId !== undefined) this.#usageReport.start()
+  }
+
+  /** Exponential backoff, unref'd so a pending attempt can never hold the process open. */
+  #scheduleReconnect(options: { onFatal?: (err: Error) => void }): void {
+    if (!this.#running || this.#reconnectTimer) return
+    const delay = this.#reconnectDelayMs
+    this.#reconnectDelayMs = Math.min(delay * 2, RECONNECT_MAX_DELAY_MS)
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined
+      if (!this.#running) return
+      void this.#bot
+        .init()
+        .then(() => {
+          if (!this.#running) return
+          this.#reconnectDelayMs = RECONNECT_DELAY_MS
+          this.#log.info("Telegram 已恢复，开始轮询")
+          this.#poll(options)
+        })
+        .catch((err: unknown) => {
+          if (!this.#running) return
+          if (isFatalTelegramCredentialError(err)) {
+            this.#running = false
+            this.#log.error(`Telegram 令牌已失效：${(err as Error).message}`)
+            options.onFatal?.(err as Error)
+            return
+          }
+          this.#log.warn(
+            `Telegram 重连失败，${Math.round(this.#reconnectDelayMs / 1000)}s 后再试：${(err as Error).message}`,
+          )
+          this.#scheduleReconnect(options)
+        })
+    }, delay)
+    this.#reconnectTimer.unref()
   }
 
   /**
@@ -454,6 +527,10 @@ export class TelegramBridge {
 
   async stop(): Promise<void> {
     this.#running = false
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer)
+      this.#reconnectTimer = undefined
+    }
     this.#reminders.dispose()
     this.#schedules.dispose()
     this.#usageReport.dispose()
@@ -1217,36 +1294,42 @@ export class TelegramBridge {
     }
     const { port, bind } = this.#cfg.api
     const wildcard = bind === "0.0.0.0" || bind === "::"
-    const host = wildcard || bind === "127.0.0.1" || bind === "localhost" || bind === "::1"
-      ? "<你的服务器地址>"
-      : bind
+    // The App can only use an address it can actually dial, so a QR needs API_PUBLIC_URL or a
+    // concrete API_BIND; without either the text keeps the placeholder and says how to fix it.
+    const pairingUrl = resolvePairingUrl(this.#cfg)
+    const address = pairingUrl ? `${pairingUrl}/api/v1` : `http://<你的服务器地址>:${port}/api/v1`
     let qrBuffer: Buffer | undefined
     // 启用了消息级加密时,把配对密钥一起放进二维码(App 侧自动开启加密)
     const encKey = resolveEncKey(this.#cfg)?.toString("base64")
-    try {
-      qrBuffer = await QRCode.toBuffer(
-        JSON.stringify(encKey ? { url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token, enc: encKey } : { url: `http://${host === "<你的服务器地址>" ? "" : host}:${port}`, token }),
-        {
-          margin: 2,
-          width: 640,
-          color: { dark: "#0b0c0e", light: "#ffffff" },
-        },
-      )
-    } catch (err) {
-      this.#log.warn(`pairing QR generation failed: ${(err as Error).message}`)
+    if (pairingUrl) {
+      try {
+        qrBuffer = await QRCode.toBuffer(
+          JSON.stringify(pairingQrPayload(pairingUrl, token, encKey)),
+          {
+            margin: 2,
+            width: 640,
+            color: { dark: "#0b0c0e", light: "#ffffff" },
+          },
+        )
+      } catch (err) {
+        this.#log.warn(`pairing QR generation failed: ${(err as Error).message}`)
+      }
     }
 
     const text =
       `📱 *安卓 App 配对信息*\n` +
-      `• API 地址: \`http://${host}:${port}/api/v1\`\n` +
+      `• API 地址: \`${address}\`\n` +
       `• 访问令牌: \`${token}\`\n\n` +
       (encKey
         ? "🔐 消息级加密已启用：二维码含配对密钥，扫码后请求与响应将自动加密。\n\n"
         : "🔒 消息级加密：未启用。在 .env 设置 `API_ENCRYPTION=1` 并重启后，二维码会带上配对密钥，App 通信将自动加密。\n\n") +
+      (pairingUrl
+        ? ""
+        : "📷 没有附上二维码：服务器还不确定手机该连哪个地址。在 .env 设置 `API_PUBLIC_URL`（局域网如 `http://192.168.1.10:3080`，反向代理如 `https://bot.example.com`，挂在子路径上则连前缀一起写如 `https://bot.example.com/agent-bot`）并重启后，再发一次 /api 就能扫码配对；App 的「设置」页也可以手动填地址。\n\n") +
       (wildcard
         ? "⚠️ 当前监听所有网卡。请配合反向代理 / SSH 隧道 / VPN 暴露给手机，并保持令牌鉴权。\n\n"
         : "") +
-      (!wildcard
+      (!pairingUrl && !wildcard
         ? "⚠️ 当前仅监听本机回环地址，手机无法直连。可在 .env 设置 `API_BIND=0.0.0.0` 后配合反向代理 / SSH 隧道 / VPN 暴露给手机；令牌鉴权会一直保留。\n\n"
         : "") +
       "在 App 的「设置」页也可直接「扫码配对」;令牌持久化在 `data/api-token.json`，设置 `API_TOKEN` 可固定。"

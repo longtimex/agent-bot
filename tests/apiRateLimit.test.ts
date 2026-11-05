@@ -34,6 +34,18 @@ test("AuthFailureLimiter clears on success and can prune expired keys", () => {
   assert.equal(limiter.size, 0)
 })
 
+test("AuthFailureLimiter keeps a cooldown that a good token did not earn away", () => {
+  const limiter = new AuthFailureLimiter({ maxFailures: 2, windowMs: 1_000, blockMs: 5_000 })
+  limiter.recordFailure("proxy", 0)
+  limiter.recordFailure("proxy", 0)
+  assert.equal(limiter.check("proxy", 1_000).allowed, false)
+  // Every phone behind one nginx shares this key, so the App's own successful polling must not
+  // reset the budget an attacker is burning through — the cooldown is what costs them anything.
+  limiter.recordSuccess("proxy", 1_000)
+  assert.equal(limiter.check("proxy", 1_000).allowed, false)
+  assert.equal(limiter.check("proxy", 7_000).allowed, true, "and it still expires on its own")
+})
+
 test("AuthFailureLimiter stays bounded under address rotation", () => {
   const limiter = new AuthFailureLimiter({ maxFailures: 100, windowMs: 60_000, maxKeys: 3 })
   for (let i = 0; i < 20; i++) limiter.recordFailure(`ip-${i}`, 0)

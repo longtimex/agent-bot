@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { resolve } from "node:path"
 import process from "node:process"
 import { CC_SWITCH_APPS } from "./ccswitch.js"
@@ -42,6 +42,8 @@ export interface BotConfig {
     enabled: boolean
     port: number
     bind: string
+    /** The address the App should dial; needed when the bot sits behind a proxy or a NAT. */
+    publicUrl?: string
     /** When empty, a token is generated on first start and stored in data/api-token.json. */
     token?: string
   }
@@ -83,6 +85,14 @@ export class ConfigError extends StartupConfigError {
 /** Same loader as the bot, so CLI tools resolve DATA_DIR and friends from `.env`. */
 export function loadDotEnvFile(): void {
   if (!existsSync(".env")) return
+  if (statSync(".env").isDirectory()) {
+    // `docker compose up` with a missing host file silently mounts an empty *directory* at
+    // ./.env, and skipping it would only surface later as "未配置 TELEGRAM_BOT_TOKEN".
+    throw new ConfigError(
+      "拒绝启动：.env 是一个目录，不是文件。多半是宿主机上没有 .env，Docker 自动建了同名目录；" +
+        "先执行 cp .env.example .env 并填好配置，再重新 docker compose up。",
+    )
+  }
   try {
     process.loadEnvFile(".env")
   } catch {
@@ -189,6 +199,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       enabled: bool(env.API_ENABLED, true),
       port: int(env.API_PORT, 3080, 1, 65535),
       bind: pick(env.API_BIND) ?? "127.0.0.1",
+      publicUrl: parseApiPublicUrl(pick(env.API_PUBLIC_URL)),
       token: pick(env.API_TOKEN),
     },
     maxReplyLength: int(env.MAX_REPLY_LENGTH, 1500, 100, 4000),
@@ -225,6 +236,32 @@ function parseStt(env: NodeJS.ProcessEnv): BotConfig["stt"] {
     model: pick(env.STT_MODEL) ?? "whisper-1",
     language: pick(env.STT_LANGUAGE),
   }
+}
+
+/**
+ * The address the App dials. A subpath is allowed and kept: a bot mounted behind nginx on a shared
+ * domain is reached at https://域名/agent-bot, and the App appends `/api/v1` to whatever the QR hands
+ * it. Only values that would point the App somewhere the operator did not mean are refused, and a
+ * pasted API endpoint is trimmed back to the base it stands for.
+ */
+function parseApiPublicUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new StartupConfigError(`拒绝启动：API_PUBLIC_URL 无效（${value}）。请使用形如 https://bot.example.com 的地址。`)
+  }
+  if (!/^https?:$/.test(url.protocol) || !url.host || url.search || url.hash) {
+    throw new StartupConfigError(
+      `拒绝启动：API_PUBLIC_URL 只能是协议+主机+可选子路径（${value}），例如 https://bot.example.com、http://192.168.1.10:3080 或 https://bot.example.com/agent-bot。`,
+    )
+  }
+  const base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`.replace(/\/api(?:\/v1)?$/, "")
+  if (!/^https?:\/\/[^/?#]+(?:\/[^/?#]+)*$/.test(base)) {
+    throw new StartupConfigError(`拒绝启动：API_PUBLIC_URL 的路径无效（${value}），路径各段不能为空。`)
+  }
+  return base
 }
 
 /** "HH:MM" 24-hour clock; an invalid value must fail at startup, not silently never fire. */
