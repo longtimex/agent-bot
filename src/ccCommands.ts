@@ -1012,9 +1012,15 @@ export class CcCommands {
       let extra = ""
       const selfAgent = this.#host.cfg.opencode.agent ?? "assistant"
       if (result.agent === selfAgent && this.#host.store.getEngine(key) === "opencode") {
-        const target = this.#models.resolveModel(selection)
-        await this.#host.applyOpenCodeModel(key, target)
-        extra = "\n当前会话也已切换到该模型（上下文已重置）。"
+        // 与 API 端一致:文件已写入成功,会话切换失败不能让用户误以为整个操作失败
+        try {
+          const target = this.#models.resolveModel(selection)
+          await this.#host.applyOpenCodeModel(key, target)
+          extra = "\n当前会话也已切换到该模型（上下文已重置）。"
+        } catch (err) {
+          this.#log.warn(`assign 后切换会话模型失败: ${err instanceof Error ? err.message : String(err)}`)
+          extra = "\n⚠️ Agent 绑定已写入，但当前会话切换模型失败——请用 /model 手动切换。"
+        }
       }
       await this.#host.sendTextMessage(
         chatId,

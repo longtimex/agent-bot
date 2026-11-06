@@ -3834,3 +3834,19 @@ test("a bot behind a path-prefixing proxy answers the address the App stores", a
     },
   )
 })
+
+test("api aliases rejects an invalid name with the store's guidance", async () => {
+  await withApi(
+    async () => "回复",
+    async (h) => {
+      const res = await fetch(`${h.base}/api/v1/aliases`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ name: "含 空格", expansion: "审查代码" }),
+      })
+      assert.equal(res.status, 400)
+      const body = (await res.json()) as { error?: string }
+      assert.match(body.error ?? "", /快捷指令名/)
+    },
+  )
+})

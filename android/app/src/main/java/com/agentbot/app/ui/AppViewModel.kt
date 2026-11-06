@@ -602,7 +602,8 @@ class AppViewModel(
             Screen.Help -> refreshHelp()
             else -> Unit
         }
-        if (session == null) refreshSession()
+        // 未配置连接时导航不再发出注定失败的请求:设置页保存后 saveConnection 会触发
+        if (session == null && configured) refreshSession()
     }
 
     fun saveConnection(baseUrl: String, token: String, encKey: String? = null) {
@@ -2139,9 +2140,10 @@ class AppViewModel(
         val engine = oneOffEngine
         val model = oneOffModel
         if (raw.isEmpty() && attachments.isEmpty()) return false
+        // busy 在 launch 外置位:协程要等调度才跑,窗口内快速连发会双双通过检查
+        busy = true
         viewModelScope.launch {
             try {
-                busy = true
                 // `/name` shortcuts expand server-side with the bot's 3-hop rule, so submit as typed.
                 val task = api.submitTask(conn(), raw, attachments, engine, model)
                 oneOffEngine = null

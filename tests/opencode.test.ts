@@ -453,3 +453,43 @@ test("inputCapabilities reports an unknown model as undefined, not as unsupporte
     },
   )
 })
+
+test("subscribeSession reconnects after an oversized event and delivers later ones", async () => {
+  const updates: string[] = []
+  let connections = 0
+
+  await withServer(
+    (_req, res) => {
+      connections += 1
+      res.writeHead(200, { "content-type": "text/event-stream" })
+      if (connections === 1) {
+        // 单条事件超过 1MB 上限:客户端断开缓冲重连,而不是撑爆内存
+        res.write(`data: ${JSON.stringify({ properties: { part: { type: "text", sessionID: "ses_test", text: "x".repeat(1_100_000) } } })}\n\n`)
+        res.end()
+      } else {
+        res.write(`data: ${JSON.stringify({ properties: { part: { type: "tool", sessionID: "ses_test", tool: "bash", state: { status: "completed", input: { command: "echo ok" } } } } })}\n\n`)
+        res.end()
+      }
+    },
+    async (oc) => {
+      const stop = oc.subscribeSession("ses_test", (summary) => updates.push(summary))
+      await delay(1800)
+      stop()
+      assert.ok(connections >= 2, `the oversized event forces a reconnect (got ${connections})`)
+      assert.deepEqual(updates, ["完成 [bash]: echo ok"], "the healthy connection delivers its event")
+    },
+  )
+})
+
+test("health returns false on a non-200 answer", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" })
+      res.end(JSON.stringify({ healthy: true }))
+    },
+    async (oc) => {
+      // 401 即使带 healthy:true 也不算健康(响应体被主动丢弃)
+      assert.equal(await oc.health(), false)
+    },
+  )
+})

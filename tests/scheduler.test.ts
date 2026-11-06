@@ -615,3 +615,36 @@ test("a notice that fails to send does not break the scheduler", async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("ScheduleService.runNow returns the updated snapshot, not the pre-run copy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-scheduler-"))
+  try {
+    let resolveRun: ((value: string) => void) | undefined
+    const service = new ScheduleService(
+      join(dir, "schedules.json"),
+      (_task) =>
+        new Promise<string>((resolve) => {
+          resolveRun = resolve
+        }),
+      log,
+      "Asia/Shanghai",
+    )
+    service.add(42, 42, "30m 检查服务器", { engine: "opencode" })
+    const id = service.list(42)[0]!.id
+
+    const returned = service.runNow(42, id)
+    assert.ok(returned, "runNow returns the task")
+    // 旧实现返回执行前的拷贝(runningAt 缺失);现在必须带上刚写入的状态
+    assert.ok(returned.runningAt !== undefined, "the returned snapshot carries runningAt")
+
+    // 运行结束后 runningAt 被清理、lastRunAt/lastStatus 写入
+    resolveRun?.("ok")
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const settled = service.list(42).find((task) => task.id === id)
+    assert.equal(settled?.runningAt, undefined)
+    assert.equal(settled?.lastStatus, "ok")
+    assert.ok((settled?.lastRunAt ?? 0) > 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

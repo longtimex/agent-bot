@@ -443,3 +443,37 @@ test("a corrupt install record is quarantined instead of silently replaced", asy
     rmSync(f.dir, { recursive: true, force: true })
   }
 })
+
+test("installer sanitizes injected extraArgs from a hand-edited manifest", async () => {
+  const f = fixture()
+  try {
+    // 手改清单塞入任意 flag 与相对 --prefix:加载时必须被 EXTRA_ARG_RE 白名单过滤,
+    // 否则 update/uninstall 会把这些值原样带进 argv
+    writeFileSync(
+      f.manifest,
+      JSON.stringify({
+        demo: {
+          engine: "demo",
+          method: "npm",
+          package: "@scope/demo",
+          bin: "/bin/demo",
+          installedAt: new Date().toISOString(),
+          extraArgs: ["--prefix=/home/u/.npm-global", "--prefix=relative/path", "--evil", "--preserve-symlinks"],
+        },
+      }),
+    )
+    const installer = f.installer()
+    const record = installer.managed()[0]!
+    assert.deepEqual(record.extraArgs, ["--prefix=/home/u/.npm-global"], "only the whitelisted flag survives")
+
+    const result = await installer.update("demo")
+    assert.equal(result.ok, true, result.message)
+    // update 的 argv 只应包含白名单 flag,恶意值不得进入
+    const ran = f.calls.at(-1)!
+    assert.ok(!ran.args.includes("--evil"))
+    assert.ok(!ran.args.includes("--prefix=relative/path"))
+    assert.ok(ran.args.includes("--prefix=/home/u/.npm-global"))
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true })
+  }
+})

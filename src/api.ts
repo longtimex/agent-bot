@@ -442,8 +442,16 @@ export class ApiServer {  readonly #opts: ApiServerOptions
         throw new ApiError(409, "任务还在排队或执行中，请先停止")
       }
       // Telegram's /retry replays the captured prompt, so reuse the stored text,
-      // engine, model pin and attachments instead of a text-only client copy
-      const task = this.#taskManager.submit(failed.text, failed.engine, failed.model, failed.attachments)
+      // engine, model pin and attachments instead of a text-only client copy.
+      // Attachments were saved to the inbox at submit time; re-read them into base64.
+      const attachments = (failed.savedAttachments ?? []).flatMap((saved) => {
+        try {
+          return [{ name: saved.name, mime: saved.mime, data: readFileSync(saved.path).toString("base64") }]
+        } catch {
+          return []
+        }
+      })
+      const task = this.#taskManager.submit(failed.text, failed.engine, failed.model, attachments.length > 0 ? attachments : undefined)
       this.#json(ctx.res, 202, { ok: true, retriedFrom: id, task: this.#taskManager.view(task) })
       return
     }

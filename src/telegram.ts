@@ -89,6 +89,31 @@ function isFatalTelegramCredentialError(err: unknown): boolean {
 // everything else that reaches the queue is a prompt and must respect the cap.
 const QUEUED_COMMANDS = new Set(["/agent", "/new", "/reset", "/id", "/model", "/cc", "/retry"])
 
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[b.length]!
+}
+
+/** 与输入编辑距离 ≤1 的菜单命令;短词与完全匹配返回 undefined,避免误提示。 */
+function nearestMenuCommand(word: string): string | undefined {
+  const name = word.replace(/^\/+/, "").toLowerCase()
+  if (name.length < 3) return undefined
+  let best: { name: string; dist: number } | undefined
+  for (const item of BOT_MENU_COMMANDS) {
+    const dist = levenshtein(name, item.command)
+    if (!best || dist < best.dist) best = { name: item.command, dist }
+  }
+  return best && best.name !== name && best.dist <= 1 ? best.name : undefined
+}
+
 /** Monotonic queue-entry ids, because a plain index would shift under a button press. */
 let jobSequence = 0
 
@@ -731,6 +756,17 @@ export class TelegramBridge {
         return
       }
       if (!QUEUED_COMMANDS.has(command) && !(await this.#ensureCapacity(chatId, key))) return
+
+      // 拼错的菜单命令不再完全静默:给一句邻近命令提示,但仍按普通消息入队(alias 依赖这条兜底路径)
+      if (command.startsWith("/") && !arg && !QUEUED_COMMANDS.has(command)) {
+        const near = nearestMenuCommand(command)
+        if (near) {
+          await this.#sendTextMessage(
+            chatId,
+            `💡 未找到命令 \`${escapeMarkdown(command)}\`。你是想输入 \`/${near}\` 吗?这条消息仍会发给 AI 处理;发送 /help 查看全部命令。`,
+          )
+        }
+      }
 
       this.#enqueue({
         key,

@@ -42,7 +42,9 @@ async function getToken() {
       cachedToken = data.token;
       return cachedToken;
     }
-    log(`Login failed: ${JSON.stringify(data)}`);
+          // 失败响应可能回显提交的 email/password:凭据字段脱敏后再进持久日志
+      const safe = { ...data, email: undefined, password: undefined };
+      log(`Login failed: ${JSON.stringify(safe)}`);
   } catch (e) {
     log(`Login request error: ${e.message}`);
   }

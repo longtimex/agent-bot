@@ -226,3 +226,35 @@ test("formatHistoryMarkdown renders a standalone document with quoted prompts", 
 
   assert.match(formatHistoryMarkdown([], {}), /暂无任务记录/)
 })
+
+test("TaskHistoryStore sorts out-of-order files newest-first on load", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-history-"))
+  try {
+    const path = join(dir, "history.json")
+    // 手工编辑过的文件:条目时间乱序
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        chats: {
+          "tg:1": [
+            { at: 300, prompt: "newest", engine: "e", ms: 1, outcome: "ok" },
+            { at: 100, prompt: "oldest", engine: "e", ms: 1, outcome: "ok" },
+            { at: 200, prompt: "middle", engine: "e", ms: 1, outcome: "ok" },
+          ],
+        },
+      }),
+    )
+    const store = new TaskHistoryStore(path, log)
+    assert.deepEqual(
+      store.list("tg:1", 5).map((entry) => entry.prompt),
+      ["newest", "middle", "oldest"],
+      "list must be newest-first regardless of file order",
+    )
+    // record 之后仍保持 newest-first
+    store.record("tg:1", { prompt: "newer still", engine: "e", ms: 1, outcome: "ok" }, 400)
+    assert.equal(store.list("tg:1", 5)[0]?.prompt, "newer still")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

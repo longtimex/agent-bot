@@ -482,7 +482,8 @@ export class ScheduleService {
     this.#store.updateById(id, { runningAt: Date.now() })
     const run = this.#runManual(task).finally(() => this.#inflight.delete(run))
     this.#inflight.add(run)
-    return task
+    // 返回更新后的快照:API/App 的响应要展示刚写入的 runningAt,而不是旧拷贝
+    return this.#store.find(chatId, id)
   }
 
   async #runManual(task: ScheduledTask): Promise<void> {

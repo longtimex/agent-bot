@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test, { mock } from "node:test"
+import { createServer, type AddressInfo } from "node:http"
 import { Bot, GrammyError, HttpError } from "grammy"
 import type { Update } from "grammy/types"
 import { AgentCliRegistry, AgentCliService } from "../src/agentCli.js"
@@ -46,6 +47,8 @@ interface HarnessOptions {
   ops?: (dir: string, log: Logger) => OpsService
   /** Use this Bot instead of the talking test bot (a stub whose init() fails). */
   bot?: Bot
+  /** MEDIA_ALLOW_PRIVATE_URLS 的测试开关:重定向/内网场景需要。 */
+  mediaAllowPrivateUrls?: boolean
   /** Leave start() to the test: connect behaviour is what is under test then. */
   skipStart?: boolean
 }
@@ -66,7 +69,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
     taskMaxTimeoutMs: 600_000,
     maxReplyLength: 1500,
     maxMediaBytes: 20 * 1024 * 1024,
-    mediaAllowPrivateUrls: false,
+    mediaAllowPrivateUrls: options.mediaAllowPrivateUrls ?? false,
     maxInputBytes: 20 * 1024 * 1024,
     reminderTimezone: "Asia/Shanghai",
     ccswitch: { app: "opencode" },
@@ -2043,5 +2046,56 @@ test("stopping during a reconnect window does not leave a retry armed", async ()
   } finally {
     mock.reset()
     await h.close()
+  }
+})
+
+test("a mistyped command gets a nearest-command hint and still reaches the AI", async () => {
+  const h = await createHarness(["7"])
+  try {
+    await h.send("/sttus")
+    assert.ok(
+      h.texts().some((text) => text.includes("你是想输入 `/status`")),
+      "the hint names the closest menu command",
+    )
+    // 提示不拦截:fallback 任务照常入队并执行(失败卡片也算 AI 路径被触发)
+    await h.waitFor(() => h.texts().some((text) => text.length > 0 && !text.includes("你是想输入")))
+    // 正确命令不会收到提示
+    await h.send("/status")
+    assert.ok(!h.lastText().includes("你是想输入"), "a correct command never shows the hint")
+  } finally {
+    await h.close()
+  }
+})
+
+
+test("fetchRemoteMedia follows redirects within limits and refuses private hops", async () => {
+  // 用本地 http server 模拟重定向链:127.0.0.1 属私网,默认配置必须逐跳拒绝
+  {
+    const server = createServer((req, res) => {
+      const hops = Number(new URL(req.url ?? "/", "http://x").searchParams.get("hop") ?? 0)
+      if (hops < 4) {
+        res.writeHead(302, { location: `http://127.0.0.1:${(server.address() as AddressInfo).port}/?hop=${hops + 1}` })
+        res.end()
+        return
+      }
+      res.writeHead(200, { "content-type": "application/octet-stream" })
+      res.end("payload")
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const { port } = server.address() as AddressInfo
+    const h = await createHarness(["7"])
+    try {
+      const bridge = h.bridge as unknown as { fetchRemoteMedia(target: string): Promise<Buffer> }
+
+      // 默认(禁私网):每一跳都被 assertUrlAllowed 拒绝
+      await assert.rejects(
+        bridge.fetchRemoteMedia(`http://127.0.0.1:${port}/?hop=0`),
+        /不允许访问本机或内网地址/,
+      )
+    } finally {
+      await h.close()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   }
 })

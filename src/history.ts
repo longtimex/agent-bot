@@ -157,7 +157,11 @@ export class TaskHistoryStore {
           if (entry) entries.push(entry)
           if (entries.length >= MAX_HISTORY_PER_CHAT) break
         }
-        if (entries.length > 0) this.#chats[key] = entries
+        if (entries.length > 0) {
+          // 手工编辑或旧版本文件可能乱序:统一按时间倒序,保证 list/export 的 newest-first 语义
+          entries.sort((a, b) => b.at - a.at)
+          this.#chats[key] = entries
+        }
       }
       this.#log.debug(`loaded task history for ${Object.keys(this.#chats).length} chat(s) from ${this.#path}`)
     } catch (err) {

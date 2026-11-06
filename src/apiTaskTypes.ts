@@ -1,5 +1,6 @@
 import type { ResolvedModel } from "./engineCall.js"
 import type { MediaKind } from "./media.js"
+import type { SavedAttachment } from "./attachments.js"
 
 export interface ApiTaskView {
   id: string
@@ -40,7 +41,8 @@ export interface ApiTaskMedia {
 export interface ApiTask extends Omit<ApiTaskView, "media"> {
   key: string
   controller?: AbortController
-  attachments?: ApiAttachment[]
+  /** Attachments saved to the inbox at submit time; the base64 payload is never retained. */
+  savedAttachments?: SavedAttachment[]
   media?: ApiTaskMedia[]
   /** OpenCode pin resolved from `model` at submit; CLI engines use `model` directly. */
   modelRef?: ResolvedModel

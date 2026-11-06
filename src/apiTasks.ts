@@ -160,15 +160,23 @@ export class ApiTaskManager {
     if (!profile && engine !== "opencode") {
       throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
     }
+    // 附件在提交时即落盘 inbox:排队/运行/完成后 task 里只留摘要,
+    // 否则每条任务都持有最多 15MB 的 base64 字符串直到 200 条记录被清理
+    const { saved: savedAttachments, failed: saveFailed } = attachments
+      ? this.#saveAttachments(attachments)
+      : { saved: [], failed: [] }
+    // 落盘失败的附件直接在提示词里声明(与 Telegram 的失败提示一致)
+    const promptText =
+      saveFailed.length > 0 ? [text, `[附件处理失败]\n${saveFailed.join("\n")}`].filter(Boolean).join("\n\n") : text
     const task: ApiTask = {
       id,
       key: this.#appKey,
       status: "queued",
-      text,
+      text: promptText,
       engine,
       model: modelOverride,
       createdAt: Date.now(),
-      attachments,
+      savedAttachments: savedAttachments.length > 0 ? savedAttachments : undefined,
     }
     // Validate the pin now so a bad name answers 400 like POST /model does, instead of
     // queueing a task that can only fail later. OpenCode needs the full reference.
@@ -231,11 +239,13 @@ export class ApiTaskManager {
       }
 
       let input: { text: string; files: PromptFile[] } = { text: task.text, files: [] }
-      if (task.attachments?.length) {
+      if (task.savedAttachments?.length) {
         const caps = isOpencode ? await this.#deps.oc.inputCapabilities(opencodeModel) : undefined
-        const { saved, failed } = this.#saveAttachments(task.attachments)
-        const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps })
-        input = buildAttachmentSections(task.text, { saved: stt.saved, failed: [...failed, ...stt.errors], modelCapabilities: caps })
+        const stt = await applyStt(task.savedAttachments, {
+          stt: this.#deps.cfg.stt,
+          modelCapabilities: caps,
+        })
+        input = buildAttachmentSections(task.text, { saved: stt.saved, failed: stt.errors, modelCapabilities: caps })
       }
 
       const reply = await callEngine(this.#engineDeps, {
@@ -270,7 +280,7 @@ export class ApiTaskManager {
       task.controller = undefined
       this.#deps.usage.record(task.key, { engine, model: modelLabel, ms: Date.now() - started, outcome })
       this.#deps.history.record(task.key, {
-        prompt: task.text || this.#attachmentSummary(task.attachments),
+        prompt: task.text || this.#attachmentSummary(task.savedAttachments),
         engine,
         model: modelLabel,
         ms: Date.now() - started,
@@ -283,7 +293,7 @@ export class ApiTaskManager {
   }
 
   /** History label for an attachment-only task, which has no prompt text of its own. */
-  #attachmentSummary(attachments?: ApiAttachment[]): string {
+  #attachmentSummary(attachments?: SavedAttachment[]): string {
     const kinds: string[] = []
     for (const item of attachments ?? []) {
       const kind = item.mime.startsWith("image/")
@@ -419,10 +429,10 @@ export class ApiTaskManager {
   }
 
   view(task: ApiTask): ApiTaskView {
-    const { controller: _controller, key: _key, attachments, media, ...view } = task
+    const { controller: _controller, key: _key, savedAttachments, media, ...view } = task
     return {
       ...view,
-      ...(attachments?.length ? { attachmentCount: attachments.length } : {}),
+      ...(savedAttachments?.length ? { attachmentCount: savedAttachments.length } : {}),
       ...(media?.length
         ? {
             media: media.map((item, index) => ({

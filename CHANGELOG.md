@@ -11,6 +11,11 @@
 - **超大源文件拆分**：cc-switch 路由与白名单表拆到 `src/apiCc.ts` / `src/apiCcSpecs.ts`，HTTP 基础类型拆到 `src/apiCore.ts`；内置 Agent CLI 档案拆到 `src/agentProfiles.ts`，Telegram 的纯格式化/时间/ID 辅助拆到 `src/telegramSupport.ts`。`src/api.ts` 由 2655 行降到约 1200 行，`src/agentCli.ts` 由 1357 行降到约 1060 行，`src/telegram.ts` 由 4263 行降到约 2730 行（统计面板、个人数据面板、核心面板、个人命令、模型命令与运维命令分别拆到 `telegramStats.ts` / `telegramPersonalPanels.ts` / `telegramCorePanels.ts` / `telegramPersonalCommands.ts` / `telegramModelCommands.ts` / `telegramOpsCommands.ts`）。API 的任务队列、SSE、重试与附件处理独立为 `src/apiTasks.ts`，路由只负责解码并调用服务，对应 T3 Code 的「transport 保持轻薄，能力放在 service」约定。
 - **质量门禁**：新增 oxlint（`.oxlintrc.json`）与 `npm run lint`、knip（`knip.jsonc`）与 `npm run knip`，并接入 `npm run check` / CI；修复了未使用导入、无用转义、无意义 spread 等问题。
 
+### 变更
+
+- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后执行 `assembleDebug`，生成 `agent-bot.apk` 与 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
+- **深度审查台账入库**：`DEEP-100.md` 记录当前 42/100 轮审查进度；早期并行审查的重复轮次编号已在文首说明，后续从第 43 轮继续。
+
 ### 新增
 
 - **安装脚本**：新增仓库根目录的 `install.sh`，支持在当前 checkout 安装或从 GitHub 克隆到指定目录；自动检查 Node ≥ 20.12 / git / npm，安装依赖与 opencode CLI，构建项目，生成权限 `600` 的 `.env`，并可按需进入 Telegram 配置向导或直接启动。支持 `--dir`、`--branch`、`--local`、`--no-opencode`、`--no-setup`、`--start`、`--dry-run` 与环境变量配置；新增 `tests/install-script.test.ts` 做 shell 语法与帮助输出门禁。

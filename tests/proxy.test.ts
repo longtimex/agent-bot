@@ -36,6 +36,7 @@ test("parseProxyUrl rejects unsupported or malformed proxies", () => {
   assert.throws(() => parseProxyUrl("ftp://127.0.0.1:21"), /仅支持/)
   assert.throws(() => parseProxyUrl("http://127.0.0.1:7890/path"), /路径/)
   assert.throws(() => parseProxyUrl("http://127.0.0.1:7890?x=1"), /查询参数/)
+  assert.throws(() => parseProxyUrl("http://127.0.0.1:7890#frag"), /查询参数/)
   assert.throws(() => parseProxyUrl("not a url"), /格式无效/)
 })
 

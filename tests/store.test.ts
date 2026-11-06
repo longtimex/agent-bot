@@ -160,3 +160,26 @@ test("a corrupt session store is quarantined instead of overwritten", () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("SessionStore drops empty shell records on load", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-store-"))
+  try {
+    const path = join(dir, "sessions.json")
+    writeFileSync(
+      path,
+      JSON.stringify({
+        // /new、恢复默认目录/模型后留下的空壳:只剩 updatedAt
+        "tg:shell": { sessionID: "", updatedAt: "2026-01-01T00:00:00.000Z" },
+        // 有状态的记录必须原样保留
+        "tg:engine-only": { sessionID: "", engine: "claude" },
+        "tg:real": { sessionID: "ses_9" },
+      }),
+    )
+    const store = new SessionStore(path, log)
+    assert.equal(store.get("tg:shell"), undefined)
+    assert.equal(store.getEngine("tg:engine-only"), "claude", "an engine choice alone keeps the record")
+    assert.equal(store.get("tg:real"), "ses_9")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

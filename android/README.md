@@ -96,10 +96,15 @@ cd android
 
 ### 直接安装现成的 APK
 
-不想搭构建环境就装 [`android/releases/`](android/releases/) 里最新的 `agent-bot-v<版本>.apk`：
+不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot.apk` 与同名 `.sha256`：
 
 ```bash
-sha256sum -c agent-bot-v1.0.12.apk.sha256   # 校验文件与同目录的 .sha256 一致，必须在 releases/ 目录里跑
+# 把 <tag> 换成实际版本，例如 android-v1.0.12
+tag=android-v1.0.12
+base="https://github.com/longtimex/agent-bot/releases/download/$tag"
+curl -L -o agent-bot.apk "$base/agent-bot.apk"
+curl -L -o agent-bot.apk.sha256 "$base/agent-bot.apk.sha256"
+sha256sum -c agent-bot.apk.sha256
 ```
 
 用 debug 密钥（`CN=Android Debug`）签名，因此需要在手机上允许「安装未知来源应用」。各版本

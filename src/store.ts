@@ -229,7 +229,9 @@ export class SessionStore {
         if (typeof value.qoderSessionID === "string") cliSessions.qoder ??= value.qoderSessionID
         if (typeof value.qoderModel === "string") cliModels.qoder ??= value.qoderModel
 
-        this.#data[key] = {
+        // 空壳记录(sessionID 为空且无任何其他状态)不进内存:/new、恢复默认等操作
+        // 会留下只剩 updatedAt 的记录,长期累积让 sessions.json 缓慢膨胀
+        const record: SessionRecord = {
           sessionID: value.sessionID,
           engine: typeof value.engine === "string" && value.engine ? value.engine : undefined,
           updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
@@ -238,6 +240,14 @@ export class SessionStore {
           cliSessions: Object.keys(cliSessions).length > 0 ? cliSessions : undefined,
           cliModels: Object.keys(cliModels).length > 0 ? cliModels : undefined,
         }
+        const isShell =
+          !record.sessionID &&
+          !record.engine &&
+          !record.model &&
+          !record.dir &&
+          !record.cliSessions &&
+          !record.cliModels
+        if (!isShell) this.#data[key] = record
       }
       this.#log.debug(`loaded ${Object.keys(this.#data).length} session(s) from ${this.#path}`)
     } catch (err) {

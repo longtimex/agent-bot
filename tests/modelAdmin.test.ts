@@ -354,3 +354,39 @@ test("a label cut at the limit never ends in half of an emoji", () => {
     fx.cleanup()
   }
 })
+
+test("ModelAdmin.assignAgent rejects an agent file without frontmatter", () => {
+  const fx = createFixture()
+  try {
+    const nofm = join(fx.project, ".opencode", "agent", "plain.md")
+    writeFileSync(nofm, "# 没有 frontmatter 的文件\n\n正文。\n")
+    assert.throws(() => fx.admin.assignAgent("plain", "custom/base"), /缺少 frontmatter/)
+    // 文件必须原样保留(未被半截写入)
+    assert.match(readFileSync(nofm, "utf8"), /正文。/)
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true })
+  }
+})
+
+test("ModelAdmin.add repairs a provider whose models entry is not an object", () => {
+  const fx = createFixture()
+  try {
+    // 手改的 opencode.json 可能把 models 写坏成数组:注册新模型时以空表修复,
+    // 否则该 provider 的所有自定义模型注册都会被一个坏结构卡死
+    const configPath = join(fx.project, "opencode.json")
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>
+    ;(config.provider as Record<string, unknown>).custom.models = ["not", "an", "object"]
+    writeFileSync(configPath, JSON.stringify(config))
+
+    fx.admin.add({ key: "repaired", providerID: "custom", modelID: "repaired-model" })
+    const afterText = readFileSync(configPath, "utf8")
+    assert.match(afterText, /"repaired-model": \{/, "the repaired model lands in opencode.json")
+    const after = JSON.parse(afterText) as {
+      provider: { custom: { models: Record<string, unknown> } }
+    }
+    assert.equal(after.provider.custom.models.repaired_model, undefined)
+    assert.equal(after.provider.custom.models.not, undefined, "the broken array is replaced")
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true })
+  }
+})

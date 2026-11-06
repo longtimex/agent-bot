@@ -176,6 +176,11 @@ test("CcSwitchService builds provider add argv from validated fields and masks t
   await assert.rejects(() => service.addProvider({ name: "x", template: "--help" }), /未知的 Provider 模板/)
   await assert.rejects(() => service.addProvider({ name: "x", apiFormat: "soap" }), /未知的 API 格式/)
   await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "http://x y" }), /Base URL/)
+  await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "https://user:pass@x.test" }), /用户名密码/)
+  await assert.rejects(
+    () => service.addProvider({ name: "x", baseUrl: `https://x.test/${"a".repeat(500)}` }),
+    /过长/,
+  )
   await assert.rejects(() => service.addProvider({ name: "x", baseUrl: "https://u:p@example.com" }), /用户名密码/)
   await assert.rejects(() => service.addProvider({ name: "x", config: "[1,2]" }), /JSON 对象/)
   await assert.rejects(() => service.addProvider({ name: "x", config: "not json" }), /合法 JSON/)
@@ -273,9 +278,20 @@ test("redactSecrets masks keys, tokens and URL credentials", () => {
     "Authorization: Bearer abcdefghijklmnop",
     "https://user:passw0rd@example.com/v1",
     "ghp_abcdefghijklmnop",
+    "xoxb-1234-abcdef-ghij",
+    "private_key = MIIEvQIBADAN",
   ].join("\n")
   const out = redactSecrets(raw)
-  for (const secret of ["supersecret123", "sk-json-secret", "sk-usage", "sk-ant-secret", "abcdefghijklmnop", "passw0rd"]) {
+  for (const secret of [
+    "supersecret123",
+    "sk-json-secret",
+    "sk-usage",
+    "sk-ant-secret",
+    "abcdefghijklmnop",
+    "passw0rd",
+    "xoxb-1234",
+    "MIIEvQIBADAN",
+  ]) {
     assert.ok(!out.includes(secret), `expected ${secret} to be redacted`)
   }
   assert.match(out, /API Key: \*\*\*/)

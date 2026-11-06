@@ -1,14 +1,5 @@
 import assert from "node:assert/strict"
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  truncateSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import test from "node:test"
@@ -152,6 +143,28 @@ test("the manifest names attachments by absolute path so any engine cwd resolves
     assert.ok(listed.every((p) => isAbsolute(p)), `manifest paths must be absolute, got ${listed.join(", ")}`)
     assert.ok(input.text.includes(`<file name="${text.path}">`), "the inlined copy carries the same path")
     assert.equal(input.files.length, 1, "the image still rides as a data file")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("pruneInbox deletes an expired symlink itself and never follows it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-attachments-"))
+  try {
+    // 目标放在 inbox 目录之外:链接即使过期也只应删除链接本身
+    const targetDir = join(dir, "outside")
+    mkdirSync(targetDir, { recursive: true })
+    const target = join(targetDir, "keep-me.txt")
+    writeFileSync(target, "keep me")
+    const link = join(dir, "stale-link.txt")
+    symlinkSync(target, link)
+    const past = new Date(Date.now() - 48 * 60 * 60 * 1000)
+    utimesSync(link, past, past)
+
+    const pruned = pruneInbox(dir)
+    assert.equal(pruned, 1)
+    assert.equal(existsSync(link), false, "the expired symlink is removed")
+    assert.equal(existsSync(target), true, "the link target outside the inbox is untouched")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

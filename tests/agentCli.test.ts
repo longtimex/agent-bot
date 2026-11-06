@@ -777,3 +777,52 @@ test("terminateProcess reaches a grandchild that outlives its wrapper shim", asy
     }
   }
 })
+
+test("an invalid resumeErrorPattern profile is rejected at load time and never reaches prompt", async () => {
+  const dir = tempDir("agent-cli-badregex-")
+  try {
+    // CLI 首次成功输出 session id,第二次以匹配 resumeErrorPattern 的方式失败:
+    // 若非法正则未防护,new RegExp 会在 close 回调里抛未捕获异常杀死整个进程
+    const bin = join(dir, "fake-badregex.js")
+    writeExecutable(
+      bin,
+      `const out = process.argv.includes("--resume") ? "x" : "SES_" + (globalThis.n = (globalThis.n ?? 0) + 1) + "\\nOK";` +
+        `if (process.argv.includes("--resume")) process.exit(3);` +
+        `process.stdout.write(out)`,
+    )
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        agents: {
+          goodcli: {
+            label: "Good CLI",
+            bin,
+            sessionMode: "stateless",
+            parse: "text",
+            args: { prompt: ["{prompt}"] },
+          },
+          badregex: {
+            label: "Bad Regex CLI",
+            bin,
+            sessionMode: "capture",
+            parse: "text",
+            resumeErrorPattern: "(未闭合的括号",
+            args: { prompt: ["{prompt}"], resumeSession: ["--resume", "{sessionId}"] },
+          },
+        },
+      }),
+    )
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    const service = new AgentCliService(dir, store, log, 10_000, 10_000, undefined, registry)
+
+    // 双层防御:加载期正则校验拒绝该 profile(per-profile try/catch 隔离,不影响其他),
+    // prompt 只会得到"未知的 Agent 引擎",进程不带未捕获异常继续存活
+    assert.equal(registry.get("badregex"), undefined, "the invalid profile is dropped at load time")
+    await assert.rejects(service.prompt("chat", "badregex", "hi"), /未知的 Agent 引擎/)
+    assert.notEqual(registry.get("goodcli"), undefined, "sibling profiles in the same file still load")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
