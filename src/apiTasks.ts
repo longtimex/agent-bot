@@ -10,7 +10,6 @@ import type { TaskHistoryStore } from "./history.js"
 import type { Logger } from "./logger.js"
 import { mediaLabel, parseReply, resolveMedia } from "./media.js"
 import type { ModelAdmin } from "./modelAdmin.js"
-import type { ModelInfo } from "./models.js"
 import type { Opencode, PromptFile } from "./opencode.js"
 import { applyStt } from "./stt.js"
 import type { SessionStore } from "./store.js"
@@ -160,6 +159,24 @@ export class ApiTaskManager {
     if (!profile && engine !== "opencode") {
       throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
     }
+    // Validate the pin here so a bad name answers 400 like POST /model does instead of queueing a
+    // task that can only fail later, and before anything is written: #saveAttachments would leave
+    // up to 15 MB in the inbox that no task references, and a client fixing its request would
+    // write a second copy. OpenCode needs the full reference.
+    let modelRef: ResolvedModel | undefined
+    if (modelOverride) {
+      if (engine === "opencode") {
+        try {
+          const info = this.#deps.models.resolveModel(modelOverride)
+          modelRef = { providerID: info.providerID, modelID: info.modelID, label: info.label }
+        } catch (err) {
+          throw new ApiError(400, err instanceof Error ? err.message : `未识别的模型：${modelOverride}`)
+        }
+      } else if (!this.#deps.agents.registry.resolveModel(engine, modelOverride)) {
+        const options = (profile?.models ?? []).map((model) => model.id).join(", ")
+        throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
+      }
+    }
     // 附件在提交时即落盘 inbox:排队/运行/完成后 task 里只留摘要,
     // 否则每条任务都持有最多 15MB 的 base64 字符串直到 200 条记录被清理
     const { saved: savedAttachments, failed: saveFailed } = attachments
@@ -175,24 +192,9 @@ export class ApiTaskManager {
       text: promptText,
       engine,
       model: modelOverride,
+      modelRef,
       createdAt: Date.now(),
       savedAttachments: savedAttachments.length > 0 ? savedAttachments : undefined,
-    }
-    // Validate the pin now so a bad name answers 400 like POST /model does, instead of
-    // queueing a task that can only fail later. OpenCode needs the full reference.
-    if (modelOverride) {
-      if (engine === "opencode") {
-        let info: ModelInfo
-        try {
-          info = this.#deps.models.resolveModel(modelOverride)
-        } catch (err) {
-          throw new ApiError(400, err instanceof Error ? err.message : `未识别的模型：${modelOverride}`)
-        }
-        task.modelRef = { providerID: info.providerID, modelID: info.modelID, label: info.label }
-      } else if (!this.#deps.agents.registry.resolveModel(engine, modelOverride)) {
-        const options = (profile?.models ?? []).map((model) => model.id).join(", ")
-        throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
-      }
     }
     this.#tasks.set(id, task)
     this.#pruneTasks()

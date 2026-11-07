@@ -617,12 +617,17 @@ data class HermesMemory(
     val userEnabled: Boolean? = null,
 )
 
-/** POST /cc/hermes answers with the state as stored, so the editor never shows local text. */
+/**
+ * POST /cc/hermes answers with the state as stored, so the editor never shows local text.
+ * A refresh that cc-switch could not serve leaves [refreshed] false and the state fields
+ * absent, which means the previous read stays on screen.
+ */
 @Serializable
 data class HermesResult(
     val ok: Boolean = false,
     val kind: String = "",
     val action: String = "",
+    val refreshed: Boolean = true,
     val message: String = "",
     val limits: String = "",
     val memory: String = "",

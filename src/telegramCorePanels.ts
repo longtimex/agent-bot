@@ -251,7 +251,14 @@ export class TelegramCorePanels {
       if (profile.supportsModel && profile.models?.length) {
         profile.models.slice(0, 30).forEach((model, index) => {
           const mark = current === model.id ? "✅ " : ""
-          keyboard.text(clip(`${mark}${model.label}`, 60) ?? "", `cmodel:${engine}:${index}`)
+          // A profile list can be reloaded between rendering this panel and the tap, and then
+          // an index points at whichever model sits there now. The id survives that, up to the
+          // 64 byte limit Telegram puts on callback data.
+          const byId = `cmodel:${engine}:${model.id}`
+          keyboard.text(
+            clip(`${mark}${model.label}`, 60) ?? "",
+            Buffer.byteLength(byId, "utf8") <= 64 ? byId : `cmodel:${engine}:${index}`,
+          )
           if (index % 2 === 1) keyboard.row()
         })
         if (profile.models.slice(0, 30).length % 2 === 1) keyboard.row()

@@ -20,7 +20,8 @@ import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { childEnv, installerChildEnv } from "./binPath.js"
 import { CC_SWITCH_APPS, redactSecrets, resolveCcSwitchBin, stripAnsi } from "./ccswitch.js"
-import { terminateProcess, whichSync } from "./agentCli.js"
+import { whichSync } from "./agentCli.js"
+import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import { rotateLogIfNeeded } from "./logger.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
@@ -1071,12 +1072,14 @@ export class OpsService {
       let stderr = ""
       let settled = false
       let timedOut = false
+      let drainTimer: NodeJS.Timeout | null = null
       const out = new StringDecoder("utf8")
       const err = new StringDecoder("utf8")
       const finish = (code: number | null, extra?: string): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        if (drainTimer) clearTimeout(drainTimer)
         child.stdout?.destroy()
         child.stderr?.destroy()
         stdout = clipTail(stdout + out.end(), MAX_OUTPUT_CHARS)
@@ -1092,10 +1095,28 @@ export class OpsService {
 
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout = clipTail(stdout + out.write(chunk), MAX_OUTPUT_CHARS)
+        armDrain()
       })
       child.stderr?.on("data", (chunk: Buffer) => {
         stderr = clipTail(stderr + err.write(chunk), MAX_OUTPUT_CHARS)
+        armDrain()
       })
+      // `close` waits for every pipe to reach EOF, and a lifecycle script or npm hook that
+      // leaves a detached helper holding the write end open never delivers it — the step
+      // would hang with #opsActionRunning set, blocking every later action. Once the
+      // process is gone, keep waiting only while output still arrives.
+      const armDrain = (): void => {
+        if (settled || (child.exitCode === null && child.signalCode === null)) return
+        if (drainTimer) clearTimeout(drainTimer)
+        drainTimer = setTimeout(() => {
+          // Signal while the read ends are still open, so the orphan that holds the pipes
+          // is actually stopped; finish() destroys them and would mark them drained
+          terminateProcess(child)
+          finish(child.exitCode)
+        }, EXIT_DRAIN_MS)
+        drainTimer.unref()
+      }
+      child.once("exit", armDrain)
       child.on("error", (error) => finish(null, error.message))
       child.on("close", (code) => finish(code))
     })

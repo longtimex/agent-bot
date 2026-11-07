@@ -8,7 +8,7 @@ Telegram Client ⇄ Telegram Bot API ⇄ ┌──────────┐ �
 安卓 App        ⇄ HTTP API(/api/v1) ⇄ └──────────┘
 ```
 
-> 📖 新用户可直接使用「[一键安装（推荐）](#一键安装推荐)」，或从下方 5 步流程开始；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)。
+> 📖 新用户可直接使用「[一键安装（推荐）](#一键安装推荐)」，或从下方 5 步流程开始；安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ## 一键安装（推荐）
 
@@ -448,11 +448,20 @@ bot/
 │   ├── telegramPersonalCommands.ts 提醒、快捷指令、定时任务命令
 │   ├── telegramModelCommands.ts 模型切换、恢复默认与 CLI 工作目录命令
 │   ├── telegramOpsCommands.ts 诊断、日志、检查/更新、备份、OpenCode 服务、配置项与重启
+│   ├── telegramAgentCommands.ts Agent 引擎切换、CLI 安装/更新/卸载与确认流
+│   ├── telegramProxyCommands.ts 代理添加/启用/测试/删除
+│   ├── telegramAdminCommands.ts 白名单、时区命令与访问校验
+│   ├── telegramAttachments.ts 入站附件收集、下载与模型输入构建
+│   ├── telegramInfoCommands.ts 队列、配对信息、导出、状态与统计
+│   ├── telegramMedia.ts 出站媒体、远程媒体下载与大小限制
 │   ├── api.ts        HTTP API `/api/v1`：任务、配置、运维与鉴权
 │   ├── apiCore.ts    API 基础类型、错误与路径前缀
 │   ├── apiTaskTypes.ts 任务视图/附件类型
 │   ├── apiTasks.ts   任务队列、SSE、重试、停止与附件校验
 │   ├── apiPersonal.ts 个人数据路由：提醒、定时、目录、时区、白名单
+│   ├── apiTaskRoutes.ts API 任务/队列/停止路由
+│   ├── apiOpsRoutes.ts API 运维诊断/日志/备份/服务路由
+│   ├── apiModelRoutes.ts API 自定义模型查看/添加/删除路由
 │   ├── apiCc.ts      cc-switch 路由
 │   ├── apiCcSpecs.ts cc-switch 只读视图与危险操作白名单
 │   ├── apiRateLimit.ts 失败 Bearer 认证的按地址限流（服务器先鉴权再查预算，反向代理后拿对令牌的 App 不会被别人的失败拖住）
@@ -476,6 +485,7 @@ bot/
 │   ├── messages.ts   长消息切分
 │   ├── store.ts      会话持久化
 │   └── logger.ts
+├── docs/ARCHITECTURE.md 分层、模块边界与新增能力放置规则
 ├── tests/            单元测试（node:test）
 ├── install.sh        安装脚本：检查环境、克隆/更新、安装依赖、构建、准备 .env
 ├── deploy/           systemd 单元示例
@@ -561,7 +571,7 @@ Token 在向导输出中只显示掩码；输入行仍由终端回显，请留�
 它还通过 `BOT_LOG_FILE` 告知 Bot 日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
 重复启动会被 `data/bot.lock` 拒绝，提示已有实例的 PID；锁文件同时记录进程启动时间，PID 被系统复用后不会误判为仍在运行。
 
-开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + lint + 无用文件/依赖检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
+开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + lint + 文件体积门禁 + 无用文件/依赖检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
 
 ### systemd 常驻（可选）
 
@@ -857,5 +867,6 @@ npm run models -- assign self argon2
 | `scripts/sniper_free_vps.mjs` | 免费 VPS 抢注守护进程（读取 `SNIPER_*`） |
 | `scripts/proxy-exec.sh` | 按 `/proxy` 当前启用项注入代理环境后执行命令 |
 | `scripts/check-android-sources.mjs` | 无 Android SDK 时的安卓源码静态门：必需源文件是否缺失、是否被 `.gitignore` 吞掉、Kotlin 括号与字符串是否闭合（`npm run check:android`） |
+| `scripts/check-size.mjs` | 模块体积门禁：超过预算即失败，防止已拆分的文件重新长成超大文件（`npm run check:size`） |
 | `scripts/install-cc-switch.sh` | 下载 cc-switch CLI 到 `./bin`（`npm run cc-switch:install`） |
 | `scripts/restart.sh` | 构建产物重启 Bot 并维护 `data/bot.pid` |

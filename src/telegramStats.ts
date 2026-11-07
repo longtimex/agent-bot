@@ -109,7 +109,7 @@ export class TelegramStatsPanels {
     }
   }
 
-  historyPanel(key: string, count = 10): Panel {
+  historyPanel(key: string, count = 10, offset = 0): Panel {
     const total = this.#deps.history.count(key)
     const keyboard = new InlineKeyboard().text("🔄 刷新", "show:history").text("⬅️ 主菜单", "show:menu")
     if (total === 0) {
@@ -119,15 +119,15 @@ export class TelegramStatsPanels {
       }
     }
     keyboard.row().text("🧹 清空历史", "history:clear")
-    // 渐进加载：「更早」每次多看 10 条，最多到存储上限 50（到顶就不再显示按钮）
-    const wanted = Math.min(Math.max(10, count), 50)
-    if (wanted < total && wanted < 50) keyboard.row().text("⬇️ 更早 10 条", `show:history:${wanted + 10}`)
-    if (wanted > 10) keyboard.text("⬆️ 回到最新", "show:history:10")
+
+    const size = Math.min(Math.max(10, count), 50)
+    const from = Math.min(Math.max(0, offset), total - 1)
+    const entries = this.#deps.history.list(key, size, from)
 
     const lines: string[] = []
     let length = 0
     let shown = 0
-    for (const entry of this.#deps.history.list(key, wanted)) {
+    for (const entry of entries) {
       const status =
         entry.outcome === "ok" ? "✅ 成功" : entry.outcome === "cancelled" ? "🛑 已取消" : "❌ 失败"
       const engine = this.#deps.agents.registry.label(entry.engine)
@@ -142,10 +142,18 @@ export class TelegramStatsPanels {
       length += line.length + 2
       shown += 1
     }
-    const capped = shown < wanted ? `\n\n_消息过长，只渲染了前 ${shown} 条；可用 \`/export\` 导出完整历史。_` : ""
+    const last = from + shown
+    // 「更早」要按真正画出来的条数走，不能按请求条数加 10：一条长 prompt 就能把消息长度
+    // 吃满，那时多要 10 条一行也渲染不出来，按钮会变成永远点不动的死链接
+    if (last < total) keyboard.row().text("⬇️ 更早 10 条", `show:history:${size}:${last}`)
+    if (from > 0) keyboard.text("⬆️ 回到最新", "show:history")
+    const capped =
+      shown < entries.length
+        ? `\n\n_消息过长，本页只渲染了 ${shown} 条；点「更早」接着看，或用 \`/export\` 导出完整历史。_`
+        : ""
 
     return {
-      text: `🕘 *任务历史*（已显示 ${shown} / 共 ${total} 条）\n\n${lines.join("\n\n")}${capped}`,
+      text: `🕘 *任务历史*（第 ${from + 1}-${last} 条 / 共 ${total} 条）\n\n${lines.join("\n\n")}${capped}`,
       keyboard,
     }
   }
@@ -169,7 +177,10 @@ export class TelegramStatsPanels {
     const detected = this.#deps.agents.registry.list().filter((profile) => this.#deps.agents.registry.binPath(profile)).length
 
     return (
-      `📊 *运行状态*\n• 引擎: *${this.#deps.agents.registry.label(engine)}*\n• 模型: *${model}*${ownSelection ? "" : "（默认）"}\n` +
+      // Both come from data files the operator edits (agents.json labels, custom model
+      // labels), so an underscore in one would break the whole status panel
+      `📊 *运行状态*\n• 引擎: *${escapeMarkdown(this.#deps.agents.registry.label(engine))}*\n` +
+        `• 模型: *${escapeMarkdown(model)}*${ownSelection ? "" : "（默认）"}\n` +
       `• 当前任务: ${running}\n• 待处理队列: ${pending} 条\n• 今日任务: ${today} 条\n` +
       `• Agent CLI: ${detected} 个已安装\n` +
       `• 待触发提醒: ${reminders} 条\n• 定时任务: ${schedules} 个\n` +

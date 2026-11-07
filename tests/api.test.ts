@@ -19,7 +19,7 @@ import { ProxyService } from "../src/proxy.js"
 import { AliasStore } from "../src/aliases.js"
 import { Opencode } from "../src/opencode.js"
 import type { OpsService } from "../src/ops.js"
-import { CcSwitchError, type CcSwitchService } from "../src/ccswitch.js"
+import { CcSwitchError, CcSwitchRunError, type CcSwitchService } from "../src/ccswitch.js"
 import { ReminderService } from "../src/reminders.js"
 import { ScheduleService } from "../src/scheduler.js"
 import { SessionStore } from "../src/store.js"
@@ -45,6 +45,8 @@ interface Harness {
   ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }>
   installs: string[]
   ccCalls: string[]
+  /** Makes the next cc-switch read fail, for a route that writes first and then re-reads. */
+  ccFailNextRead: () => void
 }
 
 export async function withApi(
@@ -188,6 +190,7 @@ export async function withApi(
   } as unknown as OpsService
   const installs: string[] = []
   const ccCalls: string[] = []
+  let ccFailsOneRead = false
   const ccswitch = {
     available: true,
     app: "opencode",
@@ -242,6 +245,7 @@ export async function withApi(
     proxyShow: async () => "proxy http://127.0.0.1:7890",
     addProvider: async (draft: { name: string; template?: string; apiKey?: string }) => {
       if (draft.template === "nope") throw new CcSwitchError("未知的 Provider 模板，可用：custom。")
+      if (draft.name === "dup") throw new CcSwitchRunError("该 Provider 名称已存在")
       ccCalls.push(`provider:new:${draft.name}:${draft.template ?? ""}`)
       const key = draft.apiKey ?? ""
       const stdout = key ? `created ${draft.name} with ${key}` : `created ${draft.name}`
@@ -251,6 +255,12 @@ export async function withApi(
       ccCalls.push(`run:${args.join(" ")}`)
       // Hermes memory is answered like the real CLI, so the screen's read/write contract
       // (limits wording, the "empty" sentence, `--yes` on a clear) is exercised for real
+      if (args[0] === "hermes" && args[1] === "memory" && (args[2] === "limits" || args[2] === "show")) {
+        if (ccFailsOneRead) {
+          ccFailsOneRead = false
+          throw new CcSwitchRunError("cc-switch 读取失败：数据库被占用")
+        }
+      }
       if (args[0] === "hermes" && args[1] === "memory") {
         if (args[2] === "limits") {
           return {
@@ -370,6 +380,9 @@ export async function withApi(
       ocCalls,
       installs,
       ccCalls,
+      ccFailNextRead: () => {
+        ccFailsOneRead = true
+      },
     })
   } finally {
     await api.stop()
@@ -1303,6 +1316,35 @@ test("api runs tasks from one session one at a time and answers every one", asyn
   )
 })
 
+test("api stop does not wait for a client still holding a task stream", async () => {
+  await withApi(
+    (_key, _engine, _text, _onProgress, signal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("已取消当前任务。")))
+      }),
+    async (h) => {
+      const created = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "一直被看的任务" }),
+      })
+      const { task } = (await created.json()) as { task: { id: string } }
+      const stream = await fetch(`${h.base}/api/v1/task/${task.id}/events`, { headers: authHeaders() })
+      assert.equal(stream.status, 200)
+      const reader = stream.body!.getReader()
+      await reader.read()
+
+      const started = Date.now()
+      await h.cleanup()
+      const elapsed = Date.now() - started
+      // A stopped bot has to release the port and let the process exit while a phone is
+      // still watching a task; waiting for that client means waiting for its timeout
+      assert.ok(elapsed < 3_000, `stop waited ${elapsed}ms for a stream that is still open`)
+      await reader.cancel().catch(() => {})
+    },
+  )
+})
+
 test("api queue lists queued tasks and stops a single task", async () => {
   await withApi(
     (_key, _engine, _text, _onProgress, signal) =>
@@ -2028,7 +2070,7 @@ test("api history windows the list but still reports the stored total", async ()
     const windowed = await fetch(`${h.base}/api/v1/history?limit=20`, { headers: authHeaders() })
     const body = (await windowed.json()) as { history: Array<{ prompt: string }>; total: number }
     assert.equal(body.history.length, 20)
-    // The app renders "已显示 N / 共 M 条" from this, like Telegram's /history.
+    // The app renders its own "已显示 N / 共 M 条" line from this.
     assert.equal(body.total, 25)
     assert.equal(body.history[0]?.prompt, "任务 24")
 
@@ -2674,6 +2716,24 @@ test("api reads and writes the Hermes memory blobs the way Telegram does", async
     // Every reply carries the stored text, so the editor shows the server, not a local draft
     assert.equal(String(enabled.body.user), "")
     assert.equal(String(enabled.body.limits).includes("2200 chars"), true)
+
+    // The write has landed by the time the screen is refreshed, so a refresh that then
+    // glitches must not come back as a failure — the App would repeat a write that worked
+    h.ccFailNextRead()
+    const stale = await post({ kind: "memory", action: "set", content: "写入成功", confirm: true })
+    assert.equal(stale.status, 200)
+    assert.equal(stale.body.ok, true)
+    assert.equal(stale.body.refreshed, false)
+    assert.match(String(stale.body.message), /已写入 MEMORY\.md/)
+    assert.match(String(stale.body.message), /状态刷新失败/)
+    // Half a state is worse than none: empty limits/memory/user would paint over the editor
+    assert.equal(stale.body.limits, undefined)
+    assert.equal(stale.body.memory, undefined)
+
+    const afterGlitch = await post({ kind: "memory", action: "enable" })
+    assert.equal(afterGlitch.status, 200)
+    assert.equal(afterGlitch.body.refreshed, true)
+    assert.match(String(afterGlitch.body.limits), /2200 chars/)
   })
 })
 
@@ -2726,6 +2786,15 @@ test("api cc commands take the second half Telegram types in the same arg", asyn
 
     const badPort = await postExec({ name: "proxy-listen-port", arg: "http://x" })
     assert.equal(badPort.status, 400)
+
+    // Five digits is not a port: 99999 would reach cc-switch as a listen port and the
+    // proxy would just stop working instead of the App getting a fixable error
+    for (const outOfRange of ["0", "99999"]) {
+      const wide = await postExec({ name: "proxy-listen-port", arg: outOfRange })
+      assert.equal(wide.status, 400, `${outOfRange} is not a usable port`)
+      assert.match(await errorOf(wide), /1-65535/)
+    }
+    assert.equal(h.ccCalls.at(-1), "run:proxy config --listen-port 8787", "a rejected port must not run")
 
     const setAddress = await postExec({ name: "proxy-listen-address", arg: "127.0.0.1" })
     assert.equal(setAddress.status, 200)
@@ -2983,6 +3052,17 @@ test("api exposes provider quota and an allowlisted cc action runner", async () 
     assert.equal(quota.status, 200)
     assert.equal(h.ccCalls.at(-1), "run:provider quota p1")
 
+    // ccTargetId raises its ApiError inside the ccQuery closure, so re-wrapping every
+    // thrown error as 502 blamed cc-switch for the caller's typo and ran the CLI anyway
+    const callsBeforeBad = h.ccCalls.length
+    for (const bad of ["-x", "p 1"]) {
+      const rejected = await fetch(`${h.base}/api/v1/cc/quota?id=${encodeURIComponent(bad)}`, {
+        headers: authHeaders(),
+      })
+      assert.equal(rejected.status, 400, `quota must answer 400 for id ${JSON.stringify(bad)}`)
+    }
+    assert.equal(h.ccCalls.length, callsBeforeBad, "a rejected id must never reach cc-switch")
+
     const disabled = await fetch(`${h.base}/api/v1/cc/exec`, {
       method: "POST",
       headers: authHeaders(),
@@ -3179,6 +3259,17 @@ test("api creates a cc-switch provider without leaking the submitted key", async
     })
     assert.equal(badTemplate.status, 400)
     assert.match(((await badTemplate.json()) as { error: string }).error, /未知的 Provider 模板/)
+
+    // cc-switch refusing the command is an upstream failure, not the form's mistake: the
+    // service throws for any non-zero exit, so the old `result.code !== 0` branch below
+    // was unreachable and this answered 400 while claiming the provider was created
+    const refused = await fetch(`${h.base}/api/v1/cc/providers`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ name: "dup" }),
+    })
+    assert.equal(refused.status, 502)
+    assert.match(((await refused.json()) as { error: string }).error, /该 Provider 名称已存在/)
   })
 })
 
@@ -3847,6 +3938,81 @@ test("api aliases rejects an invalid name with the store's guidance", async () =
       assert.equal(res.status, 400)
       const body = (await res.json()) as { error?: string }
       assert.match(body.error ?? "", /快捷指令名/)
+    },
+  )
+})
+
+test("POST /new and /model refuse to run while a task is active", async () => {
+  let release: (() => void) | undefined
+  await withApi(
+    async (_key, _engine, text) => {
+      if (!text.includes("挂起")) return "ok"
+      return new Promise<string>((resolve) => {
+        release = () => resolve("回复：挂起")
+      })
+    },
+    async (h) => {
+      const submitted = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "挂起的任务" }),
+      })
+      assert.equal(submitted.status, 202)
+      try {
+        for (const [method, url, body] of [
+          ["POST", "new", undefined],
+          ["POST", "model", JSON.stringify({ model: "custom/base" })],
+        ] as const) {
+          const res = await fetch(`${h.base}/api/v1/${url}`, {
+            method,
+            headers: authHeaders(),
+            body: body ?? undefined,
+          })
+          assert.equal(res.status, 409, `${method} ${url} must refuse while a task is active`)
+          const payload = (await res.json()) as { error?: string }
+          assert.match(payload.error ?? "", /任务执行中/)
+        }
+      } finally {
+        release?.()
+      }
+    },
+  )
+})
+
+test("api export returns json and markdown history documents", async () => {
+  await withApi(
+    async () => "回复",
+    async (h) => {
+      await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "导出源任务" }),
+      })
+      for (let i = 0; i < 100; i++) {
+        const body = (await (await fetch(`${h.base}/api/v1/history?limit=5`, { headers: authHeaders() })).json()) as {
+          history: unknown[]
+        }
+        if (body.history?.length) break
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+
+      const jsonRes = await fetch(`${h.base}/api/v1/export?format=json`, { headers: authHeaders() })
+      assert.equal(jsonRes.status, 200)
+      assert.equal(jsonRes.headers.get("content-type"), "application/json; charset=utf-8")
+      assert.match(jsonRes.headers.get("content-disposition") ?? "", /\.json/)
+      const payload = JSON.parse(await jsonRes.text()) as { key: string; entries: Array<{ prompt: string }> }
+      assert.ok(payload.entries.length >= 1)
+      assert.ok(!payload.key.includes("secret"))
+
+      const mdRes = await fetch(`${h.base}/api/v1/export`, { headers: authHeaders() })
+      assert.equal(mdRes.status, 200)
+      assert.match(mdRes.headers.get("content-type") ?? "", /markdown/)
+      const md = await mdRes.text()
+      assert.match(md, /# Agent Bot 任务历史/)
+      assert.match(md, /导出源任务/)
+
+      const bad = await fetch(`${h.base}/api/v1/export?format=xml`, { headers: authHeaders() })
+      assert.equal(bad.status, 400)
     },
   )
 })

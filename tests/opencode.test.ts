@@ -493,3 +493,56 @@ test("health returns false on a non-200 answer", async () => {
     },
   )
 })
+
+test("two sessions share one /event connection and still see only their own parts", async () => {
+  let connections = 0
+  const part = (sessionID: string, body: Record<string, unknown>) =>
+    `data: ${JSON.stringify({ type: "message.part.updated", properties: { part: { ...body, sessionID } } })}\n\n`
+
+  await withServer(
+    (_req, res) => {
+      connections += 1
+      res.writeHead(200, { "content-type": "text/event-stream" })
+      res.write(part("ses_a", { type: "tool", tool: "bash", state: { status: "completed", input: { command: "ls" } } }))
+      res.write(part("ses_b", { type: "text", text: "hello" }))
+      res.write(part("ses_c", { type: "text", text: "unrelated" }))
+    },
+    async (oc) => {
+      const first: string[] = []
+      const second: string[] = []
+      const stopA = oc.subscribeSession("ses_a", (summary) => first.push(summary))
+      const stopB = oc.subscribeSession("ses_b", (summary) => second.push(summary))
+      await delay(150)
+      stopA()
+      stopB()
+
+      assert.equal(connections, 1, "the broadcast stream is shared, not one per chat")
+      assert.deepEqual(first, ["完成 [bash]: ls"])
+      assert.deepEqual(second, ["正在组织输出回答..."])
+    },
+  )
+})
+
+test("the shared stream stops with the last subscriber and restarts for the next", async () => {
+  let connections = 0
+
+  await withServer(
+    (_req, res) => {
+      connections += 1
+      res.writeHead(200, { "content-type": "text/event-stream" })
+    },
+    async (oc) => {
+      const stopFirst = oc.subscribeSession("ses_a", () => {})
+      await delay(60)
+      stopFirst()
+      await delay(60)
+      assert.equal(connections, 1, "an idle bot must not keep an event connection open")
+
+      const stopSecond = oc.subscribeSession("ses_b", () => {})
+      await delay(60)
+      stopSecond()
+      assert.equal(connections, 2, "a later task must get a live stream")
+    },
+  )
+})
+

@@ -1,17 +1,17 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { gzipSync } from "node:zlib"
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { writePrivateAtomic } from "./jsonStore.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import { decodeEncKey, decryptPayload, encryptPayload, ENC_HEADER, ENC_VERSION, randomEncKey } from "./apiCrypto.js"
-import { clampLimit, res_attachment_binary } from "./apiHttp.js"
 import { isModelResetWord, resolveModelKey, type ModelInfo } from "./models.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 import { resolveOpencodeModel } from "./engineCall.js"
 import { redactSecrets, type CcSwitchService } from "./ccswitch.js"
 import { API_PREFIX, ApiError, type ApiRequestContext } from "./apiCore.js"
-import { ApiTaskManager, MAX_TASK_RECORDS } from "./apiTasks.js"
+import { ApiTaskManager } from "./apiTasks.js"
 import { AuthFailureLimiter } from "./apiRateLimit.js"
 import { routeCc } from "./apiCc.js"
 import type { Logger } from "./logger.js"
@@ -31,7 +31,6 @@ import {
   agentView,
   agentsView,
   modelsView,
-  customModelView,
   type PersonalRouteDeps,
 } from "./apiPersonal.js"
 import type { SessionStore } from "./store.js"
@@ -44,6 +43,10 @@ import type { Opencode } from "./opencode.js"
 import { type OpsResult, type OpsService } from "./ops.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
+import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
+import { routeOps } from "./apiOpsRoutes.js"
+import { routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
+import { ApiAgentActions } from "./apiAgentRoutes.js"
 
 // Attachment uploads are base64 on the same endpoint: a 15MB batch inflates
 // to ~20MB, so the cap covers text-only requests with plenty of headroom
@@ -110,11 +113,7 @@ export function resolveApiToken(cfg: BotConfig): string {
     // Missing or unreadable file: generate a fresh token below.
   }
   const token = randomBytes(24).toString("hex")
-  writeFileSync(
-    path,
-    `${JSON.stringify({ token, createdAt: new Date().toISOString() }, null, 2)}\n`,
-    { mode: 0o600 },
-  )
+  writePrivateAtomic(path, `${JSON.stringify({ token, createdAt: new Date().toISOString() }, null, 2)}\n`)
   return token
 }
 
@@ -156,23 +155,22 @@ export function resolveEncKey(cfg: BotConfig): Buffer | undefined {
     // Missing or unreadable file: generate a fresh key below.
   }
   const key = decodeEncKey(randomEncKey()) ?? randomBytes(32)
-  writeFileSync(path, `${JSON.stringify({ key: key.toString("base64"), createdAt: new Date().toISOString() }, null, 2)}\n`, {
-    mode: 0o600,
-  })
+  writePrivateAtomic(path, `${JSON.stringify({ key: key.toString("base64"), createdAt: new Date().toISOString() }, null, 2)}\n`)
   return key
 }
 
 /** HTTP control surface for the companion Android app. Telegram keeps working in parallel. */
-export class ApiServer {  readonly #opts: ApiServerOptions
+export class ApiServer {
+  readonly #opts: ApiServerOptions
   readonly #log: Logger
   readonly #token: string
   readonly #encKey?: Buffer
   #server?: Server
-  #agentActionRunning = false
   /** Update/check can run npm for minutes; one at a time keeps the repo files sane. */
   #opsActionRunning = false
   #ccActionRunning = false
   readonly #taskManager: ApiTaskManager
+  readonly #agentActions: ApiAgentActions
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
   readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
   readonly #resKeys = new WeakMap<ServerResponse, Buffer>()
@@ -200,6 +198,15 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       ownerChatId: options.ownerChatId,
       fetchMedia: options.fetchMedia,
       appKey: options.appKey ?? "api:app",
+    })
+    this.#agentActions = new ApiAgentActions({
+      agents: options.agents,
+      installer: options.installer,
+      store: options.store,
+      log: options.log,
+      appKey: options.appKey ?? "api:app",
+      agentView: (profile) => agentView(this.#personalDeps(), profile),
+      json: (res, status, body) => this.#json(res, status, body),
     })
   }
 
@@ -232,8 +239,17 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     })
     this.#server = server
     await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(this.#opts.cfg.api.port, this.#opts.cfg.api.bind, () => resolve())
+      const onError = (err: Error): void => reject(err)
+      server.once("error", onError)
+      server.listen(this.#opts.cfg.api.port, this.#opts.cfg.api.bind, () => {
+        server.removeListener("error", onError)
+        resolve()
+      })
+    })
+    // Without a listener here any later 'error' event — a socket the kernel refuses to
+    // accept, an EMFILE under load — would be thrown at the process and take the bot down.
+    server.on("error", (err: Error) => {
+      this.#log.error("api server error:", err.message)
     })
     this.#log.info(`api listening on http://${this.#opts.cfg.api.bind}:${this.#opts.cfg.api.port}${API_PREFIX}`)
   }
@@ -243,9 +259,13 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     if (!server) return
     this.#server = undefined
     this.#taskManager.stopAll()
-    await new Promise<void>((resolve) => server.close(() => resolve()))
-    // Polling clients hold keep-alive sockets; close them so shutdown is prompt.
-    server.closeAllConnections()
+    const closing = new Promise<void>((resolve) => server.close(() => resolve()))
+    // `close` waits for every socket to finish, and a task stream holds one open for as long
+    // as the App watches it, so waiting first and cutting afterwards never returned here.
+    const grace = setTimeout(() => server.closeAllConnections(), 1_000)
+    grace.unref()
+    await closing
+    clearTimeout(grace)
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -387,97 +407,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
-    if (resource === "task" && method === "POST" && !id) {
-      const body = await this.#readJsonBody(ctx.req)
-      const text = typeof body.text === "string" ? body.text.trim() : ""
-      const attachments = this.#taskManager.parseAttachments(body.attachments)
-      // Attachments-only tasks are allowed: #runTask fills in a default instruction per media kind.
-      if (!text && (attachments?.length ?? 0) === 0) throw new ApiError(400, "缺少 text 字段")
-      if (text.length > 12_000) throw new ApiError(400, "消息太长（上限 12000 字），请分段发送")
-      // Same expansion the bot applies to /name messages, so shortcuts created in
-      // either client work from both (built-in commands do not exist here).
-      const expanded = this.#expandAlias(text)
-      const engine = typeof body.engine === "string" && body.engine.trim() ? body.engine.trim() : undefined
-      const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined
-      const task = this.#taskManager.submit(expanded, engine, model, attachments)
-      this.#json(ctx.res, 202, { task: this.#taskManager.view(task) })
-      return
-    }
-
-    if (resource === "task" && id && method === "GET" && !action) {
-      const task = this.#taskManager.get(id)
-      if (!task) throw new ApiError(404, "任务不存在或已被清理")
-      this.#json(ctx.res, 200, { task: this.#taskManager.view(task) })
-      return
-    }
-
-    if (resource === "task" && id && action === "events" && method === "GET") {
-      const task = this.#taskManager.get(id)
-      if (!task) throw new ApiError(404, "任务不存在或已被清理")
-      if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
-        // Already settled: a single snapshot response is friendlier than an
-        // event stream that closes after one frame
-        this.#json(ctx.res, 200, { task: this.#taskManager.view(task) })
-        return
-      }
-      this.#taskManager.streamEvents(ctx, task)
-      return
-    }
-
-    if (resource === "task" && id && method === "GET" && action === "media") {
-      await this.#taskManager.sendMedia(ctx, id, Number(segments[3]))
-      return
-    }
-
-    if (resource === "task" && id && method === "POST" && action === "stop") {
-      const task = this.#taskManager.stopTask(id)
-      this.#json(ctx.res, 200, { ok: true, task: this.#taskManager.view(task) })
-      return
-    }
-
-    if (resource === "task" && id && method === "POST" && action === "retry") {
-      const failed = this.#taskManager.get(id)
-      if (!failed || failed.key !== this.appKey) throw new ApiError(404, "任务不存在或已被清理")
-      if (failed.status === "queued" || failed.status === "running") {
-        throw new ApiError(409, "任务还在排队或执行中，请先停止")
-      }
-      // Telegram's /retry replays the captured prompt, so reuse the stored text,
-      // engine, model pin and attachments instead of a text-only client copy.
-      // Attachments were saved to the inbox at submit time; re-read them into base64.
-      const attachments = (failed.savedAttachments ?? []).flatMap((saved) => {
-        try {
-          return [{ name: saved.name, mime: saved.mime, data: readFileSync(saved.path).toString("base64") }]
-        } catch {
-          return []
-        }
-      })
-      const task = this.#taskManager.submit(failed.text, failed.engine, failed.model, attachments.length > 0 ? attachments : undefined)
-      this.#json(ctx.res, 202, { ok: true, retriedFrom: id, task: this.#taskManager.view(task) })
-      return
-    }
-
-    if (resource === "tasks" && method === "GET") {
-      const limit = clampLimit(ctx.url.searchParams.get("limit"), 50, MAX_TASK_RECORDS)
-      // Unlike /queue this also answers the settled runs, which is what lets a client re-run
-      // any of them through POST /task/:id/retry while the record is still retained.
-      const tasks = this.#taskManager.list(limit)
-      this.#json(ctx.res, 200, { tasks: tasks.map((task) => this.#taskManager.view(task)) })
-      return
-    }
-
-    if (resource === "stop" && method === "POST") {
-      this.#json(ctx.res, 200, this.#taskManager.stopAll())
-      return
-    }
-
-    if (resource === "queue" && method === "POST" && id === "clear") {
-      this.#json(ctx.res, 200, this.#taskManager.clearQueue())
-      return
-    }
-
-    if (resource === "queue" && method === "GET") {
-      this.#json(ctx.res, 200, { tasks: this.#taskManager.queue().map((task) => this.#taskManager.view(task)) })
-      return
+    if (resource === "task" || resource === "tasks" || resource === "stop" || resource === "queue") {
+      if (await routeTasks(this.#taskRouteDeps(), ctx, resource, id, action, segments)) return
     }
 
     if (resource === "dir") {
@@ -609,51 +540,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       return
     }
 
-    if (resource === "ops" && method === "GET" && id === "diag") {
-      const ops = this.#opts.ops
-      if (!ops) throw new ApiError(409, "当前运行环境不支持运维诊断")
-      this.#json(ctx.res, 200, { diagnostics: await ops.diagnostics() })
-      return
-    }
-
-    if (resource === "ops" && method === "GET" && id === "service") {
-      const ops = this.#opts.ops
-      if (!ops) throw new ApiError(409, "当前运行环境不支持服务管理")
-      this.#json(ctx.res, 200, { service: await ops.opencodeStatus() })
-      return
-    }
-
-    if (resource === "ops" && method === "GET" && id === "check-update") {
-      const ops = this.#opts.ops
-      if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
-      this.#json(ctx.res, 200, { result: await ops.checkUpdate() })
-      return
-    }
-
-    // Streams the fresh data backup; the pairing token is never inside the archive
-    if (resource === "ops" && method === "GET" && id === "backup") {
-      const ops = this.#opts.ops
-      if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
-      const result = await ops.backupData()
-      if (!result.ok || !result.file) throw new ApiError(500, result.message)
-      const file = result.file.split("/").pop() ?? "backup.tar.gz"
-      res_attachment_binary(ctx.res, file, "application/gzip", readFileSync(result.file))
-      return
-    }
-
-    if (resource === "ops" && method === "POST" && id) {
-      await this.#routeOpsAction(ctx, id, action)
-      return
-    }
-
-    if (resource === "ops" && method === "GET" && id === "logs") {
-      const ops = this.#opts.ops
-      if (!ops) throw new ApiError(409, "当前运行环境不支持日志查看")
-      const source = ctx.url.searchParams.get("source") === "opencode" ? "opencode" : "bot"
-      const rawLines = Number(ctx.url.searchParams.get("lines") ?? 80)
-      const lines = Math.min(400, Math.max(10, Number.isFinite(rawLines) ? Math.floor(rawLines) : 80))
-      this.#json(ctx.res, 200, ops.tailLogs(source, lines))
-      return
+    if (resource === "ops") {
+      if (await routeOps(this.#opsRouteDeps(), ctx, id, action)) return
     }
 
     if (resource === "usage" || resource === "history" || resource === "export") {
@@ -680,106 +568,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   }
 
   async #routeCustomModels(ctx: ApiRequestContext, key: string | undefined): Promise<void> {
-    const models = this.#opts.models
-    if (ctx.method === "GET" && !key) {
-      const custom = models.listCustomModels()
-      this.#json(ctx.res, 200, {
-        models: Object.entries(custom).map(([name, entry]) => customModelView(name, entry)),
-        agents: models.listAgents().map((agent) => ({
-          name: agent.name,
-          model: agent.model,
-          description: agent.description,
-          mode: agent.mode,
-        })),
-      })
-      return
-    }
-    if (ctx.method === "POST" && !key) {
-      const body = await this.#readJsonBody(ctx.req)
-      // The same positive-integer rule Telegram's `--context/--output` flags enforce
-      const limitOf = (field: string, raw: unknown): number | undefined => {
-        if (raw === undefined || raw === null) return undefined
-        if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0 || raw > 1_000_000_000) {
-          throw new ApiError(400, `${field} 需要 1–1000000000 之间的整数`)
-        }
-        return raw
-      }
-      const input = {
-        key: typeof body.key === "string" ? body.key : "",
-        providerID: typeof body.providerID === "string" ? body.providerID : "",
-        modelID: typeof body.modelID === "string" ? body.modelID : "",
-        label: typeof body.label === "string" ? body.label : undefined,
-        desc: typeof body.desc === "string" ? body.desc : undefined,
-        attachment: typeof body.attachment === "boolean" ? body.attachment : undefined,
-        contextWindow: limitOf("contextWindow", body.contextWindow),
-        outputLimit: limitOf("outputLimit", body.outputLimit),
-      }
-      if (!input.key || !input.providerID || !input.modelID) {
-        throw new ApiError(400, "缺少 key、providerID 或 modelID 字段")
-      }
-      let added
-      try {
-        added = models.add(input)
-      } catch (err) {
-        throw new ApiError(400, err instanceof Error ? err.message : "无法添加模型")
-      }
-      // Telegram spells out which capabilities landed, because a provider missing from
-      // opencode.json silently keeps them; the App has to say the same thing.
-      const capabilities = [
-        input.attachment ? "支持图片输入" : "",
-        input.contextWindow ? `上下文 ${input.contextWindow}` : "",
-        input.outputLimit ? `输出上限 ${input.outputLimit}` : "",
-      ].filter(Boolean)
-      const capabilityNote =
-        capabilities.length === 0
-          ? ""
-          : added.providerUpdated
-            ? `已写入模型能力：${capabilities.join("、")}。`
-            : `⚠️ 模型能力参数（${capabilities.join("、")}）未写入：Provider 不在项目 opencode.json 中。`
-      this.#json(ctx.res, 200, {
-        ok: true,
-        message: `已添加自定义模型 ${added.key}（${input.providerID}/${input.modelID}）。${capabilityNote}`,
-        model: customModelView(added.key, added.entry),
-      })
-      return
-    }
-    if (ctx.method === "DELETE" && key) {
-      const force = ctx.url.searchParams.get("force") === "1"
-      let removed
-      try {
-        removed = models.remove(key, force)
-      } catch (err) {
-        throw new ApiError(409, err instanceof Error ? err.message : "模型无法删除")
-      }
-      if (!removed) throw new ApiError(404, "自定义模型不存在")
-      this.#json(ctx.res, 200, {
-        ok: true,
-        message: `已删除自定义模型 ${removed.key}。${removed.resetChats.length > 0 ? `已重置 ${removed.resetChats.length} 个会话的模型选择。` : ""}`,
-        resetChats: removed.resetChats,
-        resetAgents: removed.resetAgents,
-      })
-      return
-    }
-    throw new ApiError(404, "未知的模型 API 路径")
-  }
-
-  async #routeOpsAction(ctx: ApiRequestContext, id: string, action: string | undefined): Promise<void> {
-    const ops = this.#opts.ops
-    if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
-    const serviceActions: Record<string, () => Promise<OpsResult>> = {
-      start: () => ops.startOpencode(),
-      stop: () => ops.stopOpencode(),
-      restart: () => ops.restartOpencode(),
-    }
-    let run: (() => Promise<OpsResult>) | undefined
-    if (id === "update") run = () => ops.updateProject()
-    else if (id === "check") run = () => ops.runCheck()
-    else if (id === "restart") run = () => ops.restartBot()
-    else if (id === "cc") run = () => ops.installCcSwitch(false)
-    else if (id === "cc-update") run = () => ops.installCcSwitch(true)
-    else if (id === "service" && action && Object.hasOwn(serviceActions, action)) run = serviceActions[action]
-    if (!run) throw new ApiError(404, "未知的运维操作")
-    this.#json(ctx.res, 200, { result: await this.#runOpsAction(run) })
+    await routeCustomModels(this.#modelRouteDeps(), ctx, key)
   }
 
   async #runOpsAction(run: () => Promise<OpsResult>): Promise<Record<string, unknown>> {
@@ -808,6 +597,9 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     try {
       return await run()
     } catch (err) {
+      // A route can reject the input from inside the closure (ccTargetId does); that stays
+      // the client error it was raised as instead of blaming cc-switch for it
+      if (err instanceof ApiError) throw err
       throw new ApiError(502, redactSecrets(err instanceof Error ? err.message : String(err)))
     }
   }
@@ -818,6 +610,7 @@ export class ApiServer {  readonly #opts: ApiServerOptions
       try {
         return await run()
       } catch (err) {
+        if (err instanceof ApiError) throw err
         throw new ApiError(502, redactSecrets(err instanceof Error ? err.message : String(err)))
       }
     })
@@ -906,6 +699,33 @@ export class ApiServer {  readonly #opts: ApiServerOptions
   /** Telegram answers "任务执行中，请先停止" instead of rewriting session state under a job. */
   #requireIdle(what: string): void {
     this.#taskManager.requireIdle(what)
+  }
+
+  /** Task routes only need the manager plus the transport helpers. */
+  #taskRouteDeps(): TaskRouteDeps {
+    return {
+      tasks: this.#taskManager,
+      readJsonBody: (req) => this.#readJsonBody(req),
+      json: (res, status, body) => this.#json(res, status, body),
+      expandAlias: (text) => this.#expandAlias(text),
+      appKey: this.appKey,
+    }
+  }
+
+  #modelRouteDeps(): ModelRouteDeps {
+    return {
+      models: this.#opts.models,
+      json: (res, status, body) => this.#json(res, status, body),
+      readJsonBody: (req) => this.#readJsonBody(req),
+    }
+  }
+
+  #opsRouteDeps() {
+    return {
+      ops: this.#opts.ops,
+      json: (res: ServerResponse, status: number, body: unknown) => this.#json(res, status, body),
+      runOpsAction: (run: () => Promise<OpsResult>) => this.#runOpsAction(run),
+    }
   }
 
   /** Everything the personal-data route modules need from this class, in one object. */
@@ -1027,51 +847,8 @@ export class ApiServer {  readonly #opts: ApiServerOptions
     }
   }
 
-  /** Install/update/uninstall an Agent CLI; the app confirms before calling. */
   async #routeAgentAction(ctx: ApiRequestContext, rawId: string, action: string | undefined): Promise<void> {
-    const verbs: Record<string, string> = { install: "安装", update: "更新", uninstall: "卸载" }
-    const verb = action ? verbs[action] : undefined
-    if (!action || !verb) throw new ApiError(404, "未知的 Agent 管理操作")
-    const engine = this.#opts.agents.registry.resolveEngine(rawId)
-    const profile = engine && engine !== "opencode" ? this.#opts.agents.registry.get(engine) : undefined
-    if (!engine || !profile) throw new ApiError(404, `未识别的 Agent CLI：${rawId}`)
-    const installer = this.#opts.installer
-    if (!installer) throw new ApiError(409, "当前运行环境不支持安装管理")
-
-    if (action === "install") {
-      const existing = this.#opts.agents.registry.binPath(profile)
-      if (existing) throw new ApiError(409, `${profile.label} 已安装：${existing}`)
-      if (!installer.installCommand(profile)) {
-        throw new ApiError(400, `${profile.label} 暂不支持自动安装${profile.install ? `，请手动安装：${profile.install}` : ""}`)
-      }
-    } else {
-      if (!installer.isManaged(engine)) {
-        throw new ApiError(409, `${profile.label} 不是由 Bot 安装的，无法自动${verb}`)
-      }
-      if (action === "uninstall" && this.#opts.store.getEngine(this.appKey) === engine) {
-        throw new ApiError(409, `当前正在使用 ${profile.label}，请先切换到 OpenCode 再卸载`)
-      }
-    }
-    if (this.#agentActionRunning) throw new ApiError(409, "已有安装/卸载任务在执行，请稍后再试")
-
-    this.#agentActionRunning = true
-    try {
-      const result =
-        action === "install"
-          ? await installer.install(engine)
-          : action === "update"
-            ? await installer.update(engine)
-            : await installer.uninstall(engine)
-      this.#log.info(`api agent ${action} ${engine}: ${result.ok ? "ok" : "failed"}`)
-      this.#json(ctx.res, 200, {
-        ok: result.ok,
-        message: redactSecrets(result.message),
-        output: result.output ? redactSecrets(result.output).slice(0, 20_000) : undefined,
-        agent: agentView(this.#personalDeps(), profile),
-      })
-    } finally {
-      this.#agentActionRunning = false
-    }
+    return this.#agentActions.route(ctx, rawId, action)
   }
 
   // Engine/model views moved to apiPersonal.ts (agentsView/modelsView/agentView).

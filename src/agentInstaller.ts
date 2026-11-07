@@ -1,14 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { installerChildEnv } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
-import { readJsonObject } from "./jsonStore.js"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { clipTail } from "./messages.js"
-import { terminateProcess, whichSync, type AgentCliProfile, type AgentCliRegistry, type AgentInstallMethod } from "./agentCli.js"
+import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
+import {
+  whichSync,
+  type AgentCliProfile,
+  type AgentCliRegistry,
+  type AgentInstallMethod,
+} from "./agentCli.js"
 import type { Logger } from "./logger.js"
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
@@ -413,12 +419,14 @@ export class AgentCliInstaller {
       let stderr = ""
       let settled = false
       let timedOut = false
+      let drainTimer: NodeJS.Timeout | null = null
       // Installing is long-running and pipes are never read again once we resolve, so
       // the endpoints must be released explicitly or the child keeps them open.
       const finish = (code: number | null): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        if (drainTimer) clearTimeout(drainTimer)
         child.stdout?.destroy()
         child.stderr?.destroy()
         resolve({ code, stdout, stderr, timedOut })
@@ -435,10 +443,25 @@ export class AgentCliInstaller {
       const err = new StringDecoder("utf8")
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout = clipTail(stdout + out.write(chunk), MAX_OUTPUT_CHARS)
+        armDrain()
       })
       child.stderr?.on("data", (chunk: Buffer) => {
         stderr = clipTail(stderr + err.write(chunk), MAX_OUTPUT_CHARS)
+        armDrain()
       })
+      // A lifecycle script that outlives the installer it was spawned from keeps the
+      // inherited pipes open, so `close` never arrives and a finished install would be
+      // reported as a timeout. Settle once the process is gone and output has stopped.
+      const armDrain = (): void => {
+        if (settled || (child.exitCode === null && child.signalCode === null)) return
+        if (drainTimer) clearTimeout(drainTimer)
+        drainTimer = setTimeout(() => {
+          this.#terminate(child)
+          finish(child.exitCode)
+        }, EXIT_DRAIN_MS)
+        drainTimer.unref()
+      }
+      child.once("exit", armDrain)
       child.on("close", (code) => finish(code))
       child.on("error", (error) => {
         stderr = clipTail(`${stderr}\n${error.message}`, MAX_OUTPUT_CHARS)
@@ -472,11 +495,7 @@ export class AgentCliInstaller {
 
   #save(): void {
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const temp = `${this.#path}.tmp`
-      writeFileSync(temp, `${JSON.stringify(this.#managed, null, 2)}\n`, { mode: 0o600 })
-      renameSync(temp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(this.#path, `${JSON.stringify(this.#managed, null, 2)}\n`)
     } catch (err) {
       this.#log.warn(`failed to save ${this.#path}:`, (err as Error).message)
     }

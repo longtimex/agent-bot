@@ -6,6 +6,7 @@ import { join } from "node:path"
 import test from "node:test"
 import {
   CcSwitchError,
+  CcSwitchRunError,
   CcSwitchService,
   assertSafeId,
   buildMcpDeeplink,
@@ -125,6 +126,29 @@ test("CcSwitchService passes the app flag and validates ids", async () => {
   await assert.rejects(() => service.useProvider("--verbose"), CcSwitchError)
   await assert.rejects(() => service.useProvider("bad id"), CcSwitchError)
   assert.equal(calls.length, 2)
+})
+
+test("CcSwitchService masks the key on the cc-switch rejection path too", async () => {
+  const secret = "sk-abcdef0123456789"
+  const service = new CcSwitchService({
+    app: "claude",
+    // cc-switch echoes the settings it failed on, and that dump is the whole error text
+    runner: async () => ({
+      code: 1,
+      stdout: "",
+      stderr: `provider add failed\nsettings: {"baseURL":"https://x.test","apiKey":"${secret}"}`,
+    }),
+  })
+
+  // errorDetail() only rewrites the generic label patterns, so an unlabelled key inside
+  // the echoed JSON survives them unless addProvider masks the exact value it was given
+  const err = await service
+    .addProvider({ name: "我的 Claude", baseUrl: "https://x.test", apiKey: secret })
+    .then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(err instanceof CcSwitchRunError, "a non-zero exit must be distinguishable from a bad field")
+  const message = (err as Error).message
+  assert.ok(!message.includes(secret), `the api key escaped in the error: ${message}`)
+  assert.match(message, /provider add failed/)
 })
 
 test("CcSwitchService builds provider add argv from validated fields and masks the key", async () => {
@@ -396,6 +420,73 @@ test("runWithConfirm refuses a script build that cannot drive a pty", async () =
   )
 })
 
+test("cc-switch children never inherit the bot's own credentials", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-env-"))
+  try {
+    const bin = join(dir, "cc-switch")
+    writeFileSync(bin, '#!/usr/bin/env node\nprocess.stdout.write(Object.keys(process.env).sort().join(","))\n')
+    chmodSync(bin, 0o755)
+    const service = new CcSwitchService({
+      app: "opencode",
+      bin,
+      projectDir: dir,
+      env: {
+        ...process.env,
+        PATH: `/usr/bin:/bin:${process.env.PATH ?? ""}`,
+        TELEGRAM_BOT_TOKEN: "123456:AAsecret",
+        API_TOKEN: "root-token",
+        OPENCODE_SERVER_PASSWORD: "server-pw",
+        STT_API_KEY: "transcript-key",
+        ANTHROPIC_API_KEY: "provider-keeps-its-own-vars",
+      },
+    })
+
+    // `env tools` / `env check` print environment data back into the chat, and the
+    // argv passed to this third-party binary is user-chosen
+    const { stdout } = await service.run(["provider", "list"])
+    for (const leaked of ["TELEGRAM_BOT_TOKEN", "API_TOKEN", "OPENCODE_SERVER_PASSWORD", "STT_API_KEY"]) {
+      assert.ok(!stdout.split(",").includes(leaked), `cc-switch could read ${leaked}`)
+    }
+    assert.ok(stdout.split(",").includes("ANTHROPIC_API_KEY"), "provider keys must stay available")
+    assert.ok(stdout.split(",").includes("PATH"), "PATH must still reach cc-switch")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("CcSwitchService re-reads the binary after it is replaced while the bot runs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-version-"))
+  try {
+    const bin = join(dir, "cc-switch")
+    const install = (version: string): void => {
+      writeFileSync(bin, `#!/bin/sh\necho ${version}\n`)
+      chmodSync(bin, 0o755)
+    }
+    install("1.0.0")
+    const service = new CcSwitchService({ app: "claude", bin, projectDir: dir })
+    assert.equal(await service.version(), "1.0.0")
+    assert.equal(await service.version(), "1.0.0")
+
+    // An `npm run cc-switch:install` upgrade must not stay invisible until the next restart
+    install("2.0.0-upgraded")
+    assert.equal(await service.version(), "2.0.0-upgraded")
+
+    const fresh = new CcSwitchService({
+      app: "claude",
+      projectDir: dir,
+      env: { PATH: join(dir, "empty-path") },
+    })
+    assert.equal(fresh.available, false)
+    mkdirSync(join(dir, "bin"), { recursive: true })
+    writeFileSync(join(dir, "bin", "cc-switch"), "#!/bin/sh\necho 3.0.0\n")
+    chmodSync(join(dir, "bin", "cc-switch"), 0o755)
+    assert.equal(fresh.available, true)
+    assert.equal(await fresh.version(), "3.0.0")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test(
   "runWithConfirm decodes pty output without losing multibyte characters",
   { skip: !existsSync("/usr/bin/script") },
@@ -548,4 +639,11 @@ test("parseSpeedtest does not take an unrelated checkmark for success", () => {
 
   // Older builds print only the checkmark on success, with no failure marker anywhere
   assert.equal(parseSpeedtest("✓ provider reachable\n").ok, true)
+})
+
+test("redactSecrets masks a bare Telegram bot token", () => {
+  const token = "7654321098:AAHabcdEfghIjklMnopQrstUvwxYZ1234"
+  const masked = redactSecrets(`grammy call failed: ${token} for chat 1`)
+  assert.ok(!masked.includes(token), masked)
+  assert.match(masked, /\*\*\*/)
 })

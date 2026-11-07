@@ -593,8 +593,53 @@ test("reminder delivery passes the reminder so the bridge can offer snooze butto
   }
 })
 
-test("ReminderService.postpone moves a pending one-shot and refuses repeats", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+/**
+ * A reminder whose Telegram send is still in flight is owned by tick(): it settles (deletes)
+ * the record when the send returns. A snooze that moved dueAt during that window would answer
+ * 200 and then vanish, so the store must refuse it instead.
+ */
+test("postpone during an in-flight delivery is refused rather than silently lost", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-race-"))
+  try {
+    let release: () => void = () => {}
+    const sending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sent: string[] = []
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async (_chatId, text) => {
+        sent.push(text)
+        await sending
+      },
+      log,
+    )
+    const now = Date.now()
+    const oneShot = service.add(42, 7, "1m 关火", now)
+    const ticking = service.tick(now + 61_000)
+    for (let i = 0; i < 50 && sent.length === 0; i++) await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(sent.length, 1, "the delivery is underway")
+
+    assert.throws(() => service.postpone(42, oneShot.id, 30, now + 61_000), /不存在、已触发/)
+
+    release()
+    await ticking
+    assert.equal(service.list(42).length, 0, "the delivered one-shot is gone")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("Telegram hands the reminder to its delivery bridge so snooze buttons exist", () => {
+  const source = readFileSync("src/telegram.ts", "utf8")
+  assert.match(
+    source,
+    /new ReminderService\([\s\S]{0,300}?\(chatId, text, reminder\) => this\.#deliverReminder\(chatId, text, reminder\)/,
+    "a two-parameter wrapper compiles but never passes the reminder, which makes the delivery's snooze buttons dead code",
+  )
+})
+
+test("ReminderService.postpone moves a pending one-shot and refuses repeats", async () => {  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
   try {
     const service = new ReminderService(
       join(dir, "reminders.json"),

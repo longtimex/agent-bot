@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from "node:fs"
 import { delimiter, isAbsolute, join, resolve } from "node:path"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
-import { extendedEnv, extendedPath } from "./binPath.js"
+import { childEnv, extendedPath } from "./binPath.js"
 import { clip, clipTail } from "./messages.js"
 
 export const CC_SWITCH_APPS = [
@@ -91,6 +91,13 @@ export interface CcSwitchOptions {
 
 export class CcSwitchError extends Error {}
 
+/**
+ * cc-switch itself refused the command (non-zero exit), as opposed to the bot rejecting the
+ * arguments before running it. Callers answer those differently: 400 for a form the client
+ * can fix, 502 for the tool that just failed.
+ */
+export class CcSwitchRunError extends CcSwitchError {}
+
 const DEFAULT_TIMEOUT_MS = 20_000
 /** Commands that shell out to a provider or the skill market need more than the 20s default. */
 export const CC_LONG_TIMEOUT_MS = 90_000
@@ -134,6 +141,9 @@ export function redactSecrets(text: string): string {
     .replace(/\b(ghp_|gho_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}/g, "$1***")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._-]{8,}/gi, "$1***")
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:)([^/\s@]+)(@)/gi, "$1***$3")
+    // Telegram bot tokens carry no label ("123456789:AAH…"), so they survive every
+    // key=value rule above; they are the one secret a stack trace always shows.
+    .replace(/\b\d{6,12}:[A-Za-z0-9_-]{20,}/g, "***")
 }
 
 export function toBase64Url(text: string): string {
@@ -313,6 +323,19 @@ export function resolveCcSwitchBin(
   const local = join(projectDir, "bin", "cc-switch")
   if (isExecutable(local)) return local
   return resolveOnPath("cc-switch", env)
+}
+
+/**
+ * Identity of a resolved binary, for cache invalidation. A synthetic runner label has no
+ * file to stat, so it stands for itself and only changes when the resolution changes.
+ */
+function binStamp(bin: string): string {
+  try {
+    const stat = statSync(bin)
+    return `${bin}:${stat.mtimeMs}:${stat.size}`
+  } catch {
+    return bin
+  }
 }
 
 function defaultRunner(bin: string, cwd: string, env: NodeJS.ProcessEnv): CcSwitchRunner {
@@ -531,13 +554,16 @@ export class CcSwitchService {
   readonly #confirmRunnerOverride?: CcSwitchConfirmRunner
   readonly #ptyProbe: (scriptPath: string, env: NodeJS.ProcessEnv) => Promise<boolean>
   #explicitBin?: string
-  #bin?: string
   #version?: string
+  #versionStamp?: string
 
   constructor(options: CcSwitchOptions = {}) {
     this.#app = normalizeCcSwitchApp(options.app)
     this.#projectDir = options.projectDir ?? process.cwd()
-    this.#env = extendedEnv(options.env ?? process.env)
+    // cc-switch is a third-party binary run with user-chosen passthrough argv, and
+    // `env tools` / `env check` print environment data straight back into the chat, so
+    // it gets the same scrubbed environment as the agent CLIs and the installers.
+    this.#env = childEnv(options.env ?? process.env)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.#speedtestTimeoutMs = options.speedtestTimeoutMs ?? SPEEDTEST_TIMEOUT_MS
     this.#runnerOverride = options.runner
@@ -561,10 +587,10 @@ export class CcSwitchService {
 
   get bin(): string | undefined {
     if (this.#runnerOverride) return this.#explicitBin ?? "cc-switch (runner)"
-    if (!this.#bin) {
-      this.#bin = resolveCcSwitchBin(this.#explicitBin, this.#projectDir, this.#env)
-    }
-    return this.#bin
+    // Re-resolved on every access: `npm run cc-switch:install` can drop a newer binary into
+    // ./bin or a PATH directory while the bot is running, and a snapshot taken at first use
+    // would keep that upgrade invisible until the next restart.
+    return resolveCcSwitchBin(this.#explicitBin, this.#projectDir, this.#env)
   }
 
   get available(): boolean {
@@ -587,7 +613,7 @@ export class CcSwitchService {
       this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#env, NO_COLOR: "1" })
     const result = await runner(["--app", this.#app, ...args], { timeoutMs })
     if (result.code !== 0) {
-      throw new CcSwitchError(errorDetail(result))
+      throw new CcSwitchRunError(errorDetail(result))
     }
     return result
   }
@@ -599,7 +625,7 @@ export class CcSwitchService {
       this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#env, NO_COLOR: "1" })
     const result = await runner(args, { timeoutMs })
     if (result.code !== 0) {
-      throw new CcSwitchError(errorDetail(result))
+      throw new CcSwitchRunError(errorDetail(result))
     }
     return result
   }
@@ -609,7 +635,7 @@ export class CcSwitchService {
       ? await this.#confirmRunnerOverride(args, "y\n", { timeoutMs })
       : await this.#runPty(args, timeoutMs)
     if (result.code !== 0) {
-      throw new CcSwitchError(errorDetail(result))
+      throw new CcSwitchRunError(errorDetail(result))
     }
     return result
   }
@@ -751,23 +777,33 @@ export class CcSwitchService {
       }
       args.push("--config", raw)
     }
-    const result = await this.run(args, this.#speedtestTimeoutMs)
     const key = draft.apiKey?.trim()
-    if (!key) return result
     // cc-switch echoes the created settings on failure, so the key must not escape
-    const mask = (text: string) => text.split(key).join("***")
+    const mask = (text: string): string => (key ? text.split(key).join("***") : text)
+    let result: CcSwitchRunResult
+    try {
+      result = await this.run(args, this.#speedtestTimeoutMs)
+    } catch (err) {
+      // The rejection is the path where that echo actually happens, and errorDetail()
+      // only knows the generic label patterns: an unlabelled key in the dump would
+      // otherwise reach the chat and the App untouched
+      if (key && err instanceof CcSwitchRunError) throw new CcSwitchRunError(mask(err.message))
+      throw err
+    }
     return { code: result.code, stdout: mask(result.stdout), stderr: mask(result.stderr) }
   }
 
   async version(): Promise<string | undefined> {
-    if (this.#version) return this.#version
-    if (!this.available) return undefined
+    const bin = this.bin
+    if (!bin) return undefined
+    const stamp = binStamp(bin)
+    if (this.#version !== undefined && this.#versionStamp === stamp) return this.#version
     try {
-      const bin = this.#ensureBin()
       const runner = this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, this.#env)
       const result = await runner(["--version"], { timeoutMs: this.#timeoutMs })
       if (result.code !== 0) return undefined
       this.#version = stripAnsi(result.stdout).trim().split("\n")[0]
+      this.#versionStamp = stamp
       return this.#version
     } catch {
       return undefined

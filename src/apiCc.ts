@@ -5,6 +5,7 @@ import {
   CC_PROVIDER_API_FORMATS,
   CC_PROVIDER_TEMPLATES,
   CcSwitchError,
+  CcSwitchRunError,
   redactSecrets,
   stripAnsi,
   type CcSwitchProvider,
@@ -112,18 +113,39 @@ export async function routeCc(
         if (kind !== "memory" && kind !== "user") throw new ApiError(400, "kind 需是 memory 或 user")
         const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : ""
         const file = kind === "user" ? "USER.md" : "MEMORY.md"
+        // cc-switch has already applied the change by the time the refresh runs, so a glitchy
+        // follow-up read must not turn the answer into a failure — the App would retry a write
+        // that succeeded. `refreshed: false` tells it to keep showing what it has instead of
+        // replacing the editor with the empty defaults of a stateless response.
+        const reply = async (build: (limits: string) => string): Promise<void> => {
+          try {
+            const state = await hermesState(deps, cc)
+            deps.json(ctx.res, 200, {
+              ok: true,
+              kind,
+              action,
+              refreshed: true,
+              message: build(state.limits),
+              ...state,
+            })
+          } catch {
+            deps.json(ctx.res, 200, {
+              ok: true,
+              kind,
+              action,
+              refreshed: false,
+              message: `${build("")}\n⚠️ 修改已生效，但状态刷新失败，请重新打开本页确认。`,
+            })
+          }
+        }
         if (action === "enable" || action === "disable") {
           await deps.runCcAction(() => cc.run(["hermes", "memory", action, kind]))
-          deps.json(ctx.res, 200, {
-            ok: true,
-            kind,
-            action,
-            message:
+          await reply(
+            () =>
               action === "enable"
                 ? `已启用 ${file}。`
                 : `已停用 ${file}，Hermes 加载记忆时会跳过它。`,
-            ...(await hermesState(deps, cc)),
-          })
+          )
           return
         }
         // Both write over what is there, and cc-switch's own `clear` prints a refusal and
@@ -132,13 +154,7 @@ export async function routeCc(
         if (action === "clear") {
           if (body.confirm !== true) throw new ApiError(400, `「清空 ${file}」需要确认，请在请求中带上 confirm: true`)
           await deps.runCcAction(() => cc.run(["hermes", "memory", "clear", kind, "--yes"]))
-          deps.json(ctx.res, 200, {
-            ok: true,
-            kind,
-            action,
-            message: `已清空 ${file}。`,
-            ...(await hermesState(deps, cc)),
-          })
+          await reply(() => `已清空 ${file}。`)
           return
         }
         if (action !== "set") throw new ApiError(400, "未知的 action，可用：set、clear、enable、disable")
@@ -150,20 +166,15 @@ export async function routeCc(
           throw new ApiError(400, "记忆内容含控制字符，只允许换行与制表符")
         }
         await deps.runCcAction(() => cc.run(["hermes", "memory", "set", kind, "--content", content]))
-        const state = await hermesState(deps, cc)
         // cc-switch writes whatever it is given and Hermes truncates on load, so going over
         // the budget is reported rather than refused
-        const budget = hermesLimit(state.limits, kind)?.chars
-        const note =
-          budget !== undefined && content.length > budget
-            ? `⚠️ 已写入 ${content.length} 字，超出 Hermes 的 ${budget} 字预算，加载时会被截断。`
-            : ""
-        deps.json(ctx.res, 200, {
-          ok: true,
-          kind,
-          action,
-          message: `已写入 ${file}（${content.length} 字）。${note}`,
-          ...state,
+        await reply((limits) => {
+          const budget = hermesLimit(limits, kind)?.chars
+          const note =
+            budget !== undefined && content.length > budget
+              ? `⚠️ 已写入 ${content.length} 字，超出 Hermes 的 ${budget} 字预算，加载时会被截断。`
+              : ""
+          return `已写入 ${file}（${content.length} 字）。${note}`
         })
         return
       }
@@ -354,21 +365,18 @@ export async function routeCc(
         try {
           return await cc.addProvider(draft)
         } catch (err) {
-          // A rejected field is the form's mistake; only real CLI failures are 502
+          // A rejected field is the form's mistake; cc-switch refusing the command is not.
+          // addProvider throws on a non-zero exit, so a 200 here would describe a provider
+          // that was never created, and the failure body would carry no `error`.
+          if (err instanceof CcSwitchRunError) throw new ApiError(502, redactSecrets(err.message))
           if (err instanceof CcSwitchError) throw new ApiError(400, redactSecrets(err.message))
           throw new ApiError(502, redactSecrets(err instanceof Error ? err.message : String(err)))
         }
       })
-      const failed = result.code !== 0
-      const failure = `创建 Provider 失败（退出码 ${result.code}）`
-      const detail = stripAnsi(redactSecrets(result.stderr || result.stdout)).trim()
-      deps.json(ctx.res, failed ? 502 : 200, {
-        ok: !failed,
+      deps.json(ctx.res, 200, {
+        ok: true,
         name: draft.name,
-        message: failed ? failure : `已创建 Provider「${draft.name}」。`,
-        // Every other failure body carries `error`, the only key the App reads on a non-2xx
-        // status; without it cc-switch's actual complaint shows up as the text "HTTP 502".
-        ...(failed ? { error: detail || failure } : {}),
+        message: `已创建 Provider「${draft.name}」。`,
         text: clipCcOutput(redactSecrets(stripAnsi(result.stdout || result.stderr))),
       })
       return

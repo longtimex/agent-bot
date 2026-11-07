@@ -1,9 +1,18 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { readJsonObject } from "../src/jsonStore.js"
+import { readJsonObject, writePrivateAtomic } from "../src/jsonStore.js"
 
 test("readJsonObject returns undefined for a missing file without warning", () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-json-"))
@@ -62,6 +71,47 @@ test("readJsonObject returns the object root untouched", () => {
     writeFileSync(path, '{"a":{"b":1}}')
     assert.deepEqual(readJsonObject(path, () => {}), { a: { b: 1 } })
     assert.equal(readdirSync(dir).length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("writePrivateAtomic re-modes a file that someone else created world-readable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-json-write-"))
+  try {
+    const path = join(dir, "api-token.json")
+    writeFileSync(path, "pre-existing", { mode: 0o644 })
+    chmodSync(path, 0o644)
+
+    writePrivateAtomic(path, '{"token":"abc"}')
+    assert.equal(readFileSync(path, "utf8"), '{"token":"abc"}')
+    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assert.equal(readdirSync(dir).length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("writePrivateAtomic creates the parent directory and leaves no temp file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-json-nested-"))
+  try {
+    const path = join(dir, "nested", "state.json")
+    writePrivateAtomic(path, '{"ok":true}')
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ok: true })
+    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assert.deepEqual(readdirSync(join(dir, "nested")), ["state.json"])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("writePrivateAtomic cleans the temp file and throws when the swap fails", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-json-fail-"))
+  try {
+    // A directory in the destination's place makes the rename fail
+    mkdirSync(join(dir, "blocked"))
+    assert.throws(() => writePrivateAtomic(join(dir, "blocked"), "payload"), { code: /^(EISDIR|ENOTDIR|EPERM)$/ })
+    assert.deepEqual(readdirSync(dir), ["blocked"], "temp file must not survive the failure")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

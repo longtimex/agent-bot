@@ -108,8 +108,24 @@ export function splitMessage(text: string, max: number): string[] {
       chunk = `${head.trimEnd()}\n${state.fence}`
       remainder = `${state.fence}\n${remainder.trimStart()}`
     } else if (reopen) {
-      chunk = `${head.trimEnd()}\``
-      remainder = `\`${remainder.trimStart()}`
+      // The closing backtick spends from the same budget: when the head already fills
+      // it, hand one character to the next chunk so no chunk is longer than `max`. The
+      // same surrogate guard as pickCut keeps a pair on one side of the new boundary.
+      // Handing over a backtick also closes the span by itself, so the marker that gets
+      // added afterwards is counted rather than assumed.
+      let body = head.trimEnd()
+      if (body.length + 1 > limit) {
+        cut -= 1
+        if (rest.charCodeAt(cut - 1) >= 0xd800 && rest.charCodeAt(cut - 1) <= 0xdbff) cut -= 1
+        body = rest.slice(0, cut).trimEnd()
+        remainder = rest.slice(cut)
+      }
+      if ((body.match(/`/g) ?? []).length % 2 === 1) {
+        chunk = `${body}\``
+        remainder = `\`${remainder.trimStart()}`
+      } else {
+        chunk = body
+      }
     } else {
       chunk = head.trim()
       remainder = remainder.trimStart()

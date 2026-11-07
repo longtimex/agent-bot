@@ -7,7 +7,11 @@ import java.io.File
 
 private val unsafeChars = Regex("[^A-Za-z0-9._-]")
 
-/** Disk cache for reply media so images survive an app restart and re-downloads are avoided. */
+/**
+ * Disk cache for reply media so images survive an app restart and re-downloads are avoided.
+ * Lives in cacheDir on purpose: Android reclaims cache space under storage pressure, so no
+ * explicit trim is needed — an evicted entry simply re-downloads on demand.
+ */
 internal object MediaCache {
     fun file(context: Context, taskId: String, index: Int, name: String): File {
         val dir = File(context.cacheDir, "media").apply { mkdirs() }

@@ -6,7 +6,23 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_FILE = path.resolve(__dirname, "../data/x_account/session.json");
 const OUT_DIR = path.resolve(__dirname, "../data/free_server_scan");
-const CHROME_PATH = "/data/home/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
+// Playwright 的浏览器路径按版本号变化:优先环境变量,再从缓存目录探测最新版,
+// 最后回退到历史硬编码路径(本沙箱的安装位置)。
+function detectChromePath() {
+  try {
+    const root = "/data/home/.cache/ms-playwright";
+    const dir = fs
+      .readdirSync(root)
+      .filter((name) => name.startsWith("chromium-"))
+      .sort()
+      .pop();
+    return dir ? `${root}/${dir}/chrome-linux64/chrome` : "";
+  } catch {
+    return "";
+  }
+}
+const CHROME_PATH =
+  process.env.CHROME_PATH || detectChromePath() || "/data/home/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
 
 const QUERIES = process.argv.slice(2).length
   ? process.argv.slice(2)
@@ -141,7 +157,7 @@ async function main() {
   const context = await browser.newContext({
     storageState: SESSION_FILE,
     userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/124.0.0.0",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     viewport: { width: 1280, height: 900 },
   });
   const page = await context.newPage();

@@ -75,7 +75,9 @@ fun CcScreen(vm: AppViewModel) {
             vm.showToast("cc-switch 当前不可用，无法执行「$query」")
             return@LaunchedEffect
         }
-        if (vm.ccViews.isEmpty() || vm.ccCommands.isEmpty()) return@LaunchedEffect
+        // ccStatus 非空即服务器表已加载;views/commands 为空列表是合法状态
+        // (可用但无自定义视图/命令),不能再当作"未加载"而悬挂请求
+        if (vm.ccStatus == null) return@LaunchedEffect
         vm.clearCcRunRequest()
         when (val match = matchCcQuery(query, vm.ccViews, vm.ccCommands)) {
             // Words the server's tables do not name are still what Telegram runs: cc-switch

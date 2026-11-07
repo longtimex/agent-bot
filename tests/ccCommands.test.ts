@@ -230,3 +230,19 @@ test("cc mcp add encodes the config into a deeplink instead of shell arguments",
     rmSync(h.dir, { recursive: true, force: true })
   }
 })
+
+test("cc model agents escapes markdown in agent metadata", async () => {
+  const h = makeHarness()
+  try {
+    writeFileSync(
+      join(h.dir, ".opencode", "agent", "evil.md"),
+      "---\ndescription: '[点击](http://evil.example) *加粗*_下划线'\n---\nbody\n",
+    )
+    await h.commands.handleCommand(42, "tg:42", "model agents")
+    const text = h.sent.at(-1)!.text
+    assert.ok(!text.includes("[点击](http://evil.example)"), "markdown link injection is escaped")
+    assert.match(text, /\\\[点击/, "the escaped form is what gets rendered")
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true })
+  }
+})

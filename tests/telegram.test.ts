@@ -35,6 +35,8 @@ interface Harness {
   waitFor(predicate: () => boolean, timeoutMs?: number): Promise<void>
   errors: string[]
   bridge: TelegramBridge
+  /** Rewriting this file is how a test simulates a live profile reload. */
+  agentsConfigPath: string
   close(): Promise<void>
 }
 
@@ -132,6 +134,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
 
   let updateId = 0
   return {
+    agentsConfigPath: cfg.agentCli.configPath,
     async send(text: string, userId = 7): Promise<void> {
       updateId += 1
       const update = {
@@ -260,6 +263,34 @@ test("telegram bridge answers /status, /id, /stop, /queue and /retry", async () 
   }
 })
 
+test("telegram panel pagination buttons render the page they name", async () => {
+  const h = await createHarness()
+  try {
+    for (let index = 1; index <= 9; index++) await h.send(`/remind ${10 + index}m 提醒${index}`)
+
+    await h.press("show:reminders")
+    assert.match(h.panelTexts().at(-1) ?? "", /第 1\/2 页/)
+    assert.ok(h.buttons().some((button) => button.data === "show:reminders:2"), "page 2 button expected")
+
+    // The page arrives in the callback data, so a panel that matched the whole string
+    // answered default: and left the reader on page 1 forever
+    await h.press("show:reminders:2")
+    assert.match(h.panelTexts().at(-1) ?? "", /第 2\/2 页/)
+    assert.match(h.panelTexts().at(-1) ?? "", /提醒9/)
+
+    await h.press("show:reminders:1")
+    assert.match(h.panelTexts().at(-1) ?? "", /第 1\/2 页/)
+
+    await h.press("show:schedule:1")
+    assert.match(h.panelTexts().at(-1) ?? "", /定时任务/)
+    await h.press("show:history:20")
+    assert.match(h.panelTexts().at(-1) ?? "", /任务历史|历史/)
+    assert.equal(h.errors.length, 0)
+  } finally {
+    await h.close()
+  }
+})
+
 test("telegram menu exposes categorized navigation and edits panels in place", async () => {
   const h = await createHarness()
   try {
@@ -327,6 +358,12 @@ test("telegram bridge creates and lists reminders", async () => {
 
     await h.send("/cancel 2")
     assert.match(h.lastText(), /已取消提醒 #2/)
+
+    // Cancelling echoes the reminder text, which is user input: an unescaped * or _
+    // would make the confirmation message itself fail Telegram's Markdown parse
+    await h.send("/remind 15m *bold* _under_ [link]")
+    await h.send("/cancel 3")
+    assert.ok(h.lastText().includes("\\*bold\\* \\_under\\_ \\[link\\]"), h.lastText())
     assert.equal(h.errors.length, 0)
   } finally {
     await h.close()
@@ -591,7 +628,7 @@ test("telegram bridge records task history and clears it", async () => {
     await h.waitFor(() => h.texts().some((text) => /处理这条消息时出错了/.test(text)))
 
     await h.send("/history")
-    assert.match(h.lastText(), /已显示 1 \/ 共 1 条/)
+    assert.match(h.lastText(), /第 1-1 条 \/ 共 1 条/)
     assert.match(h.lastText(), /❌ 失败/)
     assert.match(h.lastText(), /请检查构建状态/)
 
@@ -1328,6 +1365,50 @@ test("a model named after a reset keyword is selected instead of resetting", asy
   } finally {
     await h.close()
     rmSync(project, { recursive: true, force: true })
+  }
+})
+
+test("telegram model buttons keep pointing at the model they were drawn for", async () => {
+  const profile = (models: Array<{ id: string; label: string }>): Record<string, unknown> => ({
+    demo: {
+      label: "Demo CLI",
+      bin: "demo-cli-not-on-path",
+      parse: "text",
+      sessionMode: "stateless",
+      supportsModel: true,
+      models,
+      args: {},
+    },
+  })
+  const h = await createHarness(["7"], {
+    agents: profile([
+      { id: "alpha", label: "Alpha" },
+      { id: "beta", label: "Beta" },
+    ]),
+  })
+  try {
+    await h.send("/agent demo")
+    await h.waitFor(() => h.texts().some((text) => text.includes("已切换至")))
+    await h.send("/model")
+    const drawn = h.lastKeyboard().find((button) => button.text.includes("Beta"))
+    assert.equal(drawn?.data, "cmodel:demo:beta", "the button must carry the model, not its position")
+
+    // An `/agents` reload while the panel is on screen reorders the list; index 1 would now
+    // be Alpha and the tap would silently pick the wrong model
+    writeFileSync(h.agentsConfigPath, JSON.stringify({ agents: profile([{ id: "beta", label: "Beta" }, { id: "alpha", label: "Alpha" }]) }))
+
+    await h.press("cmodel:demo:beta")
+    assert.match(h.answers().at(-1) ?? "", /已切换至 Beta/)
+
+    // A panel drawn before this callback format still resolves by position
+    await h.press("cmodel:demo:1")
+    assert.match(h.answers().at(-1) ?? "", /已切换至 Alpha/)
+
+    await h.press("cmodel:demo:9")
+    assert.match(h.answers().at(-1) ?? "", /模型不存在/)
+    assert.equal(h.errors.length, 0)
+  } finally {
+    await h.close()
   }
 })
 

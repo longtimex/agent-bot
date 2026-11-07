@@ -615,7 +615,7 @@ export async function routeUsageHistory(
 
   if (resource === "history" && method === "GET") {
     const limit = clampLimit(ctx.url.searchParams.get("limit"), 20, 50)
-    // total lets the app show the same "已显示 N / 共 M 条" line Telegram does
+    // total lets the app show how much of the stored history its window covers
     deps.json(ctx.res, 200, {
       history: deps.history.list(deps.appKey, limit),
       total: deps.history.count(deps.appKey),

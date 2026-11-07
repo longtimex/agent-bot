@@ -7,6 +7,7 @@ import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { childEnv, extendedPath } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
+import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
 import type { SessionStore } from "./store.js"
@@ -679,6 +680,32 @@ function progressFromLine(mode: CliParseMode | undefined, line: string): string 
   return clip(progress, 80)
 }
 
+/**
+ * These CLIs receive the prompt as one argv token. Linux caps a single argument at
+ * MAX_ARG_STRLEN (128 KiB) and the whole vector plus environment at ARG_MAX (~2 MiB),
+ * so a long message or inlined attachment text would otherwise die as an opaque
+ * "spawn E2BIG". Fail before spawning with what to do instead.
+ */
+const ARGV_SINGLE_LIMIT_BYTES = 120 * 1024
+const ARGV_TOTAL_LIMIT_BYTES = 1024 * 1024
+
+export function argvBudgetError(label: string, args: string[]): string | undefined {
+  let total = 0
+  let longest = 0
+  for (const token of args) {
+    const size = Buffer.byteLength(token)
+    total += size + 1
+    if (size > longest) longest = size
+  }
+  if (longest <= ARGV_SINGLE_LIMIT_BYTES && total <= ARGV_TOTAL_LIMIT_BYTES) return undefined
+  const kb = (bytes: number): string => `${Math.round(bytes / 1024)}KB`
+  return (
+    `${label} 通过命令行参数接收提示，单条上限 ${kb(ARGV_SINGLE_LIMIT_BYTES)}、总上限 ${kb(ARGV_TOTAL_LIMIT_BYTES)}` +
+    `（本次最长 ${kb(longest)}，合计 ${kb(total)}）。` +
+    "请缩短内容，或切换到 OpenCode 引擎（/agent opencode）以支持长提示与附件。"
+  )
+}
+
 export function buildCliArgs(
   profile: AgentCliProfile,
   vars: { workDir: string; sessionId?: string; model?: string; prompt: string },
@@ -743,58 +770,6 @@ export function normalizeWorkDirInput(raw: string, cwd: string, home: string): s
 function describeDuration(ms: number): string {
   if (ms >= 60_000) return `${Math.round(ms / 60_000)} 分钟`
   return `${Math.max(1, Math.round(ms / 1_000))} 秒`
-}
-
-export const KILL_ESCALATION_MS = 5_000
-
-const killTimers = new WeakMap<ChildProcess, NodeJS.Timeout>()
-
-function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
-  try {
-    // Children are spawned detached, so the pid is also their process-group id;
-    // signalling the group catches wrapper scripts that spawn the real CLI.
-    if (child.pid) process.kill(-child.pid, signal)
-    else child.kill(signal)
-  } catch {
-    try {
-      child.kill(signal)
-    } catch {
-      // already gone
-    }
-  }
-}
-
-/**
- * Node fires a child's `close` only once every stdio stream has ended, so a pipe
- * that has not reached EOF still has another process holding the write end open.
- */
-function stdioDrained(child: ChildProcess): boolean {
-  return [child.stdout, child.stderr].every((stream) => !stream || stream.readableEnded || stream.destroyed)
-}
-
-/** SIGTERM now, SIGKILL if the process is still alive after `graceMs`. */
-export function terminateProcess(child: ChildProcess, graceMs = KILL_ESCALATION_MS): void {
-  // An exited leader is not proof that the group is gone: npm/curl wrapper shims
-  // exit while the real CLI keeps the inherited pipes open, so the group signal is
-  // what stops that orphan. Only a child whose stdio reached EOF is fully finished,
-  // and signalling a recycled pid then is the risk worth avoiding.
-  if ((child.exitCode !== null || child.signalCode !== null) && stdioDrained(child)) return
-  signalChild(child, "SIGTERM")
-  if (killTimers.has(child)) return
-
-  const timer = setTimeout(() => {
-    killTimers.delete(child)
-    if (!stdioDrained(child)) signalChild(child, "SIGKILL")
-  }, graceMs)
-  timer.unref()
-  killTimers.set(child, timer)
-  child.once("close", () => {
-    const pending = killTimers.get(child)
-    if (pending) {
-      clearTimeout(pending)
-      killTimers.delete(child)
-    }
-  })
 }
 
 export class AgentCliService {
@@ -871,6 +846,11 @@ export class AgentCliService {
       throw new Error(`未找到 ${profile.bin} 可执行文件，请先安装 ${profile.label}。${install}`)
     }
 
+    // Checked before a session id is spent: an oversized prompt never reaches the CLI,
+    // so it must not consume or rewrite the chat's session either
+    const earlyBudget = argvBudgetError(profile.label, [query])
+    if (earlyBudget) throw new Error(earlyBudget)
+
     let sessionId: string | undefined
     let isNew = false
     if (profile.sessionMode !== "stateless") {
@@ -887,6 +867,8 @@ export class AgentCliService {
       : undefined
     const workDir = this.#resolveWorkDir(key)
     const args = buildCliArgs(profile, { workDir, sessionId, model, prompt: query }, isNew)
+    const budget = argvBudgetError(profile.label, args)
+    if (budget) throw new Error(budget)
     this.#log.debug(
       `spawning ${profile.id} (${binPath}, isNew=${isNew}, session=${sessionId ?? "none"}, model=${model ?? "default"}, cwd=${workDir})`,
     )
@@ -909,11 +891,15 @@ export class AgentCliService {
       const errDecoder = new StringDecoder("utf8")
       let idleTimer: NodeJS.Timeout | null = null
       let hardTimer: NodeJS.Timeout | null = null
+      let drainTimer: NodeJS.Timeout | null = null
+      // Set once the process itself is gone; the pipes may still be held by a helper
+      let exitedWith: number | null | undefined
       let settled = false
 
       const stopTimers = (): void => {
         if (idleTimer) clearTimeout(idleTimer)
         if (hardTimer) clearTimeout(hardTimer)
+        if (drainTimer) clearTimeout(drainTimer)
       }
       const cleanup = (): void => {
         stopTimers()
@@ -991,6 +977,7 @@ export class AgentCliService {
 
       child.stdout?.on("data", (chunk: Buffer) => {
         resetIdle()
+        armDrain()
         const text = outDecoder.write(chunk)
         if (!text) return
         appendStdout(text)
@@ -999,10 +986,13 @@ export class AgentCliService {
 
       child.stderr?.on("data", (chunk: Buffer) => {
         resetIdle()
+        armDrain()
         appendStderr(errDecoder.write(chunk))
       })
 
-      child.on("close", (code) => {
+      // Settles the run: reached from `close`, or from the exit drain below when a
+      // helper process keeps the pipes open and `close` therefore never arrives.
+      const settle = (code: number | null): void => {
         this.#active.delete(child)
         if (!finish()) return
         // A truncated sequence can still sit in the decoder when the process exits
@@ -1042,6 +1032,29 @@ export class AgentCliService {
         }
 
         reject(new Error(`${profile.label} 退出错误 (代码 ${code ?? "null"}): ${errText || "无输出"}`))
+      }
+
+      const armDrain = (): void => {
+        if (settled || exitedWith === undefined) return
+        if (drainTimer) clearTimeout(drainTimer)
+        // Output that keeps arriving means the pipe is draining, so the window restarts
+        drainTimer = setTimeout(() => {
+          settle(exitedWith ?? null)
+          // The leader is gone, so anything left in its process group is an orphan holding
+          // the inherited pipes; signalling it delivers `close` instead of leaking it
+          this.#terminate(child)
+        }, EXIT_DRAIN_MS)
+        drainTimer.unref()
+      }
+
+      child.on("close", (code) => {
+        exitedWith = code
+        settle(code)
+      })
+
+      child.once("exit", (code) => {
+        exitedWith = code
+        armDrain()
       })
 
       child.on("error", (err) => {

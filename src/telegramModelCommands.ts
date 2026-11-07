@@ -138,7 +138,7 @@ export class TelegramModelCommands {
         const hint = profile.models?.map((model) => `\`${model.id}\``).join("、") ?? profile.modelHint
         await this.#deps.sendText(
           job.chatId,
-          `❌ 未识别的模型：\`${arg}\`${hint ? `\n\n可用：${hint}` : ""}`,
+          `❌ 未识别的模型：\`${escapeMarkdown(arg)}\`${hint ? `\n\n可用：${hint}` : ""}`,
         )
         return
       }
@@ -179,7 +179,7 @@ export class TelegramModelCommands {
       const valid = Object.keys(AVAILABLE_MODELS).join(", ")
       await this.#deps.sendText(
         job.chatId,
-        `❌ 未识别的模型名称：\`${arg}\`\n\n可选简称有：\`${valid}\`\n发送 \`/model\` 可查看详细列表。`,
+        `❌ 未识别的模型名称：\`${escapeMarkdown(arg)}\`\n\n可选简称有：\`${valid}\`\n发送 \`/model\` 可查看详细列表。`,
       )
       return
     }

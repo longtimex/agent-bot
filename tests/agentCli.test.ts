@@ -8,13 +8,14 @@ import { extendedPath } from "../src/binPath.js"
 import {
   AgentCliRegistry,
   AgentCliService,
+  argvBudgetError,
   buildCliArgs,
   normalizeWorkDirInput,
   parseCliOutput,
-  terminateProcess,
   whichSync,
   type AgentCliProfile,
 } from "../src/agentCli.js"
+import { terminateProcess } from "../src/childKill.js"
 import type { Logger } from "../src/logger.js"
 import { SessionStore } from "../src/store.js"
 
@@ -824,5 +825,141 @@ test("an invalid resumeErrorPattern profile is rejected at load time and never r
     assert.notEqual(registry.get("goodcli"), undefined, "sibling profiles in the same file still load")
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("argvBudgetError flags only what would die as E2BIG", () => {
+  assert.equal(argvBudgetError("Fake", ["-p", "short prompt"]), undefined)
+  // One argument over MAX_ARG_STRLEN is fatal on its own, whatever the total
+  const single = "x".repeat(121 * 1024)
+  assert.match(argvBudgetError("Fake", ["-p", single]) ?? "", /单条上限/)
+  // Many small arguments past the vector ceiling are caught too
+  const many = Array.from({ length: 40 }, () => "y".repeat(30 * 1024))
+  assert.match(argvBudgetError("Fake", many) ?? "", /合计/)
+})
+
+test("an oversized prompt is refused before a session id is spent", async () => {
+  const dir = tempDir("bot-cli-big-")
+  try {
+    const bin = join(dir, "fakebig")
+    writeExecutable(bin, `process.stdout.write("ok\\n")`)
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        agents: {
+          fakebig: {
+            bin,
+            label: "Fake Big",
+            sessionMode: "preassign",
+            parse: "text",
+            args: { base: ["-p"], newSession: ["--session-id", "{sessionId}"], prompt: ["{prompt}"] },
+          },
+        },
+      }),
+    )
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    const service = new AgentCliService(dir, store, log, 10_000, 10_000, undefined, registry)
+
+    const huge = "请分析".repeat(60_000)
+    assert.ok(Buffer.byteLength(huge) > 120 * 1024, "the fixture must exceed the single-argument ceiling")
+    await assert.rejects(() => service.prompt("chat", "fakebig", huge), /单条上限/)
+    assert.equal(store.getCliSession("chat", "fakebig"), undefined, "no session id may be consumed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("AgentCliService settles a run whose pipes an orphaned helper still holds open", async () => {
+  const dir = tempDir("agent-cli-drain-")
+  const pidFile = join(dir, "helper.pid")
+  try {
+    const bin = join(dir, "hung-cli")
+    // Detached helper inherits the pipes and outlives the CLI that printed the answer, so
+    // `close` never arrives; only the exit drain delivers the reply.
+    writeExecutable(
+      bin,
+      [
+        "const { spawn } = require('node:child_process');",
+        "const fs = require('node:fs');",
+        "const pidPath = process.argv.find((arg) => arg.endsWith('.pid'));",
+        "const helper = spawn(process.execPath, ['-e',",
+        "  'require(\\'node:fs\\').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);',",
+        "  pidPath], { stdio: 'inherit', detached: true });",
+        "helper.unref();",
+        "console.log(JSON.stringify({ result: 'THE ANSWER' }));",
+        "process.exit(0);",
+      ].join("\n"),
+    )
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        agents: {
+          hung: {
+            label: "HungCLI",
+            bin,
+            parse: "json-result",
+            args: { base: ["-p", pidFile], prompt: ["{prompt}"] },
+          },
+        },
+      }),
+    )
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    // Long enough that a build without the exit drain rejects with a timeout instead of
+    // resolving here; the fix must answer in a fraction of it
+    const service = new AgentCliService(dir, store, log, 20_000, 20_000, undefined, registry)
+
+    const startedAt = Date.now()
+    const reply = await service.prompt("chat", "hung", "ask")
+    const elapsed = Date.now() - startedAt
+
+    assert.equal(reply, "THE ANSWER")
+    assert.ok(elapsed < 10_000, `the answer waited ${elapsed}ms for a pipe that never closed`)
+  } finally {
+    try {
+      const helperPid = Number(readFileSync(pidFile, "utf8"))
+      if (Number.isInteger(helperPid) && helperPid > 1) process.kill(helperPid, "SIGKILL")
+    } catch {
+      // the helper never started or was already reaped
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("terminateProcess escalates to SIGKILL when only the pipes reached EOF", async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => {});" +
+        "process.stdout.write('ready\\n');" +
+        "process.stdout.end(); process.stderr.end();" +
+        "setInterval(() => {}, 1000)",
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+  )
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.once("data", () => resolve())
+      child.once("error", reject)
+    })
+    // stdioDrained() is true from here on while the process stays alive and ignores SIGTERM
+    await Promise.all([
+      new Promise<void>((resolve) => child.stdout!.once("end", resolve)),
+      new Promise<void>((resolve) => child.stderr!.once("end", resolve)),
+    ])
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }))
+    })
+
+    terminateProcess(child, 150)
+    const result = await closed
+
+    assert.equal(result.signal, "SIGKILL", "drained pipes must not cancel the escalation")
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
   }
 })

@@ -77,8 +77,11 @@ export function hermesLimit(
 export function validateCcExtra(kind: NonNullable<CcExecSpec["extra"]>, raw: string, label: string): string {
   const value = raw.trim()
   if (!value) throw new ApiError(400, `${label} 不能为空`)
-  if (kind === "number") {
+  if (kind === "port") {
     if (!/^\d{1,5}$/.test(value)) throw new ApiError(400, `${label} 需是数字`)
+    // Five digits is not the same as a usable port: cc-switch would take 99999 as its
+    // listen port and the failure would surface as a broken proxy, not as a bad request
+    if (Number(value) < 1 || Number(value) > 65_535) throw new ApiError(400, `${label} 需在 1-65535 之间`)
     return value
   }
   if (kind === "direction") {
@@ -197,7 +200,7 @@ interface CcExecSpec {
    * as `failover move p1 up` arrives as one string; the server splits it and validates each
    * half, because the CLI only ever receives allowlisted argv.
    */
-  extra?: "apps" | "direction" | "host" | "name" | "number"
+  extra?: "apps" | "direction" | "host" | "name" | "port"
   extraLabel?: string
   /** cc-switch prompts for confirmation on a TTY for these. */
   pty?: boolean
@@ -336,7 +339,7 @@ export const CC_EXEC_COMMANDS: Readonly<Record<string, CcExecSpec>> = {
     args: (_unused, port) => ["proxy", "config", "--listen-port", port],
     phrases: ["proxy config port"],
     targetLabel: "监听端口（如 8787）",
-    extra: "number",
+    extra: "port",
     extraLabel: "监听端口",
   },
   "config-validate": {

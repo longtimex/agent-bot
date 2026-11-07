@@ -41,6 +41,42 @@ export interface ModelInputs {
   pdf: boolean
 }
 
+interface OpencodeFeedSubscriber {
+  sessionID: string
+  onUpdate: (summary: string) => void
+}
+
+interface OpencodeFeed {
+  controller: AbortController
+  closed: boolean
+}
+
+/** Turn one broadcast event into a progress line for one session, or nothing. */
+function eventStatus(
+  ev: { properties?: Record<string, unknown> },
+  sessionID: string,
+): string | undefined {
+  const properties = ev.properties ?? {}
+  const part = properties.part as Record<string, unknown> | undefined
+  if (!part) return undefined
+  // Part events carry the session id on the part itself
+  if ((properties.sessionID ?? part.sessionID) !== sessionID) return undefined
+
+  if (part.type === "tool") {
+    const tool = String(part.tool || "")
+    const state = (part.state as Record<string, unknown>) || {}
+    const input = (state.input as Record<string, unknown>) || {}
+    const status = String(state.status || "running")
+    const detail = String(input.command || input.filePath || input.pattern || input.query || "")
+    const shortDetail = detail ? `: ${clip(detail.replace(/\s+/g, " "), 40)}` : ""
+    const action = status === "completed" ? "完成" : "执行"
+    return `${action} [${tool}]${shortDetail}`
+  }
+  if (part.type === "reasoning") return "正在思考与逻辑分析..."
+  if (part.type === "text") return "正在组织输出回答..."
+  return undefined
+}
+
 export interface PromptOptions {
   agent?: string
   model?: ModelRef
@@ -177,9 +213,30 @@ export class Opencode {
     return this.#capabilities.get(`${model.providerID}/${model.modelID}`)
   }
 
+  /**
+   * One `/event` connection per bot process, fanned out to the sessions that asked for it.
+   * OpenCode broadcasts every session's events to every connection, so a stream per chat
+   * multiplied connections *and* the JSON parsing of unrelated traffic.
+   */
+  #feed?: OpencodeFeed
+  readonly #feedSubs = new Map<number, OpencodeFeedSubscriber>()
+  #feedSeq = 0
+
   subscribeSession(sessionID: string, onUpdate: (summary: string) => void): () => void {
-    const controller = new AbortController()
-    let closed = false
+    const id = ++this.#feedSeq
+    this.#feedSubs.set(id, { sessionID, onUpdate })
+    this.#startFeed()
+    return () => {
+      this.#feedSubs.delete(id)
+      if (this.#feedSubs.size === 0) this.#stopFeed()
+    }
+  }
+
+  #startFeed(): void {
+    if (this.#feed) return
+    const feed: OpencodeFeed = { controller: new AbortController(), closed: false }
+    this.#feed = feed
+    const { controller } = feed
 
     const wait = (ms: number): Promise<void> =>
       new Promise((resolve) => {
@@ -196,36 +253,29 @@ export class Opencode {
         controller.signal.addEventListener("abort", done, { once: true })
       })
 
+    const dispatch = (ev: { properties?: Record<string, unknown> }): void => {
+      // Snapshot: an onUpdate that unsubscribes would otherwise shrink the Map mid-iteration
+      // and silently skip the subscribers behind the one that left.
+      const subs = Array.from(this.#feedSubs.values())
+      for (const sub of subs) {
+        const status = eventStatus(ev, sub.sessionID)
+        if (!status) continue
+        try {
+          sub.onUpdate(status)
+        } catch {
+          // One subscriber's progress card must not break the stream for the others
+        }
+      }
+    }
+
     // One SSE event can never legitimately be this large; the cap is what stops a
     // peer that sends no newline (or a truncated JSON blob) from growing the buffer
     // until the process is killed.
     const MAX_EVENT_BYTES = 1_000_000
 
-    const eventStatus = (ev: { properties?: Record<string, unknown> }): string | undefined => {
-      const properties = ev.properties ?? {}
-      const part = properties.part as Record<string, unknown> | undefined
-      if (!part) return undefined
-      // Part events carry the session id on the part itself
-      if ((properties.sessionID ?? part.sessionID) !== sessionID) return undefined
-
-      if (part.type === "tool") {
-        const tool = String(part.tool || "")
-        const state = (part.state as Record<string, unknown>) || {}
-        const input = (state.input as Record<string, unknown>) || {}
-        const status = String(state.status || "running")
-        const detail = String(input.command || input.filePath || input.pattern || input.query || "")
-        const shortDetail = detail ? `: ${clip(detail.replace(/\s+/g, " "), 40)}` : ""
-        const action = status === "completed" ? "完成" : "执行"
-        return `${action} [${tool}]${shortDetail}`
-      }
-      if (part.type === "reasoning") return "正在思考与逻辑分析..."
-      if (part.type === "text") return "正在组织输出回答..."
-      return undefined
-    }
-
     const connect = async (): Promise<void> => {
       let failures = 0
-      while (!closed) {
+      while (!feed.closed) {
         try {
           const res = await fetch(`${this.#baseUrl}/event`, {
             headers: this.#headers(),
@@ -268,15 +318,14 @@ export class Opencode {
                 return
               }
               pending = ""
-              const status = eventStatus(ev)
-              if (status) onUpdate(status)
+              dispatch(ev)
               return
             }
             if (pending) pending = ""
           }
 
           try {
-            while (!closed) {
+            while (!feed.closed) {
               const { done, value } = await reader.read()
               if (done) break
               if (!delivered) {
@@ -290,7 +339,7 @@ export class Opencode {
               for (const line of lines) emit(line)
             }
             buffer += decoder.decode()
-            if (!closed && buffer && buffer.length <= MAX_EVENT_BYTES) emit(buffer)
+            if (!feed.closed && buffer && buffer.length <= MAX_EVENT_BYTES) emit(buffer)
           } finally {
             // Cancel so the connection goes back to the pool instead of draining into a
             // reader nobody is waiting on
@@ -305,7 +354,7 @@ export class Opencode {
           // aborted or network error; reconnect below unless closed
         }
 
-        if (closed) return
+        if (feed.closed) return
         // A dead event stream must not look like an idle task, otherwise the
         // watchdog aborts work that is still running on the server
         failures += 1
@@ -314,21 +363,25 @@ export class Opencode {
     }
 
     void connect()
+  }
 
-    return () => {
-      closed = true
-      controller.abort()
-    }
+  #stopFeed(): void {
+    const feed = this.#feed
+    if (!feed) return
+    this.#feed = undefined
+    feed.closed = true
+    feed.controller.abort()
   }
 
   async prompt(sessionID: string, text: string, options: PromptOptions = {}): Promise<string> {
     const parts: Array<Record<string, unknown>> = [{ type: "text", text }]
     for (const file of options.files ?? []) {
       parts.push({
+        // mime 受上游白名单约束;兜底 octet-stream 防 data URL 被空值截断
         type: "file",
-        mime: file.mime,
+        mime: file.mime || "application/octet-stream",
         filename: file.filename,
-        url: `data:${file.mime};base64,${file.data.toString("base64")}`,
+        url: `data:${file.mime || "application/octet-stream"};base64,${file.data.toString("base64")}`,
       })
     }
 

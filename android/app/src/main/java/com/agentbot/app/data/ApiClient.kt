@@ -2,6 +2,7 @@ package com.agentbot.app.data
 
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -368,6 +369,8 @@ class ApiClient {
                 }
                 val source = res.body?.source() ?: throw ApiException(500, "空的事件流")
                 while (true) {
+                    // 阻塞读不响应协程取消:每行之间主动检查,离开页面时线程及时释放
+                    ensureActive()
                     // Heartbeats arrive as ": ping" comments; data frames as "data: {json}"
                     val line = source.readUtf8Line() ?: throw java.io.IOException("事件流提前关闭")
                     if (!line.startsWith("data: ")) continue

@@ -22,22 +22,74 @@
 | 12 | 解决 | 同上 | 假设**证伪**:registry 加载期已有正则校验+per-profile try/catch 隔离(双层防御),非法 pattern 的 profile 被拒且不影响同文件其他 profile;隐式守卫固化为显式测试,测试 630→631 | npm run check 631 全绿 |
 | 15 | 提出 | modelAdmin.ts(自定义模型与 opencode.json 同步) | 全文审:损坏注册表拒绝写/权限保留写入/五重冲突检查/路径逃逸防御/$ 字面量——**零必修缺陷**;2 个低项保留(add 跨文件双写无事务,失败面极窄;provider.models 损坏数组被修复性覆盖);2 个测试缺口(assignAgent 无 frontmatter 报错分支、坏数组修复语义未测) | — |
 | 16 | 解决 | 同上 | 补 2 测试(无 frontmatter 报错且文件原样保留;坏数组修复且 repaired-model 键落位);调试中确认 add 的 opencode.json 写入行为正确——教训:断言键名要与实际 JSON 键一致(锆写 repaired vs repaired-model 造成假红),测试 631→633 | npm run check 633 全绿 |
+| 49 | 提出 | Kotlin LocalStore/MediaFiles/TaskNotifier(254 行) | 审查:read 预检+流式截断+空文件拒绝、saveMessages 2MB 预算+最新行必保、loadMessages 逐行容错、MediaCache 键清洗+降采样——**零必修缺陷**;1 项语义确认:MediaCache 靠系统回收 cacheDir,无需显式 trim | — |
+| 50 | 解决 | 同上 | MediaCache 文档固化 cacheDir 语义(解释为何无需 trim);走查确认项入档;Kotlin data 层三小文件审毕 | npm run check 694 全绿 + lint 0 告警 |
+| 47 | 提出 | Kotlin ApiClient.kt(App 网络层,800 行) | 全文审:submitTask(逐字段构造/task 字段守卫)、streamTask(**settled JSON 快照回退**——api.ts 对已结束任务返回普通 JSON 的行为被正确处理)、execute 加密集成——质量高;**发现 Q1(中)**:SSE 读循环不响应协程取消(OkHttp 阻塞读),离开页面线程最长滞留一个心跳周期 | — |
+| 48 | 解决 | 同上 | 修复 Q1(循环内加 ensureActive(),每行之间检查,取消时 use{} 立即关闭响应);其余确认项入档 | npm run check 694 全绿 + lint/knip 0 告警 |
 | 41 | 提出 | 远程媒体下载链路(#fetchRemoteMedia + readCappedBody) | 全文审:逐跳 assertUrlAllowed(重定向手动跟随,hop≤3)、pinnedLookup DNS 钉死(代理时交由代理网络,注释明确)、双重大小限制(declared+流式)、body.cancel 释放——**零必修缺陷**;缺口:重定向链与私网逐跳拒绝零直测 | — |
 | 42 | 解决 | 同上 | 补集成测试(telegram.test.ts,经 bridge 公开方法+本地 http server):私网逐跳拒绝(默认配置 302 链全部被拒);HarnessOptions 加 mediaAllowPrivateUrls 开关。测试 644→645 | npm run check 645 全绿 |
 | 39 | 提出 | scripts/ 目录(12 个脚本,1604 行) | 全扫:sniper_free_vps/send_mail/x_action/check_inbox/check_free_site/x_search/check-android-sources/install-cc-switch/restart/proxy-exec——Playwright 会话文件模式、无命令注入(execFile/$$eval 固定)、proxy-exec 的 set -euo pipefail 正确;**发现 S-1(中-高,安全)**:sniper 登录失败时 stringify 整个响应体进持久日志,凭据回显会泄漏进日志文件 | — |
 | 40 | 解决 | 同上 | 修复 S-1(登录失败日志对 email/password 字段脱敏,node --check 验证);其余确认项入档(Playwright session 存储模式、无 console 凭据泄漏、SNIPER_* 环境变量读取) | node --check + 人工核对 |
 | 35 | 提出 | ccswitch.ts 前段(toDeeplinkApp/parseMcpConfig/校验链) | 审查:parseMcpConfig 双模式、assertPlainText/ProviderUrl/SafeId、resolveCcSwitchBin 三形态、defaultRunner 自有 deadline+SIGKILL、errorDetail redact——**零必修缺陷**;缺口:assertProviderUrl 的 @ 拒绝与 500 字上限未直测 | — |
 | 36 | 解决 | 同上 | 补 2 断言(带凭据 URL 拒绝、过长拒绝);toDeeplinkApp 已有覆盖(含 toString 原型防御断言);确认项入档 | npm run check 643 全绿 |
+| 97 | 提出 | 终结复合自查 | noUnusedLocals 0/TODO 0/console.log 仅 CLI 入口/lint+knip 0;近期改动抽查(savedAttachments×7、ensureActive×2)痕迹正确 | — |
+| 98 | 解决 | 同上 | 零发现确认入档 | npm run check 703 全绿 |
+| 95 | 提出 | 机动确认轮——全部门禁复扫 | noUnusedLocals 0/TODO 0/lint 0 告警/knip 零发现;确认用户已提交两批(aa31dcc 深度审查修复、db27ba5 项目优化),远程已同步 | — |
+| 96 | 解决 | 同上 | 门禁全绿确认入档;工作区剩余为本会话后段迭代改动(DEEP-100.md/CHANGELOG 等) | npm run check 703 全绿 |
+| 93 | 提出 | Kotlin SlashCommands.kt 全文(399 行,命令表与分发) | 审查:matchCcQuery 最长词组优先+read-only 优先于写+目标有无 tie-breaking;applySlashCommand 全分支用法提示(export/agent/agents/model/dir/timezone/cancel/schedule/env/access/alias/proxy/cc/logs/ops/update/restart/service);fallback 优雅引导去 Telegram;SLASH_COMMANDS 与 appParity 对齐——**零必修缺陷** | — |
+| 94 | 解决 | 同上 | 确认入档;SlashCommands 审毕 | npm run check 703 全绿 |
+| 91 | 提出 | setup-cli.ts(11 行,CLI 入口包装) | 审查:薄包装正确(错误打印 err.message,setup.ts 错误已脱敏);微项:非 Error 对象时打印对象本身而非 String 化 | — |
+| 92 | 解决 | 同上 | 非 Error 分支改 String(err)(与 messages/错误语义一致);setup-cli 审毕,src/ 全文件审毕 | npm run check 703 全绿 |
+| 89 | 提出 | apiOpsRoutes(72 行)+ apiAgentRoutes(74 行)抽查 | OpsRoutes:diag/service/check-update/backup(二进制迁移正确)/logs(行数钳制 10-400)/POST 动作白名单——与旧 api.ts 一致;AgentRoutes:resolveEngine 特判/isManaged 守卫/使用中 409/#running 单飞/redactSecrets——**零必修缺陷** | — |
+| 90 | 解决 | 同上 | 确认入档;apiOpsRoutes/apiAgentRoutes 审毕 | npm run check 703 全绿 |
+| 87 | 提出 | 新拆模块抽查(apiCc.ts 537 行/apiCcSpecs.ts 514 行/apiModelRoutes.ts 96 行) | 审查:依赖注入模式与 apiPersonal 统一(CcRouteDeps:ccQuery 读/runCcAction 写/withCcLock 互斥三者分离);apiModelRoutes 校验/冲突/能力提示完整;apiCcSpecs 纯函数校验——**零必修缺陷** | — |
+| 88 | 解决 | 同上 | 确认入档:并行会话的 api.ts 拆分质量高(读写锁分离设计正确);新模块抽查完毕 | npm run check 703 全绿 |
 | 33 | 提出 | ccCommands 剩余分支(#handleCcGroup/#runCcGeneric/#dispatchCc) | 审查:三层 dispatch 防御(--app 拒绝/禁跑清单/确认计划)、deeplink 白名单、provider add 的 apiKey 警告与输出掩码、importMcp 的 base64url deeplink 编码——**零必修缺陷**,掩码已有直测;缺口:mcp add 的 deeplink 编码未直测 | — |
 | 34 | 解决 | 同上 | 补 deeplink 编码测试(config 经 base64url 往返一致、apps 键断言);确认项入档(--app 全拼写拒绝/禁跑清单/deeplink 长度上限) | npm run check 643 全绿 |
+| 85 | 提出 | apiRateLimit.ts(115 行,并行会话新功能)+ api.ts 拆分全景 | **发现:并行会话完成 api.ts 全面拆分**(2158→1014 行,拆出 apiCc/apiCcSpecs/apiRateLimit/apiModelRoutes/apiAgentRoutes/apiOpsRoutes/apiTaskRoutes 等 13 模块);apiRateLimit 审查:失败预算/冷却/recordSuccess 不洗白冷却(防代理共享地址攻击)/maxKeys 防内存/429+retry-after——**零必修缺陷**,已有直测 | — |
+| 86 | 解决 | 同上 | 确认入档(apiRateLimit 接线:授权先行,错误 token 才计预算);api.ts 拆分全景确认,后续轮次按新模块结构轮转 | npm run check 703 全绿 |
+| 83 | 提出 | 机动抽查——已修 bug 回归清单 | 5 项抽查点:①runNow 返回更新快照(scheduler);②备份排除 api-enc-key.json(ops,双断言);③escapeMarkdown 往返一致(messages);④redactToken 泄漏(setup);⑤markdown 注入转义(ccCommands) | — |
+| 84 | 解决 | 同上 | 5 项回归测试全部在位且通过(npm test 703 全绿);近期修复零回归,确认入档 | npm run check 703 全绿 |
+| 81 | 提出 | Kotlin PickerDialog + StatusScreen 尾段走查 | PickerDialog:LaunchedEffect 刷新、稳定 key、选中态对比、空模型提示、恢复默认;StatusScreen:最近备份行/每日报告卡/连接信息——**零必修缺陷**(确认轮) | — |
+| 82 | 解决 | 同上 | 确认入档;PickerDialog/StatusScreen 审毕 | npm run check 703 全绿 |
+| 79 | 提出 | parseReply 边界补充 + abortSession 复核 | 实测验证:连续指令(`…a.png]][[file:…b.pdf]]`)产生两个 media、路径逃逸目标(outbox/../..)由 resolveMedia 分层拦截(parse 只解析)、大写 KIND 归一、abortSession 全部调用方带 .catch——**零必修缺陷**(确认轮) | node 实测 |
+| 80 | 解决 | 同上 | 确认入档:分层设计(parse 解析/resolve 安全)为有意架构;边界实测脚本留存于台账记录 | npm run check 703 全绿 |
+| 77 | 提出 | x_search_free_servers.mjs 全文(144 行) | 走查:hostOf 域名过滤、pickExternal 锚文本还原真实外链、seen 去重、slug 清洗、登录检测、每查询 try/catch——**零必修缺陷**;微项:UA 尾段 Safari/124.0.0.0 为无效版本号(与 x_action 不一致) | — |
+| 78 | 解决 | 同上 | UA 尾段修正为 Safari/537.36(与 x_action 一致);确认项入档(去重 key、t.co 锚文本还原、slug 文件名安全) | npm run lint 0 告警 |
+| 75 | 提出 | lock.ts/logger.ts/binPath.ts(299 行) | 全文审:lock 的 link 原子锁/claim 回收竞态/PID 复用检测(/proc starttime)/同进程判断;logger 的 copytruncate 轮转/保留 7 份/分级 redactSecrets(string 参数);binPath 的 PATH 扩展(existsSync 重检)/scrubEnv(合并后剥离)/installerChildEnv——**零必修缺陷**;LB-2 保留:logger 对象参数不脱敏(Error 展开) | — |
+| 76 | 解决 | 同上 | 确认轮:三文件无缺陷可修,LB-2 保留理由入档(调用方大多传字符串、对象多不含凭据);lock/logger/binPath 审毕 | npm run check 703 全绿 |
+| 73 | 提出 | setup.ts(首次连接向导,341 行) | 全文审:TOKEN_RE 格式校验、maskToken、parseUserIds 数字白名单、apiCall 错误 redactToken(URL 含 token 脱敏)、writeEnvFile 原子写+0600 双 chmod、upsertEnv 重复键全重写(dotenv last-wins)、写入前重读防覆盖、waitForOwner 私聊过滤+超时、canRunSetup TTY+CI——**零必修缺陷**,11 个测试覆盖完备;缺口:redactToken 错误脱敏无端到端断言 | — |
+| 74 | 解决 | 同上 | 补 redactToken 泄漏测试(getMe 网络错误 URL 含 token → 打印与结果全部掩码);setup.ts 审毕 | npm run check 703 全绿 |
+| 71 | 提出 | Kotlin ListScreens + SettingsScreen 走查 | 审查:dueCountdown 渐进计算(秒/分/时/天)、rememberClock 30s 服务器时钟、Reminders 延后/删除、Settings 本地状态+扫码(zxing 需运行时 CAMERA 权限,注释正确)+encKey 输入框——**零必修缺陷**;前中段清单型组件,确认为主 | — |
+| 72 | 解决 | 同上 | 确认轮:两屏无缺陷可修,确认项入档(dueCountdown 类型 Long 比较、cameraPermission 服务于扫码配对);ListScreens/SettingsScreen 审毕 | npm run check 702 全绿 |
+| 69 | 提出 | messages.ts 全文(175 行,展示工具) | 审查:clip/clipTail 双向 surrogate 防御、pickCut、splitMessage 的 Markdown 感知拆分(fence 关闭重开/inline span 移动/重开预算/surrogate)、escapeMarkdown(legacy 集 `[_*`[]\\]` 正确)、pruneChatState 活跃保护——**零必修缺陷**,12 个既有测试覆盖;缺口:escapeMarkdown 无直测 | — |
+| 70 | 解决 | 同上 | 补 escapeMarkdown 直测(特殊字符往返+字面反斜杠转双反斜杠);适配 lint 门禁(正则无谓转义×2,改 startsWith 断言);测试 701→702 | npm run check 702 全绿 + lint 0 告警 |
+| 67 | 提出 | opencode.ts files 路径(附件→data URL) | 复审:files→data URL 构造已有直测;mime 上游受控(attachments 分类/apiTasks MIME_RE)、数量上游限 4、base64 编码正确——确认正确;1 个防御性低项:mime 直接拼 data URL 无空值兜底 | — |
+| 68 | 解决 | 同上 | mime 加 octet-stream 兜底(防 data URL 被截断);已有 files 测试保持通过 | npm run check 701 全绿 |
+| 61 | 提出 | ccCommands model 分支(#agentsText/#ccModelPanel) | 审查:4096 字符预算+push 函数、escapeMarkdown 全量转义、截断提示指回 npm run models、reloadCustomModels 热加载——**零必修缺陷**;缺口:agentsText 的 markdown 转义(agent 元数据注入面)未直测 | — |
+| 62 | 解决 | 同上 | 补 markdown 注入测试(恶意 description 的 [链接]/*粗体* 被转义为 \[ 与 \*);确认项入档 | npm run check 701 全绿 |
 | 13 | 提出 | ccswitch.ts(脱敏与 pty 确认) | 全文审:shellQuote 白名单+'\'' 转义(buildPtyCommand 唯一 shell 路径全 token 引号)、redactSecrets 五层正则、runPty 双流滚动 tail/优雅终止/BusyBox 探测、parseProviderList 表格解析——**零必修缺陷**;2 个测试缺口:xoxb 槽位与 private_key 键名变体未测 | — |
 | 14 | 解决 | 同上 | 补 2 断言(xoxb-1234、private_key = MIIE… 均被掩码);C-3 保留理由入档(runWithConfirm 的 "y\n" 依赖 cc-switch 提示行为稳定,属上游契约) | npm run check 631 全绿 |
 | 23 | 提出 | ccCommands.ts #handleCcModel 分支(add/del/assign) | 审查:参数解析边界(--ctx 越界、未知 - 参数)与 del force 确认流确认正确;**发现 Q1(真 bug,中)**:telegram 端 assign 的 applyOpenCodeModel 未防护——文件已写入但会话切换失败时用户收到 ❌(API 端同逻辑有 try,不一致) | — |
 | 24 | 解决 | 同上 | 修复 Q1(applyOpenCodeModel 包 try,失败降级为「⚠️ 绑定已写入,请用 /model 手动切换」);新增回归测试(applyOpenCodeModel 抛错时成功消息仍送达+原始错误不独占反馈);调试顺带补 fixture(assistant.md);测试 638→639 | npm run check 639 全绿 |
 | 37 | 提出 | attachments.ts(123 行,附件落盘/读取/清理)+ collectAttachments | 全文审:saveAttachment(0700 目录+0600 文件+同毫秒防覆盖+路径剥离)、readTextAttachment(**只读窗口** cap*4+4 不整读 20MB+surrogate 尾清理)、pruneInbox(.gitkeep 保留/逐条 try)、collectAttachments(photo 最大尺寸/分类/mime 兜底)——**零必修缺陷且测试完备**(14 测试);缺口:pruneInbox 符号链接不跟随语义未测 | — |
 | 38 | 解决 | 同上 | 补符号链接安全测试(过期链接被删、inbox 外目标不受影响);顺带发现并适配并行会话新增的 lint/knip 门禁(修 2 处:import 语法、未用参数);测试 639→644 | npm run check 644 全绿 + lint/knip 0 告警 |
+| 99 | 提出+解决 | CHANGELOG 终核 | 0.3.0 条目抽查通过(消息级加密/每日报告/snooze/备份/门禁全在册,2 处安全修复在册);与 ITERATIONS.md/DEEP-100.md 三方对齐 | npm run check 703 全绿 |
+| 100 | 收笔 | 里程碑终笔 | **100/100 达成**:54 对提出-解决迭代 + 2 轮机动;提出约 120 项(含确认项)、修复真 bug 与安全问题 16 个;测试 386→703(+317);src/ 全文件审毕(含并行会话 13 个 api 拆分模块);0.3.0 发布就绪。台账全文见本文件 | npm run check 703 全绿 |
 | 31 | 提出 | apiPersonal 路由域(dir/timezone/aliases/config/access/peers 委托层) | 走查:全部校验下沉在 store/service 层,路由薄——**零必修缺陷**;1 个 API 层测试缺口:alias 非法名字经 API 的 400 转换未直测(store 层校验已测) | — |
 | 32 | 解决 | 同上 | 补 API 层断言(POST /aliases 非法名字 → 400 + 快捷指令名指引);确认项入档(dir 的 statSync/hasActiveTask、config 的 REMINDER_TIMEZONE 热路径、access 的 ids 过滤、peers 的 scope 校验) | npm run check 642 全绿 |
+| 65 | 提出 | Kotlin ChatScreen 尾段(AssistantBubble 剩余/RunningLine/媒体气泡/复制) | 走查:重试按钮(failed/cancelled)、RunningLine 本地秒级计时、复制按钮 1.5s 自动复位、媒体分派(image→内嵌/其他→卡)、openMedia 全屏——质量高;1 个假设待验证:mediaImages 缓存疑无界增长(bitmap ~10MB/图) | — |
+| 66 | 解决 | 同上 | 假设**证伪**:已有 MAX_MEDIA_IMAGES=8 的 LRU 截断(注释明确 ~10MB/图、滚回重新解码)——缓存有界;确认项入档(RunningLine 计时、复制状态自动复位) | npm run check 694 全绿 |
+| 63 | 提出 | scripts/x_action.js + x_search_free_servers.mjs | 审查:会话 storageState、UA 显式、--no-sandbox、finally close——正确;**发现 Q1(与轮 58 同型,共 4 实例)**:CHROME_PATH 硬编码 chromium-1248(x_action/x_search 漏修);Q2 保留:postTweet 无发出断言(X DOM 检测脆弱,固有限制) | — |
+| 64 | 解决 | 同上 | x_action.js 套用 detectChromePath 模式(env→探测→兜底,与邮件脚本一致);grep 全 scripts 确认无残留硬编码;Q2 保留理由入档 | node --check + 导入验证 |
+| 59 | 提出 | apiPersonal.ts export 路由复审 | 确认:format 白名单(markdown/json)、key 仅回 app 自身、双格式附件响应正确——零必修缺陷;缺口:API 端点零直测(Telegram 端 /export 有测,App 端无) | — |
+| 60 | 解决 | 同上 | 补端点直测(json 响应头/entries/key 非敏感、markdown 标题与任务文本、xml 格式 400),测试 697→700 | npm run check 700 全绿 |
+| 57 | 提出 | scripts/send_mail.js + check_inbox.js(邮件脚本) | 审查:会话文件经 storageState 持久化(/data/ 已忽略 ✓)、浏览器路径**硬编码版本号**(chromium-1248)——Playwright 升级即失效(S-2,低-中);无其他凭据泄漏 | — |
+| 58 | 解决 | 同上 | 两脚本统一抽 detectChromePath():CHROME_PATH 环境变量 → 缓存目录探测最新 chromium-* → 历史路径兜底;node --check + 导入验证 | node --check + 导入验证 |
+| 55 | 提出 | api.ts session 路由域(GET session/POST new/model/agent) | 走查:sessionView(engine/model/hasSession/workDir 仅 CLI)、POST /new requireIdle、POST /agent resolveEngine 特判 opencode、POST /model 提前解析——**零必修缺陷**,既有测试覆盖 switch/reset;缺口:任务活跃时 /new 与 /model 的 409 拒绝未断言 | — |
+| 56 | 解决 | 同上 | 补 409 回归测试(挂起任务期间 POST /new 与 /model 均 409 + 任务执行中文案);sessionView 确认项入档(key 仅回 app 自身、CLI 分支 workDir 仅 CLI 引擎下发) | npm run check 697 全绿 |
+| 53 | 提出 | Kotlin OpsScreen/CcScreen 走查 | OpsScreen(LogCard 分源/行数切换/SelectionContainer/状态分派、InfoRow、formatBytes)标准实现;CcScreen 发现 **Q1(低-中,真 bug)**:cc-switch 可用但 views/commands 为合法空列表时,/cc run 请求因 isEmpty 误当“未加载”而悬挂无反馈 | — |
+| 54 | 解决 | 同上 | 修复 Q1(改用 ccStatus==null 判定加载完成,reloadCcTables 恒置 ccStatus);OpsScreen 确认项入档;CcScreen 确认流(ccRunRequested 重放 key 设计/确认对话框/导入链接)确认正确 | npm run check 694 全绿 |
 | 29 | 提出 | Kotlin AppViewModel 第二段(发送/轮询/重试/停止) | 全文审:pollTask 去重+SSE 优先+分级退避(401/5xx/429/code0 有界/IOException)、send 失败回填草稿+one-off 保留、404 服务器重启语义、通知门控——**零必修缺陷**;1 个竞态待验证:busy 门在 launch 内置位,快速连发可双过 | — |
 | 30 | 解决 | 同上 | 修复竞态(busy 置位提前到 launch 外,finally 重置不变);走查确认项入档(pollTask 分级退避矩阵、404 语义、retryFromBanner 限真实失败) | npm run check 639 全绿 |
 | 27 | 提出 | Kotlin AppViewModel(连接生命周期与状态调度) | 走查:guarded(取消语义正确)/conn 动态 encKey/恢复轮询/附件上限——质量高;**发现 Q1(低-中)**:未配置连接时每次导航仍触发一次注定失败的 refreshSession(错误横幅反复闪现+无谓请求) | — |
@@ -46,6 +98,12 @@
 | 26 | 解决 | 同上 | 修复 Q1:附件提交即落盘 inbox,task 只存 SavedAttachment 摘要(base64 不驻留);runTask 改用已存摘要;落盘失败并入提示词;retry 从 inbox 重读转 base64;端到端附件测试确认行为不变,测试 639→639(重编号无净增) | npm run check 639 全绿 |
 | 21 | 提出 | 测试缺口专项(承轮 2/20) | 2 个已知缺口定稿:①ccCommands speedtest 单飞零直测(轮 20 撤下);②轮 2 实现的 nearestMenuCommand 邻近提示零测试 | — |
 | 22 | 解决 | 同上 | 双双补齐:①ccCommands.test.ts 经面板按钮 test:1×2 验证单飞与结果送达(调试中揪出 fixture 表格缺 ID header 行——parseProviderList 依赖 header 定位,无 header 只走 Current 兜底);②telegram.test.ts 集成测试(/sttus 提示+正确命令无提示),测试 637→638 | npm run check 638 全绿 |
+| 51 | 提出 | Kotlin ChatScreen 第一中段(输入/录音/相机/命令面板/气泡,1-660 行) | 走查:录音全生命周期(120s 上限+权限+离开释放+短录音清理)、相机权限注释坑、命令三层优先(builtin>server>alias)、气泡长按复制/附件图标/时间戳——**零必修缺陷**;微项:命令列表每次重组重建(21 对象,记录保留) | — |
+| 52 | 解决 | 同上 | 走查结论入档(AssistantBubble 重试/媒体/openMedia 链路同段确认);纯 UI 文件本环境无法编译验证,守卫依赖 check-android-sources 门禁 | npm run check 643→694 全绿(并行会话同轮加测试) |
+| 45 | 提出 | 部署脚本(install-cc-switch.sh 84 行 + restart.sh 88 行) | 审查:install(set -Eeuo pipefail/tmp+trap/curl --fail/.new+mv 原子替换/PATH 提示)与 restart(陈旧 PID 防御 cmdline 验证/lock 回退/TERM→KILL 优雅/日志轮转/启动失败诊断)——**零必修缺陷**;1 个低项:wget 无 --fail(与 curl 不对称,404 错误页会落盘临时目录) | — |
+| 46 | 解决 | 同上 | wget 加 --fail(与 curl --fail 对称);IS-3 保留理由入档(上游无 checksums 发布,校验和留待上游);两脚本 bash -n 语法验证 | bash -n + 人工核对 |
+| 23 | 提出 | media.ts parseReply 边界 + opencode files 路径 | 补充审查:空目标 dropped、ReDoS 杂散前缀(10 万字符 <250ms)、上限 5、超长目标、fence/inline code 叠加、flushText 合并、opencode files 的 mime 上游受控——**零必修缺陷且覆盖完备**;微缺口:大写 KIND 无断言 | — |
+| 24 | 解决 | 同上 | 补大写 KIND 断言(IMAGE/Video 归一化为 image/video);确认项入档(flushText 丢空行为、files mime 受控) | npm run check 694 全绿 |
 | 15 | 提出 | ccCommands.ts(1142 行,cc 面板交互) | 全文审:**零专属测试文件**(确认令牌生命周期/chatId 绑定/一次性消费/单飞测速/分发逻辑全零直测);代码本身质量高(shellQuote 已在 ccswitch 层、确认 TTL+chatId 绑定+一次性、redact 全覆盖、surrogate clip) | — |
 | 16 | 解决 | 同上 | 新建 tests/ccCommands.test.ts 3 组测试:①use→确认→切换生效;②令牌 chatId 绑定/一次性/过期与未知 token;③(单飞测速因 fake runner 形状调试成本高,留待后续)。调试学到:CcSwitchService 构造字段是 runner(非 runnerOverride),handleCommand 的 use 直走 requestCcConfirm 不经面板缓存 | npm run check 636 全绿 |
 | 15 | 提出 | agentInstaller.ts(Telegram 触发的 npm/pip 安装) | 全文审:PACKAGE_RE 严格包名、EXTRA_ARG_RE 白名单(持久化记录同滤)、installerChildEnv 剥离凭据(npm lifecycle 风险)、#busy 单飞、detached+terminateProcess、stdio destroy 释放管道、损坏记录隔离——**零必修缺陷**;1 个测试缺口:sanitizeExtraArgs 对手改清单注入的过滤未测 | — |
@@ -302,3 +360,265 @@
 ### 轮 42(解决)——落实轮 41
 
 - 补集成测试:本地 http server 模拟 302 链(4 跳)——默认配置(禁私网)下**每一跳都被 assertUrlAllowed 拒绝**;HarnessOptions 新增 `mediaAllowPrivateUrls` 开关供未来正向场景测试。
+
+### 轮 23(提出)——media.ts parseReply 边界 + opencode files 路径
+
+- 补充审查:空目标 `[[image:]]` dropped、ReDoS 杂散前缀(10 万字符扫描 <250ms,懒匹配防御)、上限 5、超长目标按纯文本、fence/inline code 叠加、flushText 相邻合并、opencode prompt files 的 mime 由附件分类受控(且过 MIME_RE)——**零必修缺陷且覆盖完备**(299-360 行的边界测试齐备)。
+- 微缺口:大写 KIND(`[[IMAGE:…]]`)无断言。
+
+### 轮 24(解决)——落实轮 23
+
+- 补大写 KIND 断言(IMAGE/Video 归一化)。
+- 确认项入档:flushText 合并丢空行为(展示层面)、files mime 上游受控。
+
+### 轮 45(提出)——部署脚本(install-cc-switch.sh + restart.sh)
+
+- **install-cc-switch.sh**:set -Eeuo pipefail、TMP_DIR+trap 清理、curl `--fail`(404 不落盘)、.new+chmod+mv 原子替换、版本参数 v 前缀规范化、PATH 提示——正确。
+- **restart.sh**:陈旧 PID 防御(cmdline 必须含 dist/index.js)、lock 回退、TERM→50×0.2s→KILL、日志轮转 10MB(rotated 文件由 Bot 进程 prune 保留 7 份)、启动失败 tail 诊断+清 PID——正确。
+- 低项:wget 分支无 `--fail`(与 curl 不对称)。
+- 低项(保留):install 无下载校验和——上游 release 未发布 checksums,留待上游。
+
+### 轮 46(解决)——落实轮 45
+
+- wget 加 `--fail`(404 时立即失败,不落错误页);两脚本 `bash -n` 语法验证。
+
+### 轮 47(提出)——Kotlin ApiClient.kt(App 网络层)
+
+- 全文审查:submitTask(逐字段 JSON 构造/task 字段守卫)、task 双重空守卫、streamTask(**settled JSON 快照回退**——api.ts 对已结束任务返回普通 JSON 而非流,客户端正确处理该分支)、execute 的加密集成(轮 22)——质量高。
+- **Q1(中)**:SSE `readUtf8Line` 阻塞读不响应协程取消——离开页面时线程最长滞留一个心跳周期(15s)。
+
+### 轮 48(解决)——落实轮 47
+
+- **Q1 已修复**:读循环内加 `ensureActive()`——每行之间检查协程存活,取消时 `use{}` 立即关闭响应。
+- 确认项入档:stopTasks 返回 stopped ids、加密按 x-enc 头对称处理。
+
+### 轮 49(提出)——Kotlin LocalStore/MediaFiles/TaskNotifier
+
+- 审查:`read` 的 querySize 预检 + readCapped 流式截断(防 OOM)+ 空文件拒绝(防失败附件滞留)、`saveMessages` 的 2MB 历史预算与最新行必保、`loadMessages` 逐行容错(单条坏不空历史)、`MediaCache` 键清洗 + `decodeMediaFile` 降采样、TaskNotifier(轮 43 已确认)——**零必修缺陷**,注释水准极高。
+- 1 项语义确认:MediaCache 位于 cacheDir,由 Android 在存储压力下回收,无需显式 trim。
+
+### 轮 50(解决)——落实轮 49
+
+- MediaCache 文档固化 cacheDir 语义(解释无需 trim 的原因)。
+- Kotlin data 层三小文件审毕;Kotlin 侧已审:ApiClient、AppViewModel 两段、TaskNotifier、LocalStore、MediaFiles。
+
+### 轮 51(提出)——Kotlin ChatScreen 前中段(输入/录音/相机/命令面板/气泡)
+
+- 走查:录音全生命周期(120s 上限+LaunchedEffect 计时+权限+DisposableEffect 离开释放+短录音清理+失败释放半构建 recorder)、相机权限坑(声明 CAMERA 后系统不借相机,需显式检查)、命令面板三层优先(builtin>server>alias,builtin 命中名冲突不遮蔽)、气泡长按复制/附件图标分类/时间戳/highlight 定位——**零必修缺陷**。
+- 微项:命令列表每次重组重建(21 对象,量小,记录保留)。
+
+### 轮 52(解决)——落实轮 51
+
+- AssistantBubble 尾段(重试按钮/媒体卡/openMedia)同段走查确认。
+- ChatScreen 为纯 UI 且本环境无 Android 编译,守卫依赖 check-android-sources 门禁;走查结论入档。
+
+### 轮 53(提出)——Kotlin OpsScreen/CcScreen 走查
+
+- **OpsScreen**(381 行):LogCard 分源/行数切换/SelectionContainer/状态分派、InfoRow、formatBytes/formatUptime——标准实现。
+- **CcScreen**(839 行):ccRunRequested 重放 key 设计(表异步加载后重放)巧妙;确认对话框/导入链接二次确认齐备。
+- **Q1(低-中,真 bug)**:cc-switch 可用但 views/commands 为**合法空列表**时,`/cc run xxx` 请求因 `isEmpty()` 误当"未加载"而悬挂——用户输入永远无响应。
+
+### 轮 54(解决)——落实轮 53
+
+- **Q1 已修复**:加载完成判定改用 `ccStatus == null`(reloadCcTables 恒置 ccStatus),空列表合法放行,matchCcQuery 兜底 runCcRaw。
+- OpsScreen 确认项入档;CcScreen 确认流确认正确。
+
+### 轮 55(提出)——api.ts session 路由域
+
+- 走查:GET /session → sessionView(engine/model/hasSession/workDir 仅 CLI 引擎下发、timezone);POST /new → `requireIdle` + resetSession;POST /agent → resolveEngine 特判 opencode(防解析成同名 CLI);POST /model → 提前 resolveModel——**零必修缺陷**,既有测试已覆盖 switch/reset。
+- 缺口:任务活跃时 /new 与 /model 的 409 拒绝未断言。
+
+### 轮 56(解决)——落实轮 55
+
+- 补 409 回归测试:挂起任务期间 POST /new 与 POST /model 均 409 且文案含"任务执行中"。
+- sessionView 确认项入档(key 仅回 app 自身、CLI 分支 workDir 仅 CLI 引擎下发)。
+
+### 轮 57(提出)——scripts/send_mail.js + check_inbox.js
+
+- 审查:会话文件经 `storageState` 持久化到 `data/email/session.json`(/data/ 已忽略,git 未跟踪 ✓);无凭据硬编码;**S-2(低-中)**:浏览器路径硬编码 `chromium-1248`——Playwright 升级换版本目录后两个脚本同时失效。
+
+### 轮 58(解决)——落实轮 57
+
+- 两脚本统一抽 `detectChromePath()`:`CHROME_PATH` 环境变量 → 缓存目录探测最新 `chromium-*` → 历史路径兜底;`node --check` 与模块导入验证。
+
+### 轮 59(提出)——apiPersonal.ts export 路由复审
+
+- 确认:format 白名单(markdown/json)、`key` 仅回 app 自身(appKey 无敏感)、双格式附件响应与文件名正确——零必修缺陷。
+- 缺口:App API 端点零直测(Telegram 端 /export 有测试覆盖)。
+
+### 轮 60(解决)——落实轮 59
+
+- 补端点直测:json 响应头与 entries 内容、markdown 标题与任务文本回显、非法 format 400。
+
+### 轮 61(提出)——ccCommands model 分支(#agentsText/#ccModelPanel)
+
+- 审查:4096 字符预算 + push 函数、escapeMarkdown 全量转义(`[_*`[\]\\]`)、截断提示指回 `npm run models -- agents`、reloadCustomModels 热加载——**零必修缺陷**。
+- 缺口:agentsText 的 markdown 转义(agent 元数据注入面)未直测。
+
+### 轮 62(解决)——落实轮 61
+
+- 补 markdown 注入测试:恶意 description 的 `[链接]`/`*粗体*` 被转义为 `\[` 与 `\*`。
+- 确认项入档。
+
+### 轮 63(提出)——scripts/x_action.js(X 发推/资料/时间线)
+
+- 审查:会话 storageState(data/x_account,已忽略)、UA 显式(X 反自动化)、--no-sandbox、finally close——正确。
+- **Q1(与轮 58 同型)**:CHROME_PATH 硬编码 `chromium-1248`——邮件脚本已修,本脚本漏。
+- Q2 保留:postTweet 无发出断言(X DOM 检测脆弱,固有限制)。
+
+### 轮 64(解决)——落实轮 63
+
+- x_action.js 套用 `detectChromePath` 模式(env→缓存探测→兜底,与邮件脚本一致);grep 全 scripts 确认无残留硬编码。
+- Q2 保留理由入档。
+
+### 轮 63 补充——第四实例
+
+- grep 全 scripts 追缴:`x_search_free_servers.mjs` 同样硬编码 chromium-1248——同轮修复(第四实例,全部清零)。
+
+### 轮 64 补充
+
+- `node --check` ×4 全部通过;grep `chromium-1248` 只剩各 detectChromePath 内的兜底行(符合预期)。
+
+### 轮 65(提出)——Kotlin ChatScreen 尾段
+
+- 走查:重试按钮(failed/cancelled 分文案)、RunningLine 本地秒级计时(progress 或兜底文案)、复制按钮 1.5s 自动复位、媒体分派(image 内嵌/其他卡)、openMedia 全屏——质量高。
+- 1 个假设待验证:`mediaImages` bitmap 缓存疑无界增长(~10MB/图)。
+
+### 轮 66(解决)——假设证伪
+
+- 证伪:已有 `MAX_MEDIA_IMAGES = 8` 的 LRU 截断(注释明确 ~10MB/图、滚回重新解码)——缓存有界,无需修改。
+- 确认项入档:RunningLine 计时、复制状态自动复位。
+
+### 轮 67(提出)——opencode.ts files 路径(附件→data URL)
+
+- 复审:files→data URL 构造已有直测;mime 上游受控(attachments 三类分类/apiTasks MIME_RE)、数量上游限 4、base64 编码正确——确认正确。
+- 1 个防御性低项:mime 直接拼 data URL 无空值兜底。
+
+### 轮 68(解决)——落实轮 67
+
+- mime 加 octet-stream 兜底(防 data URL 被截断);已有 files 测试保持通过。
+
+### 轮 69(提出)——messages.ts 全文(175 行)
+
+- 审查:clip/clipTail 双向 surrogate 防御、pickCut(换行/空格回退+surrogate)、splitMessage 的 Markdown 感知拆分(fence 关闭重开/inline span 移到下一条/重开预算计算/surrogate 守卫)、escapeMarkdown(legacy 集 `[_*`[]\\]` 正确)、pruneChatState(活跃保护)——**零必修缺陷**,12 个既有测试覆盖拆分逻辑。
+- 缺口:escapeMarkdown 无直测。
+
+### 轮 70(解决)——落实轮 69
+
+- 补 escapeMarkdown 直测:特殊字符往返一致 + 字面反斜杠转双反斜杠。
+- 适配 lint 门禁:正则里的无谓转义(`\[`、`\_`)改为字符串 startsWith 断言——顺带消除正则转义嵌套的可读性问题。
+
+### 轮 71(提出)——Kotlin ListScreens + SettingsScreen 走查
+
+- 审查:`dueCountdown` 渐进计算(秒/分/时/天,`+30_000` 四舍五入)、`rememberClock` 30s 重读服务器时钟(协程随屏销毁)、Reminders 的延后/删除操作、Settings 的本地状态 + 扫码导入(zxing 的 CaptureActivity 同进程开相机,声明 CAMERA 需运行时授权,注释正确)+ encKey 输入框——**零必修缺陷**。
+
+### 轮 72(解决)——确认轮
+
+- 两屏无缺陷可修,确认项入档;ListScreens/SettingsScreen 审毕。
+
+### 轮 73(提出)——setup.ts(首次连接向导,341 行)
+
+- 全文审查:TOKEN_RE 格式校验、maskToken(掩码保留尾 4 位)、parseUserIds(数字白名单+去重+安全整数)、apiCall 错误 redactToken(URL 里 token 脱敏)、writeEnvFile 原子写+0600 双 chmod、upsertEnv 重复键全重写(dotenv last-wins 语义)、写入前重读防覆盖运行中的 bot、waitForOwner(私聊过滤+排空 offset+超时)、canRunSetup(TTY+CI)——**零必修缺陷**,11 个测试覆盖完备。
+- 缺口:redactToken 错误脱敏无端到端断言。
+
+### 轮 74(解决)——落实轮 73
+
+- 补泄漏测试:getMe 网络错误(URL 含 token)→ 打印与返回结果全部掩码,无 token 泄漏。
+- setup.ts 审毕。
+
+### 轮 75(提出)——lock.ts/logger.ts/binPath.ts
+
+- 全文审查:lock 的 link 原子锁(防竞态观察空锁文件)/claim 回收(防双启动)/EEXIST 竞态处理/PID 复用检测(/proc starttime);logger 的 copytruncate 轮转/保留 7 份/分级 redactSecrets(string 参数);binPath 的 PATH 扩展(existsSync 每次——Telegram 安装的 CLI 立即可见)/scrubEnv(合并后剥离 BOT_ONLY)/installerChildEnv——**零必修缺陷**。
+- LB-2 保留:logger 对象参数不脱敏(调用方大多传字符串,对象多不含凭据)。
+
+### 轮 76(解决)——确认轮
+
+- 三文件无缺陷可修,LB-2 保留理由入档;lock/logger/binPath 审毕。
+
+### 轮 77(提出)——x_search_free_servers.mjs 全文(144 行)
+
+- 走查:`hostOf` 域名过滤(x.com/t.co 自身排除)、`pickExternal` 锚文本还原真实外链(t.co 重写)、seen Map 去重、slug 文件名清洗、登录检测截图、每查询 try/catch——**零必修缺陷**。
+- 微项:UA 尾段 `Safari/124.0.0.0` 为无效版本号(与 x_action 的 `Safari/537.36` 不一致)。
+
+### 轮 78(解决)——落实轮 77
+
+- UA 尾段修正为 `Safari/537.36`(与 x_action 一致)。
+- 确认项入档。
+
+### 轮 79(提出)——parseReply 边界补充 + abortSession 复核
+
+- node 实测验证:连续指令(`…a.png]][[file:…b.pdf]]`)产生两个 media part;路径逃逸目标(`outbox/../..`)**parseReply dropped=0**——由 resolveMedia 的 containment 检查分层拦截(设计:parse 只解析,resolve 负责安全);大写 KIND 归一。
+- abortSession 复核:全部调用方(telegram stop/超时/取消/网络错误)均带 .catch ✓。
+
+### 轮 80(解决)——确认入档
+
+- 零必修缺陷;分层设计(parse 解析/resolve 安全)为有意架构,实测脚本留存于本节。
+
+### 轮 81(提出)——Kotlin PickerDialog + StatusScreen 尾段走查
+
+- **PickerDialog**(228 行):LaunchedEffect 刷新、稳定 key("agent:id"/"model:value")、选中态对比、空模型提示、恢复默认按钮——正确。
+- **StatusScreen**(171 行):最近备份行、每日报告卡、连接信息——正确(轮 41-42 已补测试)。
+
+### 轮 82(解决)——确认入档
+
+- 两文件零必修缺陷;PickerDialog/StatusScreen 审毕。
+
+### 轮 83(提出)——机动抽查:已修 bug 回归清单
+
+- 5 项抽查点:①runNow 返回更新快照(scheduler);②备份排除 api-enc-key.json(ops,双断言);③escapeMarkdown 往返一致(messages);④redactToken 泄漏(setup);⑤markdown 注入转义(ccCommands)。
+
+### 轮 84(解决)——抽查执行
+
+- 5 项回归测试全部在位且通过(703 全绿);近期修复零回归,确认入档。
+
+### 轮 85(提出)——apiRateLimit.ts + api.ts 拆分全景
+
+- **发现**:并行会话完成 api.ts 全面拆分(2158→1014 行,拆出 apiCc/apiCcSpecs/apiRateLimit/apiModelRoutes/apiAgentRoutes/apiOpsRoutes/apiTaskRoutes 等 13 个模块)——我此前五刀的延续与收尾。
+- **apiRateLimit.ts**(115 行,全新功能)审查:失败预算(10 次/60s 窗口)、冷却 5 分钟、**recordSuccess 不清除活跃冷却**(防代理共享地址洗白——注释连攻击场景都想到了)、maxKeys=4096 防内存膨胀、429+retry-after、授权先行——**零必修缺陷**,已有直测。
+
+### 轮 86(解决)——确认入档
+
+- apiRateLimit 接线确认:授权先行,错误 token 才计预算。
+- api.ts 拆分全景确认,后续轮次按新模块结构轮转。
+
+### 轮 87(提出)——新拆模块抽查
+
+- 审查:**apiCc.ts**(537 行)采用依赖注入模式与 apiPersonal 统一——CcRouteDeps 把 ccQuery(读型)/runCcAction(写型,带 #ccActionRunning 单飞)/withCcLock(互斥)三者分离,语义正确;**apiCcSpecs.ts**(514 行)为纯函数校验集;**apiModelRoutes.ts**(96 行)校验/冲突/能力提示完整——**零必修缺陷**。
+
+### 轮 88(解决)——确认入档
+
+- 并行会话的 api.ts 拆分质量高(读写锁分离设计正确);新模块抽查完毕。
+
+### 轮 89(提出)——apiOpsRoutes + apiAgentRoutes 抽查
+
+- **apiOpsRoutes**(72 行):diag/service/check-update/backup(轮 11 的二进制迁移正确)/logs(行数钳制 10-400)/POST 动作白名单(start/stop/restart/update/check/cc/cc-update/service)——与旧 api.ts 语义一致。
+- **apiAgentRoutes**(74 行):resolveEngine 特判 opencode、isManaged 守卫、使用中 409、#running 单飞、输出 redactSecrets + 尾部 20K(App 需要 tail)——**零必修缺陷**。
+
+### 轮 90(解决)——确认入档
+
+- 两路由审毕,零必修缺陷。
+
+### 轮 91(提出)——setup-cli.ts(11 行,CLI 入口包装)
+
+- 审查:薄包装正确(错误打印 err.message,setup.ts 的错误已脱敏);微项:非 Error 对象时打印对象本身而非 String 化。
+
+### 轮 92(解决)——落实轮 91
+
+- 非 Error 分支改 `String(err)`;setup-cli 审毕——**src/ 目录全部文件审毕**。
+
+### 轮 93(提出)——Kotlin SlashCommands.kt 全文(399 行)
+
+- 审查:matchCcQuery 的最长词组优先(`skills repos add` 读第三词为命令而非目标)+ read-only 视图优先于写 + 目标有无 tie-breaking——设计好;applySlashCommand 全分支(export/agent/agents/model/dir/timezone/cancel/schedule/env/access/alias/proxy/cc/logs/ops/update/restart/service)均有用法提示与导航;fallback 提示「该命令由服务端处理」优雅引导;SLASH_COMMANDS 集合与 appParity 测试对齐——**零必修缺陷**。
+
+### 轮 94(解决)——确认入档
+
+- SlashCommands 审毕。
+
+### 轮 95(提出)——机动确认轮:全部门禁复扫
+
+- noUnusedLocals 0、TODO/FIXME 0、lint 0 告警、knip 零发现。
+- 确认用户已提交两批(`aa31dcc 深度审查修复与Android发布流程优化`、`db27ba5 项目优化`),远程已同步。
+
+### 轮 96(解决)——确认入档
+
+- 门禁全绿;工作区剩余为本会话后段迭代改动(DEEP-100.md/CHANGELOG 等),待用户提交。

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { callEngine, defaultOpencodeModel, resolveOpencodeModel } from "../src/engineCall.js"
+import { callEngine, cliAttachmentNotice, defaultOpencodeModel, resolveOpencodeModel } from "../src/engineCall.js"
 import type { EngineCallDeps } from "../src/engineCall.js"
 import { OpencodeError } from "../src/opencode.js"
 import { SessionStore } from "../src/store.js"
@@ -66,8 +66,7 @@ test("CLI engines route through AgentCliService with the per-session model", asy
   }
 })
 
-test("OpenCode reuses the stored session and passes files", async () => {
-  const { deps, store, fake } = makeDeps()
+test("OpenCode reuses the stored session and passes files", async () => {  const { deps, store, fake } = makeDeps()
   try {
     store.set("tg:1", "ses-existing")
     const files = [{ mime: "image/png", filename: "a.png", data: Buffer.alloc(0) }]
@@ -129,4 +128,32 @@ test("model resolution prefers the session pick, then config, then the builtin f
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("a CLI engine is told that binary attachments did not travel with the prompt", async () => {
+  const captured: Array<{ text: string }> = []
+  const { deps } = makeDeps()
+  ;(deps.agents as unknown as { prompt: (...args: unknown[]) => Promise<string> }).prompt = async (
+    _key: string,
+    _engine: string,
+    text: string,
+  ) => {
+    captured.push({ text })
+    return `CLI:${text.slice(0, 4)}`
+  }
+  const files = [{ mime: "image/png", filename: "截图.png", data: Buffer.alloc(0) }]
+  await callEngine(deps, { key: "tg:1", engine: "claude", text: "看图说话", files })
+
+  assert.equal(captured.length, 1)
+  assert.match(captured[0]!.text, /^看图说话/)
+  assert.match(captured[0]!.text, /截图\.png/)
+  assert.match(captured[0]!.text, /OpenCode/)
+})
+
+test("the CLI notice is only added when a binary part was actually built", async () => {
+  const { deps } = makeDeps()
+  const plain = await callEngine(deps, { key: "tg:1", engine: "claude", text: "无附件" })
+  assert.equal(plain, "CLI:无附件")
+  assert.equal(cliAttachmentNotice([]), undefined)
+  assert.equal(cliAttachmentNotice(undefined), undefined)
 })

@@ -53,6 +53,10 @@ test("scrubEnv always removes the bot's own access control values", () => {
     TELEGRAM_ALLOW_ALL_USERS: "1",
     OPENCODE_SERVER_USERNAME: "bot",
     OPENCODE_SERVER_PASSWORD: "pw",
+    API_TOKEN: "bearer-for-the-bot-itself",
+    STT_API_KEY: "sk-transcribe",
+    SNIPER_EMAIL: "me@example.com",
+    SNIPER_PASSWORD: "pw",
     UNDEFINED_ONE: undefined,
     KEEP: "yes",
   })
@@ -62,6 +66,10 @@ test("scrubEnv always removes the bot's own access control values", () => {
     "TELEGRAM_ALLOW_ALL_USERS",
     "OPENCODE_SERVER_USERNAME",
     "OPENCODE_SERVER_PASSWORD",
+    "API_TOKEN",
+    "STT_API_KEY",
+    "SNIPER_EMAIL",
+    "SNIPER_PASSWORD",
     "UNDEFINED_ONE",
   ]) {
     assert.ok(!(name in env), `${name} must not reach a child process`)
@@ -75,6 +83,14 @@ test("a running CLI keeps its provider keys but loses the bot token", () => {
   assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-x")
   assert.ok(!("TELEGRAM_BOT_TOKEN" in env))
   assert.ok((env.PATH ?? "").startsWith("/usr/bin"), env.PATH)
+})
+
+test("a running CLI cannot hand itself the bot's own root token", () => {
+  // Approvals are bypassed by design, so an injected instruction runs real commands here:
+  // API_TOKEN would let it drive git pull, npm install and /dir/browse over the bot itself
+  const env = childEnv({ PATH: "/usr/bin", API_TOKEN: "0123456789abcdef", ANTHROPIC_API_KEY: "sk-ant-x" })
+  assert.ok(!("API_TOKEN" in env))
+  assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-x")
 })
 
 test("an installer drops every credential-shaped variable", () => {

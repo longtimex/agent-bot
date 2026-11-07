@@ -44,7 +44,7 @@ need tar
 if command -v curl >/dev/null 2>&1; then
   download() { curl --fail --location --silent --show-error --output "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  download() { wget --quiet --output-document="$2" "$1"; }
+  download() { wget --fail --quiet --output-document="$2" "$1"; }
 else
   echo "error: curl or wget is required" >&2
   exit 1

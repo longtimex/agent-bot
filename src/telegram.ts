@@ -1,36 +1,23 @@
 import { randomBytes } from "node:crypto"
-import QRCode from "qrcode"
-import { unlinkSync } from "node:fs"
 import { resolve } from "node:path"
-import { Agent, fetch as undiciFetch } from "undici"
 import { Bot, GrammyError, InlineKeyboard, InputFile } from "grammy"
 import type { Context } from "grammy"
 import type { Message } from "grammy/types"
-import {
-  isTextAttachment,
-  pruneInbox,
-  readTextAttachment,
-  saveAttachment,
-  type AttachmentDescriptor,
-  type SavedAttachment,
-} from "./attachments.js"
+import { type AttachmentDescriptor } from "./attachments.js"
 import type { BotConfig, ModelRef } from "./config.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
-import { formatHistoryMarkdown, TaskHistoryStore } from "./history.js"
+import { TaskHistoryStore } from "./history.js"
 import { BOT_MENU_COMMANDS, CC_HELP, HELP, HELP_FULL, isBotCommand } from "./help.js"
 import type { Logger } from "./logger.js"
 
 export { HELP_FULL }
-import { assertUrlAllowed, mediaLabel, parseReply, pinnedLookup, resolveMedia, safeMediaTarget, type ReplyPart } from "./media.js"
-import { clip, escapeMarkdown, pruneChatState, splitMessage, type Panel } from "./messages.js"
+import { clip, escapeMarkdown, pruneChatState, type Panel } from "./messages.js"
 export { pruneChatState }
 export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { AgentCliService } from "./agentCli.js"
-import { buildAttachmentSections } from "./attachmentInput.js"
-import { applyStt } from "./stt.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import { appVersion } from "./version.js"
 import {
@@ -39,31 +26,32 @@ import {
   type ModelInfo,
 } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
-import { pairingQrPayload, resolveApiToken, resolveEncKey, resolvePairingUrl } from "./api.js"
+import { resolveEncKey } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
 import { OpsService } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
-import { maskProxyUrl, ProxyService } from "./proxy.js"
+import { ProxyService } from "./proxy.js"
 import { describeRepeat, ReminderService, type Reminder } from "./reminders.js"
 import { scheduleTargetLabel, ScheduleService, type ScheduledTask } from "./scheduler.js"
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
 import { DailyReportService } from "./usageReport.js"
-import { USER_ID_RE, TIMEZONE_PRESETS, describeRemainingLabel, extensionFromMime, isMessageNotModified, parseAllowUsers, sleep, sortUserIds, startupNoticeText } from "./telegramSupport.js"
+import { USER_ID_RE, describeRemainingLabel, isMessageNotModified, sleep, startupNoticeText } from "./telegramSupport.js"
 import { TelegramStatsPanels } from "./telegramStats.js"
 import { TelegramPersonalPanels } from "./telegramPersonalPanels.js"
 import { TelegramCorePanels } from "./telegramCorePanels.js"
 import { TelegramPersonalCommands } from "./telegramPersonalCommands.js"
 import { TelegramModelCommands } from "./telegramModelCommands.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
+import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
+import { TelegramProxyCommands } from "./telegramProxyCommands.js"
+import { TelegramAdminCommands } from "./telegramAdminCommands.js"
+import { TelegramAttachments } from "./telegramAttachments.js"
+import { TelegramMediaSender } from "./telegramMedia.js"
+import { TelegramInfoCommands } from "./telegramInfoCommands.js"
 export { startupNoticeText } from "./telegramSupport.js"
 const MAX_INPUT_LENGTH = 12_000
 const MAX_PENDING = 4
-const MAX_ATTACHMENTS = 4
-const MAX_ATTACH_FILE_BYTES = 10 * 1024 * 1024
-const MAX_ATTACH_TOTAL_BYTES = 15 * 1024 * 1024
-const CHUNK_DELAY_MS = 250
-const TELEGRAM_MAX_TEXT = 4000
 const SHUTDOWN_DRAIN_MS = 3_000
 /** Reconnect attempts after a transport failure to api.telegram.org: 5s, 10s, 20s… capped. */
 const RECONNECT_DELAY_MS = 5_000
@@ -138,11 +126,6 @@ export interface Job {
   onOutcome?: (outcome: UsageOutcome) => void
 }
 
-const AGENT_CONFIRM_TTL_MS = 5 * 60_000
-
-type AgentAction = "install" | "update" | "uninstall"
-const AGENT_ACTION_VERB: Record<AgentAction, string> = { install: "安装", update: "更新", uninstall: "卸载" }
-
 export class TelegramBridge {
   readonly #cfg: BotConfig
   readonly #bot: Bot
@@ -176,11 +159,13 @@ export class TelegramBridge {
   readonly #personalCommands: TelegramPersonalCommands
   readonly #modelCommands: TelegramModelCommands
   readonly #opsCommands: TelegramOpsCommands
+  readonly #agentCommands: TelegramAgentCommands
+  readonly #proxyCommands: TelegramProxyCommands
+  readonly #adminCommands: TelegramAdminCommands
+  readonly #attachments: TelegramAttachments
+  readonly #mediaSender: TelegramMediaSender
+  readonly #infoCommands: TelegramInfoCommands
   readonly #snoozePending = new Map<string, { chatId: number; userId: number; text: string; createdAt: number }>()
-  readonly #agentPending = new Map<
-    string,
-    { chatId: number; action: AgentAction; engine: string; createdAt: number }
-  >()
   #startedAt = Date.now()
   #running = false
   #reconnectTimer?: ReturnType<typeof setTimeout>
@@ -245,7 +230,7 @@ export class TelegramBridge {
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
-      (chatId, text) => this.#deliverReminder(chatId, text),
+      (chatId, text, reminder) => this.#deliverReminder(chatId, text, reminder),
       log,
       this.#timezone,
       (userId) => this.#isAllowedUser(userId),
@@ -364,6 +349,60 @@ export class TelegramBridge {
       offLoop: (chatId, label, run) => this.#offLoop(chatId, label, run),
       maskToken: (text) => this.#maskToken(text),
     })
+    this.#agentCommands = new TelegramAgentCommands({
+      agents: this.#agents,
+      installer: this.#agentInstaller,
+      store: this.#store,
+      log: this.#log,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      agentPanel: (key) => this.#corePanels.agentPanel(key),
+      agentInstallerPanel: () => this.#corePanels.agentInstallerPanel(),
+    })
+    this.#proxyCommands = new TelegramProxyCommands({
+      proxies: this.#proxies,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      proxyPanel: (note) => this.#personalPanels.proxyPanel(note),
+    })
+    this.#adminCommands = new TelegramAdminCommands({
+      cfg: this.#cfg,
+      ops: this.#ops,
+      ownerChatId: this.ownerChatId,
+      timezone: () => this.#timezone,
+      applyLiveEnv: (key, value) => this.#applyLiveEnv(key, value),
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      accessPanel: () => this.#personalPanels.accessPanel(),
+      timezonePanel: (headline) => this.#personalPanels.timezonePanel(headline),
+    })
+    this.#attachments = new TelegramAttachments({
+      bot: this.#bot,
+      cfg: this.#cfg,
+      oc: this.#oc,
+      maskToken: (text) => this.#maskToken(text),
+      log: this.#log,
+    })
+    this.#mediaSender = new TelegramMediaSender({
+      bot: this.#bot,
+      cfg: this.#cfg,
+      proxies: this.#proxies,
+      log: this.#log,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+    })
+    this.#infoCommands = new TelegramInfoCommands({
+      cfg: this.#cfg,
+      log: this.#log,
+      bot: this.#bot,
+      history: this.#history,
+      timezone: () => this.#timezone,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      queuePanel: (key) => this.#personalPanels.queuePanel(key),
+      statusText: (chatId, key) => this.#statusText(chatId, key),
+      statusKeyboard: () => this.#statusKeyboard(),
+      usagePanel: (key) => this.#stats.usagePanel(key),
+    })
     this.#ccCommands = new CcCommands(ccHost, this.#cc, this.#models, log)
   }
 
@@ -406,7 +445,7 @@ export class TelegramBridge {
 
   /** Lets the HTTP API deliver remote media with the same SSRF/proxy guards as Telegram. */
   fetchRemoteMedia(target: string): Promise<Buffer> {
-    return this.#fetchRemoteMedia(target)
+    return this.#mediaSender.fetchRemoteMedia(target)
   }
 
   get currentTimezone(): string {
@@ -575,7 +614,7 @@ export class TelegramBridge {
     // A restart must not leave live one-shot confirm tokens or cached prompts behind
     this.#ccCommands.clearPending()
     this.#opsCommands.clearPending()
-    this.#agentPending.clear()
+    this.#agentCommands.clearPending()
     this.#lastPrompts.clear()
     this.#retryPrompts.clear()
     this.#ccCommands.clearProviders()
@@ -997,24 +1036,24 @@ export class TelegramBridge {
       if (agentRequest) {
         const action = agentRequest[1] as AgentAction
         const engine = agentRequest[2]!
-        const blocked = this.#agentActionBlocked(key, action, engine)
+        const blocked = this.#agentCommands.actionBlocked(key, action, engine)
         if (blocked) {
           await answer(blocked)
           return
         }
         await answer()
-        await this.#requestAgentAction(chatId, key, action, engine)
+        await this.#agentCommands.requestAction(chatId, key, action, engine)
         return
       }
       if (data.startsWith("a:cnl:")) {
         const token = data.slice("a:cnl:".length)
-        const pending = this.#agentPending.get(token)
+        const pending = this.#agentCommands.getPending(token)
         if (pending && pending.chatId !== chatId) {
           await answer("该按钮不属于当前会话")
           return
         }
         // A declined request must not stay executable until its TTL expires
-        this.#agentPending.delete(token)
+        this.#agentCommands.deletePending(token)
         await answer("已取消")
         const panel = await this.#panelFor("agents", chatId, key)
         if (panel) await this.#editPanel(ctx, panel)
@@ -1022,9 +1061,9 @@ export class TelegramBridge {
       }
       if (data.startsWith("a:cfm:")) {
         const token = data.slice("a:cfm:".length)
-        const pending = this.#agentPending.get(token)
+        const pending = this.#agentCommands.getPending(token)
         if (!pending || Date.now() - pending.createdAt > AGENT_CONFIRM_TTL_MS) {
-          this.#agentPending.delete(token)
+          this.#agentCommands.deletePending(token)
           await answer("操作已过期，请重新发起")
           await this.#sendTextMessage(chatId, "⌛ 该确认按钮已过期或已被使用，请重新发起操作。")
           return
@@ -1033,10 +1072,10 @@ export class TelegramBridge {
           await answer("该按钮不属于当前会话")
           return
         }
-        this.#agentPending.delete(token)
+        this.#agentCommands.deletePending(token)
         // Preconditions are re-checked here because the state may have changed
         // between showing the prompt and pressing the button
-        const blocked = this.#agentActionBlocked(key, pending.action, pending.engine)
+        const blocked = this.#agentCommands.actionBlocked(key, pending.action, pending.engine)
         if (blocked) {
           await answer(blocked)
           await this.#sendTextMessage(chatId, `⚠️ ${escapeMarkdown(blocked)}，操作已取消。`)
@@ -1044,7 +1083,7 @@ export class TelegramBridge {
         }
         const verb = AGENT_ACTION_VERB[pending.action]
         await answer(`开始${verb}…`)
-        void this.#runAgentAction(chatId, key, pending.action, pending.engine).catch((err: unknown) => {
+        void this.#agentCommands.runAction(chatId, key, pending.action, pending.engine).catch((err: unknown) => {
           this.#log.error(`agent ${pending.action} failed:`, (err as Error).message)
         })
         return
@@ -1097,7 +1136,7 @@ export class TelegramBridge {
           await answer("未知的白名单操作")
           return
         }
-        const result = this.#mutateAccess(false, [id], ctx.from?.id)
+        const result = this.#adminCommands.mutateAccess(false, [id], ctx.from?.id)
         if (!result.ok) {
           await answer(result.message)
           await this.#editPanel(ctx, this.#accessPanel())
@@ -1176,11 +1215,14 @@ export class TelegramBridge {
           engine = "qoder"
           model = this.#agents.registry.resolveModel(engine, payload)
         } else {
-          const [rawEngine = "", rawIndex = ""] = payload.split(":", 2)
-          engine = rawEngine
+          // Split on the first colon only: a model id may itself contain one
+          const at = payload.indexOf(":")
+          engine = at < 0 ? payload : payload.slice(0, at)
+          const value = at < 0 ? "" : payload.slice(at + 1)
           const profile = this.#agents.registry.get(engine)
-          const index = Number(rawIndex)
-          model = Number.isInteger(index) ? profile?.models?.[index]?.id : undefined
+          // Panels built before a profile reload carry the position; the id is what survives
+          // the list changing under the tap, so it wins whenever the panel offered one
+          model = profile?.models?.find((entry) => entry.id === value)?.id ?? this.#indexedModel(profile, value)
         }
 
         if (this.#store.getEngine(key) !== engine) {
@@ -1305,154 +1347,15 @@ export class TelegramBridge {
   }
 
   async #handleQueue(chatId: number, key: string): Promise<void> {
-    await this.#sendPanel(chatId, this.#queuePanel(key))
+    return this.#infoCommands.handleQueue(chatId, key)
   }
 
-  /** Pairing info for the companion Android app: endpoint, token and exposure hints. */
   async #handleApiInfo(chatId: number): Promise<void> {
-    if (!this.#cfg.api.enabled) {
-      await this.#sendTextMessage(
-        chatId,
-        "⚠️ HTTP API 当前未启用。在 .env 中设置 `API_ENABLED=1` 并重启 Bot 后可用。",
-      )
-      return
-    }
-    let token: string
-    try {
-      token = resolveApiToken(this.#cfg)
-    } catch (err) {
-      const detail = redactSecrets(err instanceof Error ? err.message : String(err))
-      await this.#sendTextMessage(
-        chatId,
-        `⚠️ 无法生成或读取 API 令牌（${escapeMarkdown(detail)}）。请检查 data 目录权限，或在 .env 中直接设置 API_TOKEN。`,
-      )
-      return
-    }
-    const { port, bind } = this.#cfg.api
-    const wildcard = bind === "0.0.0.0" || bind === "::"
-    // The App can only use an address it can actually dial, so a QR needs API_PUBLIC_URL or a
-    // concrete API_BIND; without either the text keeps the placeholder and says how to fix it.
-    const pairingUrl = resolvePairingUrl(this.#cfg)
-    const address = pairingUrl ? `${pairingUrl}/api/v1` : `http://<你的服务器地址>:${port}/api/v1`
-    let qrBuffer: Buffer | undefined
-    // 启用了消息级加密时,把配对密钥一起放进二维码(App 侧自动开启加密)
-    const encKey = resolveEncKey(this.#cfg)?.toString("base64")
-    if (pairingUrl) {
-      try {
-        qrBuffer = await QRCode.toBuffer(
-          JSON.stringify(pairingQrPayload(pairingUrl, token, encKey)),
-          {
-            margin: 2,
-            width: 640,
-            color: { dark: "#0b0c0e", light: "#ffffff" },
-          },
-        )
-      } catch (err) {
-        this.#log.warn(`pairing QR generation failed: ${(err as Error).message}`)
-      }
-    }
-
-    const text =
-      `📱 *安卓 App 配对信息*\n` +
-      `• API 地址: \`${address}\`\n` +
-      `• 访问令牌: \`${token}\`\n\n` +
-      (encKey
-        ? "🔐 消息级加密已启用：二维码含配对密钥，扫码后请求与响应将自动加密。\n\n"
-        : "🔒 消息级加密：未启用。在 .env 设置 `API_ENCRYPTION=1` 并重启后，二维码会带上配对密钥，App 通信将自动加密。\n\n") +
-      (pairingUrl
-        ? ""
-        : "📷 没有附上二维码：服务器还不确定手机该连哪个地址。在 .env 设置 `API_PUBLIC_URL`（局域网如 `http://192.168.1.10:3080`，反向代理如 `https://bot.example.com`，挂在子路径上则连前缀一起写如 `https://bot.example.com/agent-bot`）并重启后，再发一次 /api 就能扫码配对；App 的「设置」页也可以手动填地址。\n\n") +
-      (wildcard
-        ? "⚠️ 当前监听所有网卡。请配合反向代理 / SSH 隧道 / VPN 暴露给手机，并保持令牌鉴权。\n\n"
-        : "") +
-      (!pairingUrl && !wildcard
-        ? "⚠️ 当前仅监听本机回环地址，手机无法直连。可在 .env 设置 `API_BIND=0.0.0.0` 后配合反向代理 / SSH 隧道 / VPN 暴露给手机；令牌鉴权会一直保留。\n\n"
-        : "") +
-      "在 App 的「设置」页也可直接「扫码配对」;令牌持久化在 `data/api-token.json`，设置 `API_TOKEN` 可固定。"
-    if (qrBuffer) {
-      try {
-        await this.#bot.api.sendPhoto(chatId, new InputFile(qrBuffer, "agentbot-pairing.png"), {
-          caption: clip(text, 1000),
-          parse_mode: "Markdown",
-        })
-        return
-      } catch (err) {
-        this.#log.warn(`pairing QR send failed: ${(err as Error).message}`)
-      }
-    }
-    await this.#sendTextMessage(chatId, text)
+    return this.#infoCommands.handleApiInfo(chatId)
   }
 
   async #handleProxyCommand(chatId: number, arg: string): Promise<void> {
-    const [action = "", ...rest] = arg.split(/\s+/).filter(Boolean)
-    if (!action) {
-      await this.#sendPanel(chatId, this.#proxyPanel())
-      return
-    }
-
-    if (action === "add") {
-      const url = rest[0]
-      if (!url) {
-        await this.#sendTextMessage(
-          chatId,
-          "用法：`/proxy add http://127.0.0.1:7890 本地代理`\n支持 `http://`、`https://`、`socks4://`、`socks5://`，可带用户名密码。",
-        )
-        return
-      }
-      await this.#sendTextMessage(chatId, "🧪 正在测试代理，请稍候…")
-      try {
-        const proxy = await this.#proxies.add(url, rest.slice(1).join(" "))
-        await this.#sendTextMessage(
-          chatId,
-          `✅ 代理 #${proxy.id} 测试通过并已添加：${escapeMarkdown(proxy.name)}`,
-        )
-        await this.#sendPanel(chatId, this.#proxyPanel())
-      } catch (err) {
-        await this.#sendTextMessage(chatId, `❌ 添加失败：${err instanceof Error ? err.message : String(err)}`)
-      }
-      return
-    }
-
-    if (action === "use" || action === "del" || action === "test") {
-      const id = Number(rest[0])
-      if (!Number.isInteger(id)) {
-        await this.#sendTextMessage(chatId, `用法：\`/proxy ${action} 编号\`（编号见 \`/proxy\` 列表）。`)
-        return
-      }
-      if (action === "use") {
-        try {
-          const proxy = this.#proxies.use(id)
-          await this.#sendTextMessage(chatId, `✅ 已启用代理 #${proxy.id}：${escapeMarkdown(maskProxyUrl(proxy.url))}`)
-        } catch (err) {
-          await this.#sendTextMessage(chatId, `⚠️ ${err instanceof Error ? err.message : String(err)}`)
-        }
-        return
-      }
-      if (action === "del") {
-        const removed = this.#proxies.remove(id)
-        await this.#sendTextMessage(chatId, removed ? `🗑 已删除代理 #${id}。` : `⚠️ 代理 #${id} 不存在。`)
-        return
-      }
-      const result = await this.#proxies.test(id)
-      await this.#sendTextMessage(
-        chatId,
-        result.ok
-          ? `✅ 代理 #${id} 连接正常（${result.latencyMs ?? 0}ms）。`
-          : `❌ 代理 #${id} 测试失败：${result.message}`,
-      )
-      return
-    }
-
-    if (action === "off") {
-      this.#proxies.disable()
-      await this.#sendTextMessage(chatId, "⏹ 已停用网络代理。")
-      return
-    }
-
-    await this.#sendTextMessage(
-      chatId,
-      "用法：\n• `/proxy` 打开管理面板\n• `/proxy add <地址> [名称]`\n• `/proxy use <编号>`\n• `/proxy test <编号>`\n• `/proxy del <编号>`\n• `/proxy off`",
-    )
+    return this.#proxyCommands.handleProxyCommand(chatId, arg)
   }
 
   #proxyPanel(note?: string): Panel {
@@ -1463,40 +1366,16 @@ export class TelegramBridge {
     return this.#personalPanels.queuePanel(key)
   }
 
-  /** Sends the chat's task history as a downloadable Markdown or JSON document. */
   async #handleExport(chatId: number, key: string, arg: string): Promise<void> {
-    const format = (arg.trim().toLowerCase() || "md").replace(/^\./, "")
-    if (!["md", "markdown", "json"].includes(format)) {
-      await this.#sendTextMessage(chatId, "用法：`/export`（Markdown，默认）或 `/export json`")
-      return
-    }
-    const entries = this.#history.list(key, 50)
-    const stamp = new Date()
-    const pad = (value: number): string => String(value).padStart(2, "0")
-    const name = `agentbot-history-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}`
-    if (format === "json") {
-      const payload = JSON.stringify({ exportedAt: stamp.toISOString(), key, entries }, null, 2)
-      await this.#bot.api.sendDocument(chatId, new InputFile(Buffer.from(payload, "utf8"), `${name}.json`), {
-        caption: `🗂 任务历史（JSON，${entries.length} 条）`,
-      })
-      return
-    }
-    if (entries.length === 0) {
-      await this.#sendTextMessage(chatId, "📭 还没有任务记录，先聊点别的吧。")
-      return
-    }
-    const markdown = formatHistoryMarkdown(entries, { source: `Telegram ${chatId}`, timeZone: this.#timezone })
-    await this.#bot.api.sendDocument(chatId, new InputFile(Buffer.from(markdown, "utf8"), `${name}.md`), {
-      caption: `🗂 任务历史（Markdown，${entries.length} 条）`,
-    })
+    return this.#infoCommands.handleExport(chatId, key, arg)
   }
 
   async #handleStatus(chatId: number, key: string): Promise<void> {
-    await this.#sendTextMessage(chatId, this.#statusText(chatId, key), this.#statusKeyboard())
+    return this.#infoCommands.handleStatus(chatId, key)
   }
 
   async #handleUsage(chatId: number, key: string): Promise<void> {
-    await this.#sendPanel(chatId, this.#usagePanel(key))
+    return this.#infoCommands.handleUsage(chatId, key)
   }
 
   #reportKeyboard(): InlineKeyboard {
@@ -1507,8 +1386,8 @@ export class TelegramBridge {
     return this.#stats.usagePanel(key)
   }
 
-  #historyPanel(key: string, count = 10): Panel {
-    return this.#stats.historyPanel(key, count)
+  #historyPanel(key: string, count = 10, offset = 0): Panel {
+    return this.#stats.historyPanel(key, count, offset)
   }
 
   #statusText(chatId: number, key: string): string {
@@ -1559,54 +1438,7 @@ export class TelegramBridge {
   }
 
   #collectAttachments(message: Message): AttachmentDescriptor[] {
-    const attachments: AttachmentDescriptor[] = []
-
-    if (message.photo?.length) {
-      const largest = message.photo[message.photo.length - 1]!
-      attachments.push({
-        fileId: largest.file_id,
-        kind: "image",
-        name: `photo-${largest.file_id.slice(-8)}.jpg`,
-        mime: "image/jpeg",
-        size: largest.file_size,
-      })
-    }
-
-    if (message.document) {
-      const doc = message.document
-      const mime = doc.mime_type ?? "application/octet-stream"
-      attachments.push({
-        fileId: doc.file_id,
-        kind: mime.startsWith("image/") ? "image" : mime.startsWith("audio/") ? "audio" : "document",
-        name: doc.file_name ?? `document-${doc.file_id.slice(-8)}${extensionFromMime(mime)}`,
-        mime,
-        size: doc.file_size,
-      })
-    }
-
-    if (message.voice) {
-      const mime = message.voice.mime_type ?? "audio/ogg"
-      attachments.push({
-        fileId: message.voice.file_id,
-        kind: "audio",
-        name: `voice-${message.voice.file_id.slice(-8)}${extensionFromMime(mime) || ".ogg"}`,
-        mime,
-        size: message.voice.file_size,
-      })
-    }
-
-    if (message.audio) {
-      const mime = message.audio.mime_type ?? "audio/mpeg"
-      attachments.push({
-        fileId: message.audio.file_id,
-        kind: "audio",
-        name: message.audio.file_name ?? `audio-${message.audio.file_id.slice(-8)}${extensionFromMime(mime) || ".mp3"}`,
-        mime,
-        size: message.audio.file_size,
-      })
-    }
-
-    return attachments.slice(0, MAX_ATTACHMENTS)
+    return this.#attachments.collectAttachments(message)
   }
 
   // Never await #dispatch from an update handler: grammY processes updates
@@ -1813,8 +1645,6 @@ export class TelegramBridge {
     let outcome: UsageOutcome = "failed"
 
     const controller = new AbortController()
-    this.#cancels.set(job.key, controller)
-    this.#runningSince.set(job.key, Date.now())
 
     // Keep sending typing action while generating reply
     let typingActive = true
@@ -1827,6 +1657,10 @@ export class TelegramBridge {
     const typingPromise = typingLoop()
     const tracker = new ProgressTracker(this.#bot, job.chatId)
     try {
+      // Marked busy inside the try: the finally below is what unmarks it, and nothing
+      // between the two may be able to leave the chat stuck as "running"
+      this.#cancels.set(job.key, controller)
+      this.#runningSince.set(job.key, Date.now())
       const input = job.attachments?.length
         ? await this.#buildAttachmentInput(job, activeModel, controller.signal)
         : { text: job.text, files: [] as PromptFile[] }
@@ -1906,298 +1740,16 @@ export class TelegramBridge {
     if (removed > 0) this.#log.debug(`pruned ${removed} idle chat state entries`)
   }
 
-  async #downloadAttachment(chatId: number, att: AttachmentDescriptor, signal?: AbortSignal): Promise<SavedAttachment> {
-    const file = await this.#bot.api.getFile(att.fileId)
-    if (!file.file_path) throw new Error("Telegram 未返回文件路径（文件可能超过 20MB）")
-
-    const url = `https://api.telegram.org/file/bot${this.#cfg.telegram.token}/${file.file_path}`
-    let res: Response
-    try {
-      // /stop must cut downloads short too, not only the engine call after them
-      const timeout = AbortSignal.timeout(60_000)
-      res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
-    } catch (err) {
-      // undici can echo the request URL, which carries the bot token
-      throw new Error(`下载附件失败：${this.#maskToken(redactSecrets((err as Error).message))}`)
-    }
-    if (!res.ok) {
-      // An unread body keeps the undici socket out of the pool for good
-      await res.body?.cancel().catch(() => {})
-      throw new Error(`下载失败 (HTTP ${res.status})`)
-    }
-    const data = Buffer.from(await res.arrayBuffer())
-    if (data.byteLength > this.#cfg.maxInputBytes) {
-      throw new Error(`超过 ${Math.round(this.#cfg.maxInputBytes / 1024 / 1024)}MB 上限`)
-    }
-
-    const saved = saveAttachment(this.#cfg.inboxDir, chatId, att.name, data)
-    const result: SavedAttachment = { ...att, path: saved.path, bytes: data.byteLength }
-    if (isTextAttachment(att.mime, saved.name)) {
-      try {
-        const { text, truncated } = readTextAttachment(saved.path)
-        result.text = text
-        result.truncated = truncated
-      } catch {
-        // treat as binary if decoding fails
-      }
-    }
-    return result
-  }
-
   async #buildAttachmentInput(job: Job, model?: ModelRef, signal?: AbortSignal): Promise<{ text: string; files: PromptFile[] }> {
-    const saved: SavedAttachment[] = []
-    const failed: string[] = []
-    let totalBytes = 0
-
-    for (const att of job.attachments ?? []) {
-      if (totalBytes + (att.size ?? 0) > MAX_ATTACH_TOTAL_BYTES) {
-        failed.push(`${att.name}: 附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
-        continue
-      }
-      try {
-        const item = await this.#downloadAttachment(job.chatId, att, signal)
-        if (totalBytes + item.bytes > MAX_ATTACH_TOTAL_BYTES) {
-          failed.push(`${att.name}: 附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
-          // The copy is already on disk; drop it so oversized batches do not fill the inbox
-          try {
-            unlinkSync(item.path)
-          } catch {
-            // already gone
-          }
-          continue
-        }
-        totalBytes += item.bytes
-        saved.push(item)
-      } catch (err) {
-        // Telegram client errors can quote the API URL, which contains the bot token
-        const detail = this.#maskToken(redactSecrets(err instanceof Error ? err.message : String(err)))
-        failed.push(`${att.name}: ${detail}`)
-      }
-    }
-    pruneInbox(this.#cfg.inboxDir)
-
-    const caps = model ? await this.#oc.inputCapabilities(model) : undefined
-    const stt = await applyStt(saved, { stt: this.#cfg.stt, modelCapabilities: caps, maxBytes: MAX_ATTACH_FILE_BYTES })
-    failed.push(...stt.errors)
-    return buildAttachmentSections(job.text, { saved: stt.saved, failed, modelCapabilities: caps })
+    return this.#attachments.buildAttachmentInput(job, model, signal)
   }
 
   async #handleAgentCommand(job: Job, target?: string): Promise<void> {
-    if (!target) {
-      await this.#sendPanel(job.chatId, this.#agentPanel(job.key))
-      return
-    }
-
-    const [sub = "", rawId = ""] = target.split(/\s+/).filter(Boolean)
-    const normalized = sub.toLowerCase()
-    if (["install", "add", "uninstall", "remove", "del", "delete"].includes(normalized)) {
-      await this.#handleAgentInstallCommand(job, normalized, rawId)
-      return
-    }
-
-    const chosen = this.#agents.registry.resolveEngine(target)
-    if (!chosen) {
-      const ids = ["opencode", ...this.#agents.registry.list().map((profile) => profile.id)]
-      await this.#sendTextMessage(
-        job.chatId,
-        `❌ 未识别的 Agent 引擎：\`${target}\`\n\n可选：${ids.map((id) => `\`${id}\``).join("、")}`,
-      )
-      return
-    }
-
-    this.#store.setEngine(job.key, chosen)
-    this.#log.info(`agent switched [${job.key}] -> ${chosen}`)
-
-    if (chosen === "opencode") {
-      await this.#sendTextMessage(
-        job.chatId,
-        `✅ *已切换至 OpenCode Agent 引擎！*\n\n当前由 OpenCode 提供服务，支持多模型、工具调用与多媒体交互。\n发送 \`/model\` 可切换底层模型。`,
-      )
-      return
-    }
-
-    const profile = this.#agents.registry.get(chosen)!
-    const binPath = this.#agents.registry.binPath(profile)
-    const modelLine = profile.supportsModel
-      ? profile.modelHint
-        ? `\n• 可用模型提示：\`${profile.modelHint}\`（也可发送 \`/model <模型ID>\`）`
-        : `\n• 模型：发送 \`/model <模型ID>\` 指定`
-      : "\n• 模型：由 CLI 自身配置"
-    const installLine = binPath
-      ? `\n• 可执行文件：\`${binPath}\``
-      : `\n• ⚠️ 未检测到 \`${profile.bin}\`${profile.install ? `\n• 安装：${profile.install}` : ""}`
-    await this.#sendTextMessage(
-      job.chatId,
-      `✅ *已切换至 ${escapeMarkdown(profile.label)}！*\n\n${escapeMarkdown(profile.desc)}${modelLine}${installLine}`,
-    )
+    return this.#agentCommands.handleCommand(job, target)
   }
 
   async #handleAgentsCommand(job: Job, arg: string): Promise<void> {
-    const [action = "", rawId = ""] = arg.split(/\s+/).filter(Boolean)
-    if (!action) {
-      await this.#sendPanel(job.chatId, this.#agentInstallerPanel())
-      return
-    }
-    const normalized = action.toLowerCase()
-    if (["install", "add", "uninstall", "remove", "del", "delete", "update", "upgrade"].includes(normalized)) {
-      await this.#handleAgentInstallCommand(job, normalized, rawId)
-      return
-    }
-    await this.#sendTextMessage(
-      job.chatId,
-      "用法：`/agents` 查看检测与安装面板；`/agents install <id>` 安装；`/agents update <id>` 更新 Bot 托管的 CLI；`/agents uninstall <id>` 卸载。",
-    )
-  }
-
-  async #handleAgentInstallCommand(job: Job, action: string, rawId: string): Promise<void> {
-    const uninstall = ["uninstall", "remove", "del", "delete"].includes(action)
-    const update = ["update", "upgrade"].includes(action)
-    if (!rawId) {
-      await this.#sendPanel(job.chatId, this.#agentInstallerPanel())
-      return
-    }
-    const engine = this.#agents.registry.resolveEngine(rawId)
-    const profile = engine && engine !== "opencode" ? this.#agents.registry.get(engine) : undefined
-    if (!engine || !profile) {
-      await this.#sendTextMessage(job.chatId, `❌ 未识别的 Agent CLI：\`${rawId}\`\n发送 \`/agents\` 查看可管理列表。`)
-      return
-    }
-
-    if (uninstall) {
-      if (!this.#agentInstaller.uninstallCommand(engine)) {
-        await this.#sendTextMessage(
-          job.chatId,
-          `ℹ️ ${escapeMarkdown(profile.label)} 不是由 Bot 安装的，无法自动卸载。\n只能卸载通过 \`/agents install\` 安装的 CLI；系统预装版本请手动管理。`,
-        )
-        return
-      }
-      if (this.#store.getEngine(job.key) === engine) {
-        await this.#sendTextMessage(
-          job.chatId,
-          `⚠️ 当前正在使用 ${escapeMarkdown(profile.label)}，请先发送 \`/agent opencode\` 切换后再卸载。`,
-        )
-        return
-      }
-      await this.#requestAgentAction(job.chatId, job.key, "uninstall", engine)
-      return
-    }
-
-    if (update) {
-      if (!this.#agentInstaller.updateCommand(engine)) {
-        await this.#sendTextMessage(
-          job.chatId,
-          `ℹ️ ${escapeMarkdown(profile.label)} 不是由 Bot 安装的，无法自动更新。\n只能更新通过 \`/agents install\` 安装的 CLI；其他方式安装的版本请手动升级。`,
-        )
-        return
-      }
-      await this.#requestAgentAction(job.chatId, job.key, "update", engine)
-      return
-    }
-
-    const installed = this.#agents.registry.binPath(profile)
-    if (installed) {
-      const managed = this.#agentInstaller.isManaged(engine)
-      await this.#sendTextMessage(
-        job.chatId,
-        `✅ 已检测到 ${escapeMarkdown(profile.label)}：\`${installed}\`\n` +
-          (managed
-            ? "该版本由 Bot 托管，可用 `/agents update " + engine + "` 更新、`/agents uninstall " + engine + "` 卸载。"
-            : "该版本不是由 Bot 安装的，Bot 不会自动更新或卸载它。"),
-      )
-      return
-    }
-
-    if (!this.#agentInstaller.installCommand(profile)) {
-      const hint = profile.install ? `\n安装方式：${escapeMarkdown(profile.install)}` : ""
-      await this.#sendTextMessage(
-        job.chatId,
-        `ℹ️ ${escapeMarkdown(profile.label)} 暂不支持在 Telegram 内自动安装。${hint}`,
-      )
-      return
-    }
-
-    await this.#requestAgentAction(job.chatId, job.key, "install", engine)
-  }
-
-  #agentActionBlocked(key: string, action: AgentAction, engine: string): string | undefined {
-    const profile = this.#agents.registry.get(engine)
-    if (!profile || engine === "opencode") return "未识别的 Agent CLI"
-    if (action === "install") {
-      if (this.#agents.registry.binPath(profile)) return `${profile.label} 已安装，无需重复安装`
-      if (!this.#agentInstaller.installCommand(profile)) return `${profile.label} 暂不支持在 Telegram 内自动安装`
-      return undefined
-    }
-    if (!this.#agentInstaller.isManaged(engine)) {
-      return `${profile.label} 不是由 Bot 安装的，无法自动${AGENT_ACTION_VERB[action]}`
-    }
-    if (action === "uninstall" && this.#store.getEngine(key) === engine) return "请先切换到 OpenCode 再卸载"
-    return undefined
-  }
-
-  async #requestAgentAction(chatId: number, key: string, action: AgentAction, engine: string): Promise<void> {
-    const profile = this.#agents.registry.get(engine)
-    if (!profile) {
-      await this.#sendTextMessage(chatId, `❌ 未识别的 Agent CLI：\`${escapeMarkdown(engine)}\``)
-      return
-    }
-    const command =
-      action === "install"
-        ? this.#agentInstaller.installCommand(profile)
-        : action === "update"
-          ? this.#agentInstaller.updateCommand(engine)
-          : this.#agentInstaller.uninstallCommand(engine)
-    if (!command) {
-      const hint = action === "install" && profile.install ? `\n安装方式：${escapeMarkdown(profile.install)}` : ""
-      await this.#sendTextMessage(
-        chatId,
-        `ℹ️ ${escapeMarkdown(profile.label)} 无法在 Telegram 内自动${AGENT_ACTION_VERB[action]}。${hint}`,
-      )
-      return
-    }
-    const verb = AGENT_ACTION_VERB[action]
-    const icon = action === "install" ? "⬇️" : action === "update" ? "🔄" : "🗑"
-    const note =
-      action === "install"
-        ? `仅支持内置的 npm/pip 安装方式；安装完成后可用 \`/agent ${engine}\` 切换。`
-        : action === "update"
-          ? "会覆盖 Bot 托管的版本；更新期间该 CLI 的正在运行任务可能受影响。"
-          : "只会移除由 Bot 安装的版本。"
-    const now = Date.now()
-    for (const [token, pending] of this.#agentPending) {
-      if (now - pending.createdAt > AGENT_CONFIRM_TTL_MS) this.#agentPending.delete(token)
-    }
-    const token = randomBytes(6).toString("hex")
-    this.#agentPending.set(token, { chatId, action, engine, createdAt: now })
-    await this.#sendTextMessage(
-      chatId,
-      `${icon} *确认${verb} ${escapeMarkdown(profile.label)}？*\n\n将执行：\`${command}\`\n\n${note}\n\n` +
-        "_5 分钟内有效，点击确认后执行。_",
-      new InlineKeyboard().text(`✅ 确认${verb}`, `a:cfm:${token}`).text("取消", `a:cnl:${token}`),
-    )
-  }
-
-  async #runAgentAction(
-    chatId: number,
-    key: string,
-    action: AgentAction,
-    engine: string,
-  ): Promise<void> {
-    const profile = this.#agents.registry.get(engine)
-    const label = profile?.label ?? engine
-    const verb = AGENT_ACTION_VERB[action]
-    await this.#sendTextMessage(chatId, `⏳ 正在${verb} ${escapeMarkdown(label)}…（最长 10 分钟，期间可继续使用其他命令）`)
-    const result =
-      action === "install"
-        ? await this.#agentInstaller.install(engine)
-        : action === "uninstall"
-          ? await this.#agentInstaller.uninstall(engine)
-          : await this.#agentInstaller.update(engine)
-    this.#log.info(`agent ${action} [${key}] ${engine}: ${result.ok ? "ok" : "failed"}`)
-
-    let text = result.ok ? `✅ ${escapeMarkdown(result.message)}` : `❌ ${escapeMarkdown(result.message)}`
-    if (result.output) text += `\n\n${escapeMarkdown(result.output.replace(/```/g, "'''"))}`
-    await this.#sendTextMessage(chatId, text)
-    await this.#sendPanel(chatId, this.#agentInstallerPanel())
+    return this.#agentCommands.handleAgentsCommand(job, arg)
   }
 
   async #handleDiagnostics(chatId: number): Promise<void> {
@@ -2250,135 +1802,25 @@ export class TelegramBridge {
   }
 
   async #handleAccessCommand(chatId: number, userId: number, arg: string): Promise<void> {
-    const [rawAction = "list", ...rest] = arg.split(/\s+/).filter(Boolean)
-    const action = rawAction.toLowerCase()
-
-    if (action === "list" || action === "show") {
-      await this.#sendPanel(chatId, this.#accessPanel())
-      return
-    }
-    if (action !== "add" && action !== "del" && action !== "delete" && action !== "remove") {
-      await this.#sendTextMessage(
-        chatId,
-        "用法：`/access` 查看白名单；`/access add <用户 ID>` 添加；`/access del <用户 ID>` 移除。",
-      )
-      return
-    }
-
-    const wanted = rest.map((token) => token.replace(/^@/, ""))
-    if (wanted.length === 0) {
-      await this.#sendTextMessage(chatId, "用法：`/access add <用户 ID>` 或 `/access del <用户 ID>`。")
-      return
-    }
-    const invalid = wanted.filter((token) => !USER_ID_RE.test(token))
-    if (invalid.length > 0) {
-      await this.#sendTextMessage(
-        chatId,
-        `❌ 用户 ID 只能是 20 位以内的数字（收到：${escapeMarkdown(invalid.join("、"))}）。`,
-      )
-      return
-    }
-
-    const result = this.#mutateAccess(action === "add", wanted, userId)
-    if (!result.ok) {
-      await this.#sendTextMessage(chatId, `❌ ${escapeMarkdown(result.message)}`)
-      return
-    }
-    await this.#sendTextMessage(chatId, result.message)
-    await this.#sendPanel(chatId, this.#accessPanel())
+    return this.#adminCommands.handleAccessCommand(chatId, userId, arg)
   }
 
-  /** Shared by /access, its remove buttons and the HTTP API so the guards cannot drift. */
-  #mutateAccess(adding: boolean, wanted: string[], self: number | undefined): { ok: boolean; message: string } {
-    const tokens = wanted.map((token) => token.replace(/^@/, ""))
-    if (tokens.length === 0) return { ok: false, message: "请提供用户 ID。" }
-    const invalid = tokens.filter((token) => !USER_ID_RE.test(token))
-    if (invalid.length > 0) {
-      return { ok: false, message: `用户 ID 只能是 20 位以内的数字（收到：${invalid.join("、")}）。` }
-    }
-    const current = new Set(this.#cfg.telegram.allowUsers)
-    const touched = tokens.filter((id) => (adding ? !current.has(id) : current.has(id)))
-    if (touched.length === 0) {
-      return { ok: false, message: adding ? "这些用户已经在白名单中。" : "这些用户不在白名单中。" }
-    }
-    const next = new Set(current)
-    for (const id of touched) {
-      if (adding) next.add(id)
-      else next.delete(id)
-    }
-    if (!adding) {
-      const rejection = this.#allowListRejection(next, String(self ?? ""))
-      if (rejection) return { ok: false, message: rejection }
-    }
-    const value = sortUserIds(next).join(",")
-    const result = this.#ops.envSet("TELEGRAM_ALLOW_USERS", value, true)
-    if (!result.ok) return { ok: false, message: result.message }
-    this.#applyLiveEnv("TELEGRAM_ALLOW_USERS", value)
-    const names = touched.join("、")
-    return {
-      ok: true,
-      message: `${adding ? `✅ 已加入白名单：${names}` : `🗑 已移出白名单：${names}`}（当前 ${next.size} 个用户，立即生效）。`,
-    }
-  }
-
-  /** Snapshot for the app's /access panel. */
   get accessState(): { users: string[]; allowAll: boolean } {
-    return {
-      users: parseAllowUsers([...this.#cfg.telegram.allowUsers].join(",")),
-      allowAll: this.#cfg.telegram.allowAll,
-    }
+    return this.#adminCommands.accessState
   }
 
-  /** HTTP API counterpart of `/access add`; the owner can never remove themselves. */
   addAccess(ids: string[]): { ok: boolean; message: string } {
-    return this.#mutateAccess(true, ids, this.ownerChatId)
+    return this.#adminCommands.addAccess(ids)
   }
 
   removeAccess(ids: string[]): { ok: boolean; message: string } {
-    return this.#mutateAccess(false, ids, this.ownerChatId)
-  }
-
-  /** Lockout guards shared by the `/access` command and its remove buttons. */
-  #allowListRejection(next: Set<string>, self: string): string | undefined {
-    if (this.#cfg.telegram.allowAll) return undefined
-    if (!next.has(self) && this.#cfg.telegram.allowUsers.has(self)) {
-      return "不能把自己移出白名单，否则你将无法再控制 Bot。"
-    }
-    if (next.size === 0) return "白名单不能为空：至少保留 1 个用户 ID，或设置 TELEGRAM_ALLOW_ALL_USERS=1。"
-    return undefined
-  }
-
-  #timezonePanel(headline?: string): string {
-    return this.#personalPanels.timezonePanel(headline)
+    return this.#adminCommands.removeAccess(ids)
   }
 
   async #handleTimeZone(chatId: number, arg: string): Promise<void> {
-    const zone = arg.trim()
-    if (!zone) {
-      const keyboard = new InlineKeyboard()
-      for (let offset = 0; offset < TIMEZONE_PRESETS.length; offset += 3) {
-        for (const preset of TIMEZONE_PRESETS.slice(offset, offset + 3)) {
-          keyboard.text(preset === this.#timezone ? `✅ ${preset}` : preset, `tz:${preset}`)
-        }
-        keyboard.row()
-      }
-      await this.#sendTextMessage(chatId, this.#timezonePanel(), keyboard)
-      return
-    }
-
-    const result = this.#ops.envSet("REMINDER_TIMEZONE", zone)
-    if (!result.ok) {
-      await this.#sendTextMessage(
-        chatId,
-        `❌ ${escapeMarkdown(result.message)}\n\n发送 \`/timezone\` 可查看全部常用时区。`,
-      )
-      return
-    }
-    this.#applyLiveEnv("REMINDER_TIMEZONE", zone)
-    await this.#sendTextMessage(chatId, this.#timezonePanel(`✅ 已切换时区：${zone}`))
+    return this.#adminCommands.handleTimeZone(chatId, arg)
   }
 
-  /** `/dir` — the working directory CLI engines start in for this chat. */
   async #handleDirCommand(job: Job, arg?: string): Promise<void> {
     return this.#modelCommands.handleDirCommand(job, arg)
   }
@@ -2447,8 +1889,20 @@ export class TelegramBridge {
     this.#modelCommands.applyCliModel(key, engine, model)
   }
 
+  /**
+   * A panel rendered before this session's callback data carried model ids sends a position
+   * instead, which only means something while the profile list has not changed.
+   */
+  #indexedModel(profile: { models?: Array<{ id: string }> } | undefined, value: string): string | undefined {
+    const index = Number(value)
+    return value !== "" && Number.isInteger(index) && index >= 0 ? profile?.models?.[index]?.id : undefined
+  }
+
   async #panelFor(which: string, chatId: number, key: string): Promise<Panel | undefined> {
-    switch (which) {
+    // Page buttons carry their argument in the callback data ("reminders:2"), so dispatch
+    // on the panel name; matching the whole string left every pagination link in default.
+    const [name, argument, second] = which.split(":")
+    switch (name) {
       case "menu": return this.#menuPanel(chatId, key)
       case "help": return { text: HELP, keyboard: this.#menuKeyboard() }
       case "agent": return this.#agentPanel(key)
@@ -2457,19 +1911,23 @@ export class TelegramBridge {
       case "dir": return this.#dirPanel(key)
       case "access": return this.#accessPanel()
       case "reminders": {
-        const rawPage = Number(which.split(":")[1])
+        const rawPage = Number(argument)
         return this.#remindersPanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
       }
       case "schedule": {
-        const rawPage = Number(which.split(":")[1])
+        const rawPage = Number(argument)
         return this.#schedulePanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
       }
       case "queue": return this.#queuePanel(key)
       case "proxy": return this.#proxyPanel()
       case "usage": return this.#usagePanel(key)
       case "history": {
-        const rawCount = Number(which.split(":")[1])
-        return this.#historyPanel(key, Number.isInteger(rawCount) && rawCount > 0 ? rawCount : 10)
+        // "show:history:<page size>:<offset>" — the offset is what makes 「更早」 move on
+        const rawCount = Number(argument)
+        const rawOffset = Number(second)
+        const count = Number.isInteger(rawCount) && rawCount > 0 ? rawCount : 10
+        const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0
+        return this.#historyPanel(key, count, offset)
       }
       case "cc": return await this.#ccCommands.panel(chatId)
       case "ops": return await this.#opsPanel()
@@ -2650,190 +2108,7 @@ export class TelegramBridge {
   }
 
   async #sendReply(job: Job, reply: string): Promise<void> {
-    const { parts, dropped } = parseReply(reply || "")
-    if (dropped > 0) {
-      this.#log.warn(`ignored ${dropped} media directive(s) [${job.key}]`)
-    }
-    if (parts.length === 0) {
-      parts.push({ type: "text", text: "（模型没有返回内容）" })
-    }
-
-    for (const part of parts) {
-      if (part.type === "text") {
-        const chunks = splitMessage(part.text, Math.min(this.#cfg.maxReplyLength, TELEGRAM_MAX_TEXT))
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i] as string
-          if (!(await this.#sendTextMessage(job.chatId, chunk))) {
-            await sleep(500)
-            if (!(await this.#sendTextMessage(job.chatId, chunk))) {
-              this.#log.warn(`failed to deliver reply chunk ${i + 1}/${chunks.length} [${job.key}]`)
-            }
-          }
-          if (i < chunks.length - 1) await sleep(CHUNK_DELAY_MS)
-        }
-      } else {
-        await this.#sendMediaPart(job, part)
-      }
-      await sleep(CHUNK_DELAY_MS)
-    }
-  }
-
-  async #sendMediaPart(job: Job, part: Extract<ReplyPart, { type: "media" }>): Promise<void> {
-    try {
-      const media = resolveMedia(part.kind, part.target, this.#cfg.outboxDir, this.#cfg.maxMediaBytes)
-      const size = media.size > 0 ? ` ${Math.round(media.size / 1024)}KB` : ""
-      this.#log.info(`media [${job.key}] ${part.kind} ${media.name}${size}`)
-
-      let buffer: Buffer | undefined
-      if (media.isUrl) {
-        buffer = await this.#fetchRemoteMedia(media.target)
-      }
-
-      if (part.kind === "image") {
-        try {
-          if (buffer) {
-            await this.#bot.api.sendPhoto(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendPhoto(job.chatId, new InputFile(media.hostPath))
-          }
-        } catch (photoErr) {
-          this.#log.warn(`sendPhoto failed (${(photoErr as Error).message}), falling back to sendDocument`)
-          if (buffer) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(media.hostPath, media.name))
-          }
-        }
-      } else if (part.kind === "voice") {
-        try {
-          if (buffer) {
-            await this.#bot.api.sendVoice(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendVoice(job.chatId, new InputFile(media.hostPath))
-          }
-        } catch (voiceErr) {
-          this.#log.warn(`sendVoice failed (${(voiceErr as Error).message}), falling back to sendDocument`)
-          if (buffer) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(media.hostPath, media.name))
-          }
-        }
-      } else if (part.kind === "video") {
-        try {
-          if (buffer) {
-            await this.#bot.api.sendVideo(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendVideo(job.chatId, new InputFile(media.hostPath))
-          }
-        } catch (videoErr) {
-          this.#log.warn(`sendVideo failed (${(videoErr as Error).message}), falling back to sendDocument`)
-          if (buffer) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(buffer, media.name))
-          } else if (media.hostPath) {
-            await this.#bot.api.sendDocument(job.chatId, new InputFile(media.hostPath, media.name))
-          }
-        }
-      } else if (part.kind === "file") {
-        if (buffer) {
-          await this.#bot.api.sendDocument(job.chatId, new InputFile(buffer, media.name))
-        } else if (media.hostPath) {
-          await this.#bot.api.sendDocument(job.chatId, new InputFile(media.hostPath, media.name))
-        }
-      }
-    } catch (err) {
-      // The detail is CLI/HTTP text: it can carry Markdown markers and a signed URL
-      const detail = escapeMarkdown(redactSecrets(err instanceof Error ? err.message : String(err)))
-      this.#log.error(`media failed [${job.key}] ${part.kind}:`, detail)
-      await this.#sendTextMessage(job.chatId, `⚠️ ${mediaLabel(part.kind)}发送失败：${detail}`)
-    }
-  }
-
-  async #fetchRemoteMedia(target: string): Promise<Buffer> {
-    let current = target
-    for (let hop = 0; ; hop++) {
-      const { url, pins } = await assertUrlAllowed(current, this.#cfg.mediaAllowPrivateUrls)
-      const headers = {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "*/*",
-      }
-      // Re-resolving DNS here would allow a rebinding to an internal host, so a
-      // validated hostname is pinned to the addresses that passed the check.
-      // Pinning only applies to a direct connection: a proxy resolves the name
-      // on its own network, so the private-address check above is the only guard
-      // there and a proxy the bot cannot reach (e.g. someone else's) stays unsafe.
-      const viaProxy = this.#proxies.dispatcher()
-      const pinned = viaProxy || pins.length === 0 ? undefined : new Agent({ connect: { lookup: pinnedLookup(url.hostname, pins) } })
-      const dispatcher = viaProxy ?? pinned
-      try {
-        const res = dispatcher
-          ? await undiciFetch(url, {
-              headers,
-              redirect: "manual",
-              signal: AbortSignal.timeout(20_000),
-              dispatcher,
-            })
-          : await fetch(url, {
-              headers,
-              redirect: "manual",
-              signal: AbortSignal.timeout(20_000),
-            })
-
-        if (res.status >= 300 && res.status < 400) {
-          const location = res.headers.get("location")
-          await res.body?.cancel().catch(() => {})
-          if (!location || hop >= 3) throw new Error("媒体链接重定向次数过多")
-          current = new URL(location, url).toString()
-          continue
-        }
-        if (!res.ok) {
-          await res.body?.cancel().catch(() => {})
-          throw new Error(`无法获取远程地址 (HTTP ${res.status}): ${safeMediaTarget(target)}`)
-        }
-        return await this.#readCappedBody(res)
-      } finally {
-        if (pinned) await pinned.close().catch(() => {})
-      }
-    }
-  }
-
-  async #readCappedBody(res: {
-    headers: { get(name: string): string | null }
-    body: {
-      getReader(): {
-        read(): Promise<{ done: boolean; value?: Uint8Array }>
-        cancel(reason?: unknown): Promise<void>
-        releaseLock(): void
-      }
-    } | null
-  }): Promise<Buffer> {
-    const limit = this.#cfg.maxMediaBytes
-    const declared = Number(res.headers.get("content-length"))
-    if (Number.isFinite(declared) && declared > limit) {
-      throw new Error(`远程文件超过 ${Math.round(limit / 1024 / 1024)}MB 限制`)
-    }
-    if (!res.body) throw new Error("远程响应为空")
-
-    const reader = res.body.getReader()
-    const chunks: Uint8Array[] = []
-    let total = 0
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (!value) continue
-        total += value.byteLength
-        if (total > limit) {
-          await reader.cancel().catch(() => {})
-          throw new Error(`远程文件超过 ${Math.round(limit / 1024 / 1024)}MB 限制`)
-        }
-        chunks.push(value)
-      }
-    } finally {
-      reader.releaseLock()
-    }
-    return Buffer.concat(chunks, total)
+    return this.#mediaSender.sendReply(job, reply)
   }
 
   /** The engine-call context handed to the shared callEngine() helper. */

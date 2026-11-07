@@ -232,3 +232,31 @@ test("runSetup keeps edits another process made to .env while the wizard was ope
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("apiCall failures redact the token that the error URL would otherwise echo", async () => {
+  const token = "123456789:AAExampleTokenForRedactionTest"
+  const leaked: string[] = []
+  // getMe 网络错误:undici 的 message 会带上完整 URL(含 token),redactToken 必须遮蔽
+  const deps = {
+    ask: async (question: string) => {
+      if (question.includes("粘贴")) return token
+      if (question.includes("重试")) return "n"
+      return ""
+    },
+    print: (line = "") => {
+      leaked.push(line)
+    },
+    fetch: (async (url: string | URL | Request) => {
+      throw new Error(`fetch failed: ${String(url)}`)
+    }) as unknown as typeof fetch,
+    envPath: "/tmp/does-not-matter.env",
+  }
+
+  // 三次 getMe 重试都失败 → 向导询问是否仍保存 → 回 n 走取消分支
+  const result = await runSetup(deps)
+  assert.equal(result.ok, false)
+  const failureLine = leaked.find((line) => line.includes("连接 Telegram 失败"))
+  assert.ok(failureLine, "the failure branch printed its warning")
+  assert.ok(!failureLine.includes(token), "the token must be masked in the printed failure")
+  assert.match(failureLine, /\*\*\*/)
+})

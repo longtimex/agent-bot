@@ -7,7 +7,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const SESSION_FILE = path.resolve(__dirname, "../data/email/session.json");
-const CHROME_PATH = "/data/home/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
+// Playwright 的浏览器路径按版本号变化:优先环境变量,再从缓存目录探测最新版,
+// 最后回退到历史硬编码路径(本沙箱的安装位置)。
+function detectChromePath() {
+  try {
+    const root = "/data/home/.cache/ms-playwright";
+    const dir = fs
+      .readdirSync(root)
+      .filter((name) => name.startsWith("chromium-"))
+      .sort()
+      .pop();
+    return dir ? `${root}/${dir}/chrome-linux64/chrome` : "";
+  } catch {
+    return "";
+  }
+}
+const CHROME_PATH =
+  process.env.CHROME_PATH || detectChromePath() || "/data/home/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
 
 export async function getLatestEmails(limit = 5) {
   if (!fs.existsSync(SESSION_FILE)) {

@@ -1,6 +1,5 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { dirname, isAbsolute } from "node:path"
-import { readJsonObject } from "./jsonStore.js"
+import { isAbsolute } from "node:path"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 
 /** Engine ids are dynamic: `opencode`, `qoder`, `claude`, or any custom profile. */
@@ -257,11 +256,7 @@ export class SessionStore {
 
   #save(): void {
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, JSON.stringify(this.#data, null, 2), { mode: 0o600 })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(this.#path, JSON.stringify(this.#data, null, 2))
     } catch (err) {
       this.#log.warn("failed to persist session store:", (err as Error).message)
     }

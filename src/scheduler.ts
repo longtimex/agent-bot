@@ -1,6 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
 import type { Logger } from "./logger.js"
+import { writePrivateAtomic } from "./jsonStore.js"
 import { clip } from "./messages.js"
 import { AVAILABLE_MODELS, resolveModelKey, resolveQoderModel } from "./models.js"
 import {
@@ -361,11 +361,10 @@ export class ScheduleStore {
       return
     }
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, JSON.stringify({ nextId: this.#nextId, tasks: this.#tasks }, null, 2), { mode: 0o600 })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(
+        this.#path,
+        JSON.stringify({ nextId: this.#nextId, tasks: this.#tasks }, null, 2),
+      )
     } catch (err) {
       this.#log.warn("failed to persist schedule store:", (err as Error).message)
     }

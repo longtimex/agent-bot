@@ -255,12 +255,14 @@ export class TelegramOpsCommands {
     }
     if (action === "cc") {
       await answer()
-      await this.confirmCcSwitch(chatId)
+      // confirmCcSwitch runs a full diagnostics pass to know whether to offer install
+      // or update, and that shells out to git and cc-switch
+      this.#deps.offLoop(chatId, "cc-switch 安装", () => this.confirmCcSwitch(chatId))
       return
     }
     if (action === "svc") {
       await answer()
-      await this.#deps.sendPanel(chatId, await this.servicePanel())
+      this.#deps.offLoop(chatId, "服务面板", () => this.sendServicePanel(chatId))
       return
     }
     if (action === "svc:start") {
@@ -484,12 +486,21 @@ export class TelegramOpsCommands {
     }
   }
 
+  /**
+   * The service panel asks OpenCode whether it answers, which costs up to the health
+   * timeout, so every caller runs this through `offLoop` instead of awaiting it on the
+   * update loop.
+   */
+  async sendServicePanel(chatId: number): Promise<void> {
+    await this.#deps.sendPanel(chatId, await this.servicePanel())
+  }
+
   async handleServiceCommand(chatId: number, arg: string): Promise<void> {
     const tokens = arg.split(/\s+/).filter(Boolean)
     let action = (tokens[0] ?? "").toLowerCase()
     if (action === "opencode") action = (tokens[1] ?? "").toLowerCase()
     if (!action || action === "status") {
-      await this.#deps.sendPanel(chatId, await this.servicePanel())
+      this.#deps.offLoop(chatId, "服务面板", () => this.sendServicePanel(chatId))
       return
     }
     if (action === "start") {

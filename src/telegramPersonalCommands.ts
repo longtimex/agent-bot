@@ -85,7 +85,9 @@ export class TelegramPersonalCommands {
       await this.#deps.sendText(chatId, `⚠️ 未找到编号为 #${id} 的提醒，发送 \`/reminders\` 查看当前列表。`)
       return
     }
-    await this.#deps.sendText(chatId, `✅ 已取消提醒 #${removed.id}：${removed.text}`)
+    // The reminder text is whatever the user typed, and the panel escapes it the same
+    // way; a stray * or _ here would fail the Markdown parse instead of the reply
+    await this.#deps.sendText(chatId, `✅ 已取消提醒 #${removed.id}：${escapeMarkdown(removed.text)}`)
   }
 
   async handleAliasCommand(chatId: number, arg: string): Promise<void> {

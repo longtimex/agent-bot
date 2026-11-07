@@ -22,6 +22,12 @@ test("parseReply extracts media in order", () => {
     { type: "text", text: "说明" },
   ])
   assert.equal(result.dropped, 0)
+  // 大写 KIND 由 gi 正则匹配并归一化为小写
+  const upper = parseReply("[[IMAGE:outbox/a.png]] [[Video:outbox/b.mp4]]")
+  assert.deepEqual(
+    upper.parts.filter((part) => part.type === "media").map((part) => part.kind),
+    ["image", "video"],
+  )
 })
 
 test("parseReply handles only directives and mixed text", () => {

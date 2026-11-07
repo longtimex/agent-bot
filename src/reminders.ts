@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
+import { writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 
 export const DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -421,6 +421,9 @@ export class ReminderStore {
     if (index < 0) return undefined
     const item = this.#reminders[index]!
     if (item.repeat) return undefined
+    // tick() has already handed this one to Telegram and settles it once the send
+    // returns, so moving dueAt now would be overwritten by the deletion it follows
+    if (item.runningAt) return undefined
     this.#assertWritable()
     item.dueAt = now + minutes * 60_000
     item.attempts = undefined
@@ -515,11 +518,7 @@ export class ReminderStore {
       return
     }
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, JSON.stringify({ nextId: this.#nextId, reminders: this.#reminders }, null, 2), { mode: 0o600 })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(this.#path, JSON.stringify({ nextId: this.#nextId, reminders: this.#reminders }, null, 2))
     } catch (err) {
       this.#log.warn("failed to persist reminder store:", (err as Error).message)
     }

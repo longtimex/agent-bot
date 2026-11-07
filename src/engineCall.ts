@@ -42,9 +42,16 @@ export interface EngineCallOptions {
  * spawn through AgentCliService, OpenCode reuses the stored session and
  * transparently recovers when the server lost it (404).
  */
-export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {
-  if (opts.engine !== "opencode") {
-    return deps.agents.prompt(opts.key, opts.engine, opts.text, opts.cliModel, opts.onProgress, opts.signal)
+export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {  if (opts.engine !== "opencode") {
+    const notice = cliAttachmentNotice(opts.files)
+    return deps.agents.prompt(
+      opts.key,
+      opts.engine,
+      notice ? `${opts.text}\n\n${notice}` : opts.text,
+      opts.cliModel,
+      opts.onProgress,
+      opts.signal,
+    )
   }
 
   const model = opts.model ?? defaultOpencodeModel(deps.opencodeModel)
@@ -89,8 +96,19 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
   }
 }
 
-/** The stored selection wins, then the configured default, then the builtin fallback. */
-export function resolveOpencodeModel(
+/**
+ * CLI profiles pass the prompt as one argv string and declare no attachment flags, so a
+ * binary part cannot reach them at all. The manifest built upstream already names each
+ * saved file's absolute path, which a CLI can open with its own tools; what it cannot do
+ * is see a picture, so say that instead of letting the agent guess.
+ */
+export function cliAttachmentNotice(files?: PromptFile[]): string | undefined {
+  if (!files || files.length === 0) return undefined
+  const names = files.map((file) => file.filename).join("、")
+  return `[二进制附件] ${names} 未随本次请求传给 CLI 引擎，只能用附件清单里的绝对路径自行读取；图片、音频和扫描件请切换到 OpenCode 引擎。`
+}
+
+/** The stored selection wins, then the configured default, then the builtin fallback. */export function resolveOpencodeModel(
   store: SessionStore,
   configured: ModelRef | undefined,
   key: string,

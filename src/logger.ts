@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, readdirSync, statSync, truncateSync, unlinkSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
+import { redactSecrets } from "./ccswitch.js"
 
 export type LogLevel = "debug" | "info" | "warn" | "error"
 
@@ -70,7 +71,8 @@ export function createLogger(level: LogLevel = "info"): Logger {
     if (order[lvl] < threshold) return
     const prefix = `${new Date().toISOString()} ${lvl.toUpperCase().padEnd(5)}`
     const sink = lvl === "error" ? console.error : lvl === "warn" ? console.warn : console.log
-    sink(prefix, ...args)
+    // bot.log is tailable by /logs and quoted into bug reports: no line may carry a credential
+    sink(prefix, ...args.map((arg) => (typeof arg === "string" ? redactSecrets(arg) : arg)))
   }
 
   return {

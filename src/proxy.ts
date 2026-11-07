@@ -1,12 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, unlinkSync } from "node:fs"
 import { dirname } from "node:path"
 import { Agent, ProxyAgent, fetch, type Dispatcher } from "undici"
-import { readJsonObject } from "./jsonStore.js"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { SocksClient } from "socks"
 import tls from "node:tls"
 import type { Logger } from "./logger.js"
 import { clip } from "./messages.js"
 import { describeFetchError } from "./opencode.js"
+import { redactSecrets } from "./ccswitch.js"
 
 export type ProxyProtocol = "http" | "https" | "socks4" | "socks5"
 
@@ -178,8 +179,10 @@ async function defaultTester(url: string, protocol: ProxyProtocol): Promise<void
     await res.body?.cancel().catch(() => {})
     if (res.status < 200 || res.status >= 400) throw new Error(`代理返回 HTTP ${res.status}`)
   } catch (err) {
+    // undici surfaces the proxy URI (with its userinfo) inside connect failures
     const detail = describeFetchError(err) ?? (err instanceof Error ? err.message : String(err))
-    throw new Error(/abort/i.test(detail) ? "连接超时（10 秒）" : detail)
+    const safe = redactSecrets(detail)
+    throw new Error(/abort/i.test(safe) ? "连接超时（10 秒）" : safe)
   } finally {
     clearTimeout(timer)
     await dispatcher.close().catch(() => {})
@@ -229,7 +232,13 @@ export class ProxyService {
       throw new Error("这个代理已经添加过了。")
     }
 
-    await this.#tester(parsed.url, parsed.protocol)
+    // The chat echoes whatever the tester reports, and a proxy URL carries its own
+    // credentials, so this is the boundary that keeps them out of the conversation
+    try {
+      await this.#tester(parsed.url, parsed.protocol)
+    } catch (err) {
+      throw new Error(redactSecrets(err instanceof Error ? err.message : String(err)))
+    }
 
     // The duplicate check ran before the tester await: a concurrent add of the
     // same URL would have slipped past it, so recheck before committing
@@ -294,7 +303,7 @@ export class ProxyService {
       await this.#tester(proxy.url, proxy.protocol)
       return { ok: true, message: "连接正常", latencyMs: Date.now() - started }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail = redactSecrets(err instanceof Error ? err.message : String(err))
       return { ok: false, message: detail, latencyMs: Date.now() - started }
     }
   }
@@ -376,13 +385,8 @@ export class ProxyService {
 
   #save(): void {
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, JSON.stringify({ nextId: this.#nextId, activeId: this.#activeId, proxies: this.#proxies }, null, 2), {
-        mode: 0o600,
-      })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      const body = { nextId: this.#nextId, activeId: this.#activeId, proxies: this.#proxies }
+      writePrivateAtomic(this.#path, JSON.stringify(body, null, 2))
     } catch (err) {
       this.#log.warn("failed to persist proxy store:", (err as Error).message)
     }
@@ -407,11 +411,7 @@ export class ProxyService {
         `export NO_PROXY=${quote(NO_PROXY)}`,
         `export no_proxy=${quote(NO_PROXY)}`,
       ]
-      mkdirSync(dirname(this.#envPath), { recursive: true })
-      const tmp = `${this.#envPath}.tmp`
-      writeFileSync(tmp, `${lines.join("\n")}\n`, { mode: 0o600 })
-      renameSync(tmp, this.#envPath)
-      chmodSync(this.#envPath, 0o600)
+      writePrivateAtomic(this.#envPath, `${lines.join("\n")}\n`)
     } catch (err) {
       this.#log.warn("failed to write proxy env file:", (err as Error).message)
     }

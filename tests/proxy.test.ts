@@ -179,3 +179,29 @@ test("ProxyService closes the proxy tunnel when the proxy is turned off or remov
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a failed add or test never echoes the proxy password into chat", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-proxy-secret-"))
+  try {
+    const leaky = 'connect failed for socks5://user:s3cret@proxy.test:1080'
+    const service = new ProxyService(join(dir, "proxies.json"), log, {
+      envPath: join(dir, "proxy.env"),
+      tester: async () => {
+        throw new Error(leaky)
+      },
+    })
+
+    await assert.rejects(
+      () => service.add("socks5://user:s3cret@proxy.test:1080", "home"),
+      (err: Error) => {
+        assert.ok(!err.message.includes("s3cret"), err.message)
+        assert.match(err.message, /proxy\.test:1080/, "the host still has to be recognizable")
+        return true
+      },
+    )
+    assert.deepEqual(service.list(), [], "a failed add must not commit the proxy")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+

@@ -1,6 +1,4 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
-import { readJsonObject } from "./jsonStore.js"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 
 export type UsageOutcome = "ok" | "failed" | "cancelled"
@@ -282,12 +280,8 @@ export class UsageStore {
 
   #save(): void {
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
       const body: UsageFile = { version: 1, chats: this.#chats }
-      writeFileSync(tmp, JSON.stringify(body, null, 2), { mode: 0o600 })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(this.#path, JSON.stringify(body, null, 2))
     } catch (err) {
       this.#log.warn("failed to persist usage store:", (err as Error).message)
     }

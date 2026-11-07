@@ -1,7 +1,5 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
 import { redactSecrets } from "./ccswitch.js"
-import { readJsonObject } from "./jsonStore.js"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 import { clip } from "./messages.js"
 import type { UsageOutcome } from "./usage.js"
@@ -119,9 +117,10 @@ export class TaskHistoryStore {
     return dropped
   }
 
-  list(key: string, limit = 10): HistoryEntry[] {
+  list(key: string, limit = 10, offset = 0): HistoryEntry[] {
     const size = Math.max(0, Math.floor(limit))
-    return this.#entries(key).slice(0, size).map((entry) => ({ ...entry }))
+    const from = Math.max(0, Math.floor(offset))
+    return this.#entries(key).slice(from, from + size).map((entry) => ({ ...entry }))
   }
 
   count(key: string): number {
@@ -171,12 +170,8 @@ export class TaskHistoryStore {
 
   #save(): void {
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
-      const tmp = `${this.#path}.tmp`
       const body: HistoryFile = { version: 1, chats: this.#chats }
-      writeFileSync(tmp, JSON.stringify(body, null, 2), { mode: 0o600 })
-      renameSync(tmp, this.#path)
-      chmodSync(this.#path, 0o600)
+      writePrivateAtomic(this.#path, JSON.stringify(body, null, 2))
     } catch (err) {
       this.#log.warn("failed to persist task history:", (err as Error).message)
     }

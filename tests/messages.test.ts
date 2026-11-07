@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { splitMessage } from "../src/messages.js"
+import { escapeMarkdown, splitMessage } from "../src/messages.js"
 
 test("splitMessage keeps short text intact", () => {
   assert.deepEqual(splitMessage("hello", 100), ["hello"])
@@ -89,4 +89,41 @@ test("splitMessage closes and reopens an inline span that starts too early to re
   for (const word of ["alpha", "zeta", "lorem", "adipiscing", "tempor", "rest"]) {
     assert.match(recovered, new RegExp(word))
   }
+})
+
+test("splitMessage spends the closing inline marker from the chunk budget", () => {
+  // The reopened span above was cut at a space, so the appended backtick fit. With no
+  // whitespace in the window the head fills `max` exactly, and the marker used to land on
+  // top of it: every chunk came back one character longer than the caller's limit
+  for (const max of [50, 200, 1_500]) {
+    const body = "a".repeat(max * 3)
+    const chunks = splitMessage("`" + body, max)
+
+    assert.ok(chunks.length > 1)
+    for (const chunk of chunks) {
+      assert.ok(chunk.length <= max, `chunk too long: ${chunk.length} > ${max}`)
+    }
+    assert.equal(chunks.join("").replace(/`/g, ""), body, "no text may be added or lost")
+  }
+
+  // The character handed to the next chunk must not split an emoji either
+  const pairs = "🚀".repeat(40)
+  const chunks = splitMessage("`" + pairs, 50)
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 50, `chunk too long: ${chunk.length} > 50`)
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(chunk), `lone high surrogate:\n${chunk}`)
+    assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(chunk), `lone low surrogate:\n${chunk}`)
+  }
+  assert.equal(chunks.join("").replace(/`/g, ""), pairs)
+})
+
+test("escapeMarkdown escapes every character the legacy Markdown parser treats specially", () => {
+  // 不含字面反斜杠的输入:每个特殊字符前加反斜杠,剥离后往返一致
+  const raw = "_*`[a]*"
+  const escaped = escapeMarkdown(raw)
+  assert.equal(escaped.replace(/\\([_*`[\]\\])/g, "$1"), raw)
+  assert.ok(escaped.startsWith("\\_"), "the first escape lands before the underscore")
+
+  // 字面反斜杠本身被转义为双反斜杠
+  assert.equal(escapeMarkdown("a\\b"), "a\\\\b")
 })

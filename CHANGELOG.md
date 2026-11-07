@@ -8,8 +8,10 @@
 
 - **API 防爆破与响应加固**：`/api/v1` 现在按客户端地址统计失败的 Bearer 认证（60 秒内 10 次后暂停 5 分钟），JSON 响应统一带 `no-store`、`nosniff`、`DENY`、`no-referrer` 与 `default-src 'none'` 安全头；请求/头部/空闲连接超时收敛到 120s/30s/5s，大于 1KB 的 JSON 在客户端声明 `gzip` 时压缩返回。
 - **任务记录回收补齐**：任务超过 200 条被清理时，同步删除该任务的 SSE 订阅与节流时间戳，避免长期运行时按任务 ID 累积的小对象。
-- **超大源文件拆分**：cc-switch 路由与白名单表拆到 `src/apiCc.ts` / `src/apiCcSpecs.ts`，HTTP 基础类型拆到 `src/apiCore.ts`；内置 Agent CLI 档案拆到 `src/agentProfiles.ts`，Telegram 的纯格式化/时间/ID 辅助拆到 `src/telegramSupport.ts`。`src/api.ts` 由 2655 行降到约 1200 行，`src/agentCli.ts` 由 1357 行降到约 1060 行，`src/telegram.ts` 由 4263 行降到约 2730 行（统计面板、个人数据面板、核心面板、个人命令、模型命令与运维命令分别拆到 `telegramStats.ts` / `telegramPersonalPanels.ts` / `telegramCorePanels.ts` / `telegramPersonalCommands.ts` / `telegramModelCommands.ts` / `telegramOpsCommands.ts`）。API 的任务队列、SSE、重试与附件处理独立为 `src/apiTasks.ts`，路由只负责解码并调用服务，对应 T3 Code 的「transport 保持轻薄，能力放在 service」约定。
+- **超大源文件拆分**：cc-switch 路由与白名单表拆到 `src/apiCc.ts` / `src/apiCcSpecs.ts`，HTTP 基础类型拆到 `src/apiCore.ts`；内置 Agent CLI 档案拆到 `src/agentProfiles.ts`，Telegram 的纯格式化/时间/ID 辅助拆到 `src/telegramSupport.ts`。`src/api.ts` 由 2655 行降到约 1200 行，`src/agentCli.ts` 由 1357 行降到约 1060 行，`src/telegram.ts` 由 4263 行降到约 2106 行（统计面板、个人数据面板、核心面板、个人命令、模型命令、运维命令、Agent 命令、代理命令、访问/时区命令、入站附件、信息/导出命令与出站媒体分别拆到 `telegramStats.ts` / `telegramPersonalPanels.ts` / `telegramCorePanels.ts` / `telegramPersonalCommands.ts` / `telegramModelCommands.ts` / `telegramOpsCommands.ts` / `telegramAgentCommands.ts` / `telegramProxyCommands.ts` / `telegramAdminCommands.ts` / `telegramAttachments.ts` / `telegramInfoCommands.ts` / `telegramMedia.ts`）。`src/api.ts` 进一步降到约 1036 行，任务路由独立为 `src/apiTaskRoutes.ts`，运维路由独立为 `src/apiOpsRoutes.ts`，自定义模型路由独立为 `src/apiModelRoutes.ts`。API 的任务队列、SSE、重试与附件处理独立为 `src/apiTasks.ts`，路由只负责解码并调用服务，对应 T3 Code 的「transport 保持轻薄，能力放在 service」约定。
 - **质量门禁**：新增 oxlint（`.oxlintrc.json`）与 `npm run lint`、knip（`knip.jsonc`）与 `npm run knip`，并接入 `npm run check` / CI；修复了未使用导入、无用转义、无意义 spread 等问题。
+- **模块级回归测试**：新增 `tests/telegramAdminCommands.test.ts`、`tests/telegramProxyCommands.test.ts`、`tests/telegramAttachments.test.ts`、`tests/telegramAgentCommands.test.ts`、`tests/telegramInfoCommands.test.ts`、`tests/apiTaskRoutes.test.ts`，覆盖白名单锁死/空名单、时区写入失败、代理操作、附件分类上限、Agent 安装前置检查、信息面板与任务路由。
+- **架构门禁**：新增 `docs/ARCHITECTURE.md` 记录分层与模块边界；新增 `scripts/check-size.mjs` 与 `npm run check:size`，对 `src/*.ts` 执行行数预算，防止已拆分文件重新膨胀。
 
 ### 变更
 
@@ -41,6 +43,24 @@
 - `provider export` 不进入只读视图表：不带 `-o` 时它会写出 `{cwd}/.claude/settings.local.json`，属于副作用。
 - 通过 API/App 切换或恢复模型时，与 Telegram 一样丢弃上一个模型的会话上下文（OpenCode 删除会话、CLI 清 `cliSession`）；重复选中当前模型则保持上下文不变。
 
+### 修复
+
+- **cc-switch 子进程不再继承 bot 凭据**：`CcSwitchService` 用 `extendedEnv(process.env)` 组装环境，是所有 spawn 点里唯一漏掉 `scrubEnv` 的一个（Agent CLI 走 `childEnv`、安装器走 `installerChildEnv`）；`TELEGRAM_BOT_TOKEN`、`API_TOKEN`、`OPENCODE_SERVER_PASSWORD`、`STT_API_KEY` 因此对一个第三方二进制可见，而它的 argv 由用户消息决定、`env tools` / `env check` 还会把环境信息原样打回聊天。现在同样只剥 bot 自己的凭据，Provider 的 `ANTHROPIC_API_KEY` 之类照常可见。
+- **回显用户输入的地方统一转义 Markdown**：取消提醒的确认（`✅ 已取消提醒 #id：<原文>`）、状态面板的引擎名与模型名、`/model` 未识别参数都直接内插了用户或数据文件里的文本，一条内容为 `*bold* _under_` 的提醒取消后那条回执自己会解析失败（`tests/telegram.test.ts` 固定这一行为），自定义 `agents.json` 的 label 或自定义模型名带下划线时整个状态面板发不出去。
+- **长回复分片不再超出长度上限**：`splitMessage()` 在「内联代码跨度太长、只能提前收尾」的分支里把关闭反引号加在分片之外，导致该分片比 `max` 多 1 个字符（Telegram 直接拒发 4000+ 的消息），`tests/messages.test.ts` 里「每片都不超过 max」的既有断言其实一直被绕过。现在收尾反引号从同一份预算里支出：预算不够时把最后一个字符交回下一片（沿用 `pickCut` 的代理对保护），并按实际反引号奇偶决定是否补标记，而不是无条件追加。
+- **面板翻页按钮重新生效**：`#panelFor()` 用 `switch (which)` 匹配整个回调串，而翻页按钮的数据是 `show:reminders:2`、`show:schedule:2`、`show:history:20`，于是全部落到 `default: return undefined`——点「下一页 / 上一页 / 更早 10 条 / 回到最新」只有按钮变灰、面板原地不动，`case "reminders"` 里那句 `which.split(":")[1]` 也永远读不到参数。改为先按面板名分派、再取参数（`tests/telegram.test.ts` 新增翻页回归测试）。
+- **cc-switch 的调用方错误不再伪装成服务端故障**：`#ccQuery()` / `#runCcAction()` 把闭包里抛出的任何异常一律重包成 502，而 `ccTargetId()` 正是在闭包内对非法 ID 抛 `ApiError(400)`，于是 `GET /cc/quota?id=-x` 回 502、`tests` 之外没有任何地方告诉 App「这是你参数写错了」，README 承诺的 400 也落空。现在 `ApiError` 原样透传，只有真正的 CLI 失败才记 502。
+- **CLI 退出后遗留进程占着管道不再吞掉答案**：`agentCli.prompt()` 只在 `close` 事件上结算，而 `close` 要等所有管道 EOF——被调 CLI 派生出一个继承 stdout/stderr 的常驻助手（MCP server、npm shim）时，`close` 永不到来，10 分钟硬超时把已经拿到手的 `{"result": …}` 当作「执行超时」丢弃，并留下一个 `#active` 僵尸条目。`ops.ts` 的同形缺陷更糟：它的 `finish()` 只能由 `close` 触发，超时又只发信号不结算，整个运维步骤会永久挂住并把 `#opsActionRunning` 锁死，后续运维请求全部 409；`agentInstaller` 则把安装成功报成 `timedOut`。三个模块现在共用新拆出的 `src/childKill.ts`：进程 `exit` 后开启 `EXIT_DRAIN_MS` 排水窗口（仍有输出就重新计时），窗口内没等到 EOF 就先给该进程组发终止信号（回收孤儿、释放管道）再结算。同时 `terminateProcess()` 的 SIGKILL 升级原先只看 `stdioDrained()`，一个「自己关流但无视 SIGTERM」的 CLI 会永远活着而组内进程从不被信号触达；现在管道是否排空与进程是否存活分别判定。
+- **安装日志保留失败原因**：`POST /agent/:engine/install` 的 `output` 此前取前 20000 字，而 npm/pip 的报错打在末尾，长日志会把失败原因整段截掉；改为与 `api.ts` 运维步骤一致的取尾。
+- **cc-switch 执行失败与参数错误分档**：`CcSwitchService` 把「命令跑完但退出码非 0」和「字段没写对」都抛 `CcSwitchError`，`POST /cc/providers` 因此一律回 400，App 面对「该 Provider 名称已存在」这种上游拒绝也只能当作自己参数错、反复重试；新增 `CcSwitchRunError` 子类，路由按 502 透传 cc-switch 的原始说明（仍经 `redactSecrets`），校验类错误继续走 400。
+- **`provider add` 失败回显里不再漏 key**：cc-switch 在创建失败时会把刚收到的 settings 整段打印出来，`errorDetail()` 只认得带标签的密钥格式，一串没有 `api key:` 前缀的裸 key 会原样进聊天与 App；现在 `addProvider()` 在拒绝路径与正常输出上都按本次提交的 key 精确替换为 `***`。
+- **cc-switch 升级后不必重启 bot**：`get bin()` 与 `version()` 各自把结果缓存在实例上一辈子，`npm run cc-switch:install` 换掉 `bin/cc-switch` 或 PATH 里的副本后，面板继续显示旧版本、命令继续跑旧二进制，直到进程重启——这与 `src/binPath.ts` 对 Agent CLI「每次调用重新解析」的既定策略正相反。现在 `bin` 每次都重新解析，版本缓存以解析到的文件 `mtimeMs:size` 为键，文件一变即失效（`tests/ccswitch.test.ts` 用替换假二进制的办法固定这条行为）。
+- **代理监听端口按端口判定**：`proxy-listen-port` 的第二个值只按「1-5 位数字」校验，`99999` 会一路传给 cc-switch 当成监听端口，症状是代理突然不通而不是一个可修正的 400；校验类型改名 `port` 并加 1–65535 区间。
+- **Hermes 记忆写入成功不再被报成失败**：`POST /cc/hermes` 写完立刻用三个 `hermes memory show/limits` 刷新状态，任一读取抖动都会经 `#ccQuery()` 变成 502，用户看到的是「操作失败」并重复一次已生效的写入。现在刷新失败仍回 200 与写入结果，只是带上 `refreshed: false` 且不带状态字段；App 收到这个标记就保留上一次读到的内容，绝不用空字段覆盖编辑器（否则下一次保存会把记忆写成空的）。
+- **任务历史「更早 10 条」真的往前翻**：`historyPanel()` 的按钮按请求条数生成 `show:history:60`，而渲染在 3200 字处截断——一条长 prompt 就能把预算吃满，于是每次点按钮都重新渲染同一批最新记录，更早的永远点不到。改为按真正渲染出来的条数翻页（`src/history.ts` 的 `list()` 增加 `offset`，回调变成 `show:history:<每页条数>:<偏移>`），标题也改成「第 A-B 条 / 共 N 条」，越界偏移会收敛到最后一页；新增 `tests/telegramStats.test.ts` 覆盖截断翻页。
+- **模型按钮绑定模型本身而不是排位**：`cmodel:<engine>:<index>` 在档案热重载（`/agents` 改写 `agents.json`，`registry.get()` 每次都会重读）之后按新顺序取第 index 项，用户点的是 Beta、切过去的可能是 Alpha，回执还照常打印「已切换至 …」。按钮现在直接携带模型 ID（超出 Telegram 回调数据 64 字节时退回旧的下标格式），处理器优先按 ID 命中，旧面板的下标写法继续可用。
+- **API 停机不再等客户端**：`stop()` 先 `await server.close()` 再 `closeAllConnections()`，而 `close` 要等所有连接结束——App 挂着一条任务 SSE 流时这两步的顺序等于永远等不到第二步（实测 4s 以上，端口迟迟不释放）。现在给在途请求 1 秒宽限后强制断连；`listen()` 成功后不再遗留那个 `once("error", reject)`，并补上常驻的 `error` 监听，避免运行期一次 socket 错误直接把整个进程带崩。
+
 ## [0.3.0] - 2026-11-03
 
 ### 新增
@@ -65,6 +85,17 @@
 
 ### 修复
 
+- **凭据不再外泄到可读渠道**：`redactSecrets` 补上裸 Telegram bot token 规则（`123456789:AAH…` 这种没有 `key=` 前缀的形式此前能躲过所有替换），并接到 `Logger` 的唯一出口上——`bot.log` 可由 `/logs`  tail、也会被复制进 bug 反馈，此前任何一行都可能带着 token；代理测速失败、添加代理失败与会抛给聊天的服务层错误也统一脱敏（undici 会把带 `user:pass@` 的代理 URL 原样写在错误里，聊天会逐字回显）。
+- **引擎子进程拿不到 bot 自己的凭据**：`BOT_ONLY` 剥离表补 `API_TOKEN`、`STT_API_KEY`、`SNIPER_EMAIL`、`SNIPER_PASSWORD`。所有 CLI 档案都带 `--dangerously-skip-permissions` / `--approval-mode yolo` 一类免审批开关，模型一旦被提示词注入，`process.env.API_TOKEN` 就等于配对码泄漏。
+- **状态文件真正落盘**：新增 `writePrivateAtomic()`（写临时文件 → `fsync` → rename → 两端 `chmod 0600`），`store` / `usage` / `history` / `reminders` / `scheduler` / `proxy` / `agentInstaller` / `api` 的 token 与加密密钥共 9 处写入点迁过去。此前只 rename 不 fsync，断电后可能留下「已 rename 但被截断」的 JSON；`openSync(path,"w",0o600)` 的 mode 只在创建时生效，早已存在的世界可读 `api-token.json` 也借这次改写收回权限。
+- **超长提示词不再随机死在 spawn**：`agentCli` 新增 `argvBudgetError()`，单条 120 KiB（Linux `MAX_ARG_STRLEN` 128 KiB）/ 合计 1 MiB 超限时直接返回中文可执行提示（建议切 OpenCode 引擎），并在分配会话 ID 之前检查，避免超限请求顺手吃掉会话上下文。此前表现为无信息的 `spawn E2BIG`。
+- **OpenCode 事件流不再按会话翻倍**：`/event` 改为整个进程一条连接、按 `sessionID` 分发给订阅者（引用计数，最后一个订阅者走时关闭）。此前每个聊天各开一条，而 OpenCode 把所有会话的事件广播给每条连接，N 个聊天就是 N 倍连接加 N 倍无关 JSON 解析。
+- **会话不再永久卡在「执行中」**：`#process` 把 `#cancels` / `#runningSince` 的登记移进 `try`，两者由同一个 `finally` 清掉；此前 try 之外的那几行若抛错，该聊天在取消表和忙判定里都留下无人回收的标记。
+- **CLI 引擎不再静默丢掉图片**：`callEngine` 此前把 `files` 原样丢弃（Telegram 与 App 的任务路由都受影响），提示词里却写着「图片: /绝对路径」，看起来像已经送到。现在明确追加一条 `[二进制附件]` 说明：文件只存在于清单里的路径、需要引擎自己读取，图片/音频/扫描件请改用 OpenCode 引擎。
+- **提醒投递带回提醒本体**：`telegram.ts` 构造 `ReminderService` 时把投递回调写成 `(chatId, text) => …`（少接第三个参数在 TS 里合法，所以编译期毫无提示），`#deliverReminder` 里的 `if (reminder && …)` 永不成立——发送消息上的「10 分钟 / 1 小时 / 明天这个时候」三个按钮一直是死代码，`snooze:` 回调也从未可达。现在把 reminder 原样传下去。
+- **延后提醒不再被投递吃掉**：`ReminderStore.postpone` 补 `runningAt` 判定。`tick()` 把提醒标为执行中后要等最长 20 秒的 Telegram 发送，这期间 App 的「稍后提醒」或面板的 `rpostpone` 会改 `dueAt` 并回成功，随后发送完成按「一次性提醒」直接把它删掉——用户以为延后了，实际什么都没留下。与 `ScheduleService.runNow` 用的是同一条守卫。
+- **`POST /task` 校验顺序**：临时模型 pin 的校验挪到落盘附件之前。此前引擎/队列/模型都通过后才写 inbox，但模型名写错的那条分支在写之后：一个 400 请求能往收件目录留下最多 15 MB 无人引用的文件（要 24 小时才被回收），而客户端改正后重试会再留一份。
+- **`POST /task/:id/retry` 不再假装带着附件跑**：重试是重新读 inbox 里的原始副本，而超过一天的文件已被 prune，此前读失败被 `catch {}` 吞掉。现在文本任务的重试提示词里会写明几个附件读不到；纯附件任务（提示词本来为空）直接 410，不再把一个空提示词送进引擎。
 - `/usage` API 的无 id 路由会吞掉 `/usage/report` 等子路径。
 - `.gitignore` 的 `data/` 规则误吞安卓源码包 `com.agentbot.app.data`（已锚定为 `/data/`）。
 - `.dockerignore` 误排除 docker-entrypoint.sh 导致镜像构建失败。

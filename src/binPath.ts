@@ -53,6 +53,8 @@ export function extendedEnv(env: Record<string, string | undefined>): Record<str
  * Credentials and access-control values that belong to the bot process alone. A CLI talks to
  * its own provider, an installer only builds files, and neither can have a use for the token
  * that would let them drive the bot (and every whitelisted chat) from inside a script.
+ * Engine children run with approvals bypassed by design, so anything readable here is
+ * reachable by whatever the model is told to do.
  */
 const BOT_ONLY = new Set([
   "TELEGRAM_BOT_TOKEN",
@@ -60,6 +62,14 @@ const BOT_ONLY = new Set([
   "TELEGRAM_ALLOW_ALL_USERS",
   "OPENCODE_SERVER_USERNAME",
   "OPENCODE_SERVER_PASSWORD",
+  // The HTTP API bearer token is root-equivalent for this bot: git pull, npm install and
+  // filesystem browsing all sit behind it. No engine needs it.
+  "API_TOKEN",
+  // Transcript keys belong to the bot's voice pipeline; providers use their own variable names.
+  "STT_API_KEY",
+  // Account-automation credentials, never consumed by an engine.
+  "SNIPER_EMAIL",
+  "SNIPER_PASSWORD",
 ])
 
 const CREDENTIAL_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i

@@ -1321,14 +1321,18 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 val result = api.hermesAction(conn(), kind, action, content, confirm = action == "set" || action == "clear")
-                // The server reports what the file holds now, so the editor shows stored text
-                hermes = HermesMemory(
-                    limits = result.limits,
-                    memory = result.memory,
-                    user = result.user,
-                    memoryEnabled = result.memoryEnabled,
-                    userEnabled = result.userEnabled,
-                )
+                // The server reports what the file holds now, so the editor shows stored text.
+                // When that refresh itself failed the state fields are absent: keeping the last
+                // read beats painting an empty editor over text the user might then save back.
+                if (result.refreshed) {
+                    hermes = HermesMemory(
+                        limits = result.limits,
+                        memory = result.memory,
+                        user = result.user,
+                        memoryEnabled = result.memoryEnabled,
+                        userEnabled = result.userEnabled,
+                    )
+                }
                 hermesMessage = result.message
             } catch (err: Exception) {
                 connectionError = if (err is NotConfiguredException) err.message else "Hermes 记忆操作失败：${err.message}"
