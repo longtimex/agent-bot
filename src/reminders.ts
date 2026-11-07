@@ -535,6 +535,7 @@ export class ReminderService {
   #timeZone: string
   #timer?: NodeJS.Timeout
   #ticking = false
+  #activeTick?: Promise<void>
 
   constructor(
     path: string,
@@ -608,18 +609,31 @@ export class ReminderService {
     this.#timer.unref()
   }
 
-  dispose(): void {
-    if (!this.#timer) return
-    clearInterval(this.#timer)
-    this.#timer = undefined
+  dispose(): void
+  dispose(wait: true): Promise<void>
+  dispose(wait = false): void | Promise<void> {
+    if (this.#timer) {
+      clearInterval(this.#timer)
+      this.#timer = undefined
+    }
+    if (!wait) return
+    return this.#activeTick ?? Promise.resolve()
   }
 
   async tick(now = Date.now()): Promise<void> {
     if (this.#ticking) return
     this.#ticking = true
-    try {
-      const due = this.#store.takeDue(now)
-      for (const reminder of due) {
+    const run = this.#runTick(now).finally(() => {
+      this.#ticking = false
+      if (this.#activeTick === run) this.#activeTick = undefined
+    })
+    this.#activeTick = run
+    return run
+  }
+
+  async #runTick(now: number): Promise<void> {
+    const due = this.#store.takeDue(now)
+    for (const reminder of due) {
         // The next due is computed from the tick's entry timestamp: under a simulated
         // clock (tests) that is the only meaningful base, and in production a slow
         // delivery merely advances the next occurrence, never replays a stale one
@@ -635,10 +649,14 @@ export class ReminderService {
             this.#store.settle(reminder.id)
             this.#log.warn(`dropped reminder #${reminder.id}; it was overdue by over 7 days`)
             // Deleting it in silence looks exactly like the bot lost the reminder, so say so
-            await this.#sendWithTimeout(
-              reminder.chatId,
-              `⏰ 提醒 #${reminder.id} 已过期未发送：Bot 停机期间它超过 7 天没有触发，已自动删除。`,
-            ).catch(() => {})
+            // -- but only while the owner may still receive bot output. Revoking access must
+            // silence every delivery path, including cleanup notices.
+            if (this.#access(reminder.userId)) {
+              await this.#sendWithTimeout(
+                reminder.chatId,
+                `⏰ 提醒 #${reminder.id} 已过期未发送：Bot 停机期间它超过 7 天没有触发，已自动删除。`,
+              ).catch(() => {})
+            }
           }
           continue
         }
@@ -691,9 +709,6 @@ export class ReminderService {
             (err as Error).message,
           )
         }
-      }
-    } finally {
-      this.#ticking = false
     }
   }
 

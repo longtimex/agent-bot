@@ -99,12 +99,29 @@ export class AuthFailureLimiter {
       this.#entries.delete(key)
       removed++
     }
-    // Keep the newest keys when the cap is exceeded. An attacker rotating addresses can
-    // only evict older records, which is the same trade-off every in-memory limiter makes.
+    // Keep the cap without sacrificing live cooldowns first. A newly seen address
+    // whose window has not expired is exactly what address rotation produces, so
+    // insertion order alone would let it evict the attacker's own block. Expired
+    // records are already gone by here; prefer a non-blocked failure window, then
+    // the cooldown that expires soonest. Only when every slot is blocked must a
+    // block be dropped, which keeps memory bounded without pretending the server
+    // can track unlimited addresses.
     while (this.#entries.size > this.#maxKeys) {
-      const oldest = this.#entries.keys().next().value
-      if (oldest === undefined) break
-      this.#entries.delete(oldest)
+      let victim: string | undefined
+      let victimBlockedUntil = Infinity
+      for (const [key, entry] of this.#entries) {
+        const blockedUntil = entry.blockedUntil > now ? entry.blockedUntil : 0
+        if (blockedUntil === 0) {
+          victim = key
+          break
+        }
+        if (blockedUntil < victimBlockedUntil) {
+          victim = key
+          victimBlockedUntil = blockedUntil
+        }
+      }
+      if (victim === undefined) break
+      this.#entries.delete(victim)
     }
     return removed
   }

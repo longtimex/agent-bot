@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { clip } from "./messages.js"
 
@@ -54,6 +54,10 @@ export function saveAttachment(dir: string, chatId: number, name: string, data: 
   // Uploads routinely carry config files with API keys: keep them private to the
   // service account instead of relying on the host umask.
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // mkdirSync's mode only applies when it creates the directory. A startup-created
+  // inbox (or one from an older release) can still be 0775, and the upload must not
+  // inherit that exposure just because the directory already existed.
+  chmodSync(dir, 0o700)
   const base = `${chatId}-${Date.now()}-${sanitizeFilename(name, "file.bin")}`
   // Two uploads of the same file in the same millisecond (an album, a retried update)
   // would otherwise share one name and silently overwrite each other

@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process"
 
 const KILL_ESCALATION_MS = 5_000
+const EXIT_WAIT_MS = 1_000
 
 /**
  * How long a child's pipes get to drain after the process itself exited. A detached helper
@@ -60,4 +61,41 @@ export function terminateProcess(child: ChildProcess, graceMs = KILL_ESCALATION_
       killTimers.delete(child)
     }
   })
+}
+
+/** Settles when the child's process group leader has exited, or after a bounded wait. */
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | undefined
+    const done = (): void => {
+      if (timer) clearTimeout(timer)
+      child.removeListener("exit", done)
+      child.removeListener("close", done)
+      resolve()
+    }
+    child.once("exit", done)
+    child.once("close", done)
+    timer = setTimeout(done, timeoutMs)
+    timer.unref()
+  })
+}
+
+/**
+ * Terminates every child and resolves once each has exited (or the bounded
+ * wait elapsed). Shutdown callers must await this: the escalation timer inside
+ * terminateProcess() is unref'd, so a parent that exits right after SIGTERM
+ * leaves a CLI which ignores it running as an orphan.
+ */
+export async function terminateProcesses(
+  children: Iterable<ChildProcess>,
+  graceMs = KILL_ESCALATION_MS,
+  waitMs = EXIT_WAIT_MS,
+): Promise<void> {
+  const pending: Promise<void>[] = []
+  for (const child of children) {
+    terminateProcess(child, graceMs)
+    pending.push(waitForExit(child, graceMs + waitMs))
+  }
+  await Promise.all(pending)
 }

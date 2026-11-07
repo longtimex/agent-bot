@@ -421,6 +421,40 @@ test("ReminderService caps reminders per chat and start() delivers immediately",
   }
 })
 
+test("ReminderService dispose waits for an in-flight delivery before returning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-dispose-"))
+  try {
+    let finish: () => void = () => {}
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      () => new Promise<void>((resolve) => {
+        finish = resolve
+      }),
+      log,
+    )
+    const now = Date.now()
+    service.add(42, 7, "10s 开会", now - 20_000)
+    const ticking = service.tick(now)
+
+    const stopped = service.dispose(true)
+    assert.ok(stopped instanceof Promise, "shutdown must be awaitable so a reminder is not cut off")
+    let settled = false
+    void stopped.then(() => {
+      settled = true
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, "dispose must not return before the delivery finishes")
+    assert.equal(service.list(42).length, 1, "the reminder stays pending until the send settles")
+
+    finish()
+    await stopped
+    await ticking
+    assert.equal(service.list(42).length, 0, "the delivered reminder was settled before dispose returned")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("parseReminder accepts Chinese durations, day parts and relative days", () => {
   // 2026-01-01 10:00 Asia/Shanghai
   const now = Date.UTC(2026, 0, 1, 2, 0)
@@ -495,6 +529,30 @@ test("ReminderService does not deliver to a user who lost bot access", async () 
 
     assert.deepEqual(sent, [])
     assert.equal(service.list(42).length, 1, "the reminder keeps its slot and backs off")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ReminderService keeps an expired reminder silent for a user who lost bot access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-rem-"))
+  try {
+    const sent: string[] = []
+    const now = Date.now()
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async (_chatId, text) => {
+        sent.push(text)
+      },
+      log,
+      "Asia/Shanghai",
+      () => false,
+    )
+    service.add(42, 7, "30m 喝水", now - 8 * 86_400_000)
+    await service.tick(now)
+
+    assert.equal(service.list(42).length, 0, "the expired reminder is still cleaned up")
+    assert.deepEqual(sent, [], "a revoked user must not receive an expiry notice")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

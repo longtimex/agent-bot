@@ -7,7 +7,7 @@ import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { childEnv, extendedPath } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
-import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
+import { EXIT_DRAIN_MS, terminateProcess, terminateProcesses } from "./childKill.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
 import type { SessionStore } from "./store.js"
@@ -801,9 +801,17 @@ export class AgentCliService {
     this.registry = registry ?? new AgentCliRegistry({ log })
   }
 
-  dispose(): void {
-    for (const child of this.#active) this.#terminate(child)
+  dispose(): void
+  dispose(graceMs: number): Promise<void>
+  dispose(graceMs?: number): void | Promise<void> {
+    if (graceMs === undefined) {
+      for (const child of this.#active) this.#terminate(child)
+      this.#active.clear()
+      return
+    }
+    const children = [...this.#active]
     this.#active.clear()
+    return terminateProcesses(children, graceMs)
   }
 
   /** The directory a CLI run for this chat actually starts in. */

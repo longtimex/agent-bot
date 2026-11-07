@@ -351,6 +351,43 @@ test("ScheduleService keeps a one-off task when shutdown cancels it", async () =
   }
 })
 
+test("ScheduleService dispose waits for an in-flight run to settle before returning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-scheduler-dispose-"))
+  try {
+    const now = 1_700_000_000_000
+    let finish: (outcome: UsageOutcome) => void = () => {}
+    const service = new ScheduleService(
+      join(dir, "schedules.json"),
+      () => new Promise<UsageOutcome>((resolve) => {
+        finish = resolve
+      }),
+      log,
+      "Asia/Shanghai",
+    )
+    const task = service.add(42, 7, "every 2h 检查", defaults, now)
+    await service.tick(now + 2 * 3_600_000)
+
+    const stopped = service.dispose(true)
+    assert.ok(stopped instanceof Promise, "the shutdown path must be awaitable")
+    let settled = false
+    void stopped.then(() => {
+      settled = true
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, "dispose must not return while the task is still executing")
+    assert.equal(service.list(42)[0]?.runningAt !== undefined, true)
+
+    finish("ok")
+    await stopped
+    const [kept] = service.list(42)
+    assert.equal(kept?.id, task.id)
+    assert.equal(kept?.runningAt, undefined, "the completion state was persisted before dispose returned")
+    assert.equal(kept?.lastStatus, "ok")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("ScheduleService enforces the per-chat cap", () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-scheduler-"))
   try {
@@ -558,6 +595,33 @@ test("ScheduleService announces a stale one-off task before dropping it", async 
     assert.equal(notices[0]?.chatId, 42)
     assert.ok(notices[0]?.text.includes(`#${task.id}`), notices[0]?.text)
     assert.ok(notices[0]?.text.includes("已自动删除"), notices[0]?.text)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ScheduleService keeps an expired task silent for a user who lost bot access", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-sched-"))
+  try {
+    const now = 1_700_000_000_000
+    const notices: string[] = []
+    const service = new ScheduleService(
+      join(dir, "schedules.json"),
+      async () => "ok",
+      log,
+      "Asia/Shanghai",
+      undefined,
+      () => false,
+      (_chatId, text) => {
+        notices.push(text)
+      },
+    )
+    service.add(42, 7, "30m 检查服务器", defaults, now)
+    await service.tick(now + 30 * 60_000 + 8 * 86_400_000)
+    await service.idle()
+
+    assert.equal(service.count(42), 0, "the expired task is still cleaned up")
+    assert.deepEqual(notices, [], "a revoked user must not receive an expiry notice")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

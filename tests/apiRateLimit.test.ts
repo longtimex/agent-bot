@@ -52,3 +52,15 @@ test("AuthFailureLimiter stays bounded under address rotation", () => {
   assert.equal(limiter.size, 3)
   assert.equal(limiter.check("ip-19", 0).allowed, true, "the newest key is still tracked")
 })
+
+test("AuthFailureLimiter cannot evict a live cooldown by rotating addresses", () => {
+  const limiter = new AuthFailureLimiter({ maxFailures: 1, windowMs: 60_000, blockMs: 300_000, maxKeys: 2 })
+  assert.equal(limiter.recordFailure("attacker", 0).allowed, false)
+
+  // Fresh addresses only have unexpired failure budgets, which are the first
+  // records the cap should forget. Dropping the blocked one instead lets the
+  // same client retry immediately after two requests from other addresses.
+  limiter.recordFailure("other-1", 1)
+  limiter.recordFailure("other-2", 2)
+  assert.equal(limiter.check("attacker", 3).allowed, false, "the active cooldown must survive the cap")
+})

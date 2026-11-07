@@ -209,7 +209,7 @@ async function main(): Promise<void> {
     process.exitCode = code
     clearInterval(pruneTimer)
     if (logTimer) clearInterval(logTimer)
-    agents.dispose()
+    await agents.dispose(1_000).catch(() => {})
     proxies.dispose()
     if (apiServer) await apiServer.stop().catch(() => {})
     await tgBridge.stop().catch(() => {})

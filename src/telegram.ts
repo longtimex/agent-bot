@@ -614,9 +614,12 @@ export class TelegramBridge {
       clearTimeout(this.#reconnectTimer)
       this.#reconnectTimer = undefined
     }
-    this.#reminders.dispose()
-    this.#schedules.dispose()
-    this.#usageReport.dispose()
+    const remindersStopped = this.#reminders.dispose(true)
+    // Stop scheduling new work first, but do not wait here: the tasks already in
+    // flight are waiting on this bridge's queues, so they must be aborted before
+    // their scheduler completion can be drained.
+    const schedulesStopped = this.#schedules.dispose(true)
+    const reportsStopped = this.#usageReport.dispose(true)
 
     const aborts: Promise<void>[] = []
     for (const [key, controller] of this.#cancels) {
@@ -639,9 +642,10 @@ export class TelegramBridge {
     this.#ccCommands.clearProviders()
 
     const running = [...this.#queues.values(), ...aborts]
-    if (running.length > 0) {
-      await Promise.race([Promise.allSettled(running), sleep(SHUTDOWN_DRAIN_MS)])
-    }
+    await Promise.race([
+      Promise.allSettled([...running, schedulesStopped, remindersStopped, reportsStopped]),
+      sleep(SHUTDOWN_DRAIN_MS),
+    ])
 
     await this.#bot.stop()
     this.#log.info("Telegram Bot stopped")

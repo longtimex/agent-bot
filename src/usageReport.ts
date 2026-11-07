@@ -61,13 +61,28 @@ function formatDuration(ms: number): string {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
 }
 
+/** Weekday of a `YYYY-MM-DD` civil date; the calendar date itself is timezone-independent. */
+function weekdayOf(day: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day)
+  if (!match) return ""
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const date = Number(match[3])
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", weekday: "long" }).format(
+    new Date(Date.UTC(year, month - 1, date)),
+  )
+}
+
 /** The chat-facing daily report; empty days still render so a scheduled push never looks broken. */
-export function formatDailyReport(data: DailyReportData, timeZone: string): string {
-  const weekday = new Intl.DateTimeFormat("zh-CN", { timeZone, weekday: "long" }).format(new Date())
+export function formatDailyReport(data: DailyReportData): string {
+  // The heading describes `data.day`, not whatever day the formatting function
+  // happens to run on. Scheduled ticks and tests inject `now`, and using the wall
+  // clock here made a report about yesterday claim today's weekday.
+  const weekday = weekdayOf(data.day)
   const totals = data.totals
   const trendTasks = data.trend.reduce((sum, day) => sum + day.tasks, 0)
   const lines = [
-    `📊 *每日用量报告* · ${data.day}（${weekday}）`,
+    `📊 *每日用量报告* · ${data.day}${weekday ? `（${weekday}）` : ""}`,
     "",
     `今日任务：${totals.tasks} · ✅ ${totals.ok} · ❌ ${totals.failed} · 🚫 ${totals.cancelled}`,
   ]
@@ -114,6 +129,7 @@ export class DailyReportService {
   readonly #opts: DailyReportOptions
   #timer: NodeJS.Timeout | undefined
   #ticking = false
+  #activeTick?: Promise<string | undefined>
   #lastSent: string | undefined
 
   constructor(opts: DailyReportOptions) {
@@ -128,22 +144,35 @@ export class DailyReportService {
     this.#timer.unref()
   }
 
-  dispose(): void {
+  dispose(): void
+  dispose(wait: true): Promise<void>
+  dispose(wait = false): void | Promise<void> {
     if (this.#timer) clearInterval(this.#timer)
     this.#timer = undefined
+    if (!wait) return
+    return this.#activeTick?.then(() => {}) ?? Promise.resolve()
   }
 
   /** Sends the report if due; resolves with the sent text (tests) or undefined. */
   async tick(now = Date.now()): Promise<string | undefined> {
     if (this.#ticking) return undefined
     this.#ticking = true
+    const run = this.#runTick(now).finally(() => {
+      this.#ticking = false
+      if (this.#activeTick === run) this.#activeTick = undefined
+    })
+    this.#activeTick = run
+    return run
+  }
+
+  async #runTick(now: number): Promise<string | undefined> {
     try {
       const timeZone = this.#opts.timeZone()
       const today = dateKey(now, timeZone)
       if (this.#lastSent === today) return undefined
       const parts = zonedParts(now, timeZone)
       if (parts.hour * 60 + parts.minute < reportTimeMinutes(this.#opts.time)) return undefined
-      const text = formatDailyReport(buildDailyReportData(this.#opts.store, timeZone, now), timeZone)
+      const text = formatDailyReport(buildDailyReportData(this.#opts.store, timeZone, now))
       await this.#opts.send(text)
       this.#lastSent = today
       this.#save()
@@ -151,15 +180,13 @@ export class DailyReportService {
     } catch (err) {
       this.#opts.log.warn("daily usage report failed:", (err as Error).message)
       return undefined
-    } finally {
-      this.#ticking = false
     }
   }
 
   /** Manual preview (e.g. the /usage panel button); never marks the day as sent. */
   preview(now = Date.now()): string {
     const timeZone = this.#opts.timeZone()
-    return formatDailyReport(buildDailyReportData(this.#opts.store, timeZone, now), timeZone)
+    return formatDailyReport(buildDailyReportData(this.#opts.store, timeZone, now))
   }
 
   #save(): void {

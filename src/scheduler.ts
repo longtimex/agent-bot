@@ -504,11 +504,15 @@ export class ScheduleService {
     this.#timer.unref()
   }
 
-  dispose(): void {
+  dispose(): void
+  dispose(wait: true): Promise<void>
+  dispose(wait = false): void | Promise<void> {
     this.#stopping = true
-    if (!this.#timer) return
-    clearInterval(this.#timer)
-    this.#timer = undefined
+    if (this.#timer) {
+      clearInterval(this.#timer)
+      this.#timer = undefined
+    }
+    if (wait) return this.idle()
   }
 
   async idle(): Promise<void> {
@@ -532,8 +536,12 @@ export class ScheduleService {
           } else {
             this.#store.removeById(task.id)
             this.#log.warn(`dropped scheduled task #${task.id}; it was overdue by over 7 days`)
-            // Removing it in silence looks exactly like the bot lost the task
-            await this.#notify(task, `🗓 定时任务 #${task.id} 已过期未执行：Bot 停机期间它超过 7 天没有触发，已自动删除。`)
+            // Removing it in silence looks exactly like the bot lost the task. The
+            // access check below is too late for this branch: an expired task is
+            // dropped before it, so gate the notice here as reminders already do.
+            if (this.#access(task.userId)) {
+              await this.#notify(task, `🗓 定时任务 #${task.id} 已过期未执行：Bot 停机期间它超过 7 天没有触发，已自动删除。`)
+            }
           }
           continue
         }

@@ -84,7 +84,7 @@ test("daily report text mentions totals, sources and the trend", () => {
     const store = makeStore(dir)
     seed(store, AFTER)
     const data = buildDailyReportData(store, TZ, AFTER)
-    const text = formatDailyReport(data, TZ)
+    const text = formatDailyReport(data)
     assert.match(text, /每日用量报告/)
     assert.match(text, /今日任务：3 · ✅ 2 · ❌ 1 · 🚫 0/)
     assert.match(text, /Telegram 123 2/)
@@ -93,6 +93,17 @@ test("daily report text mentions totals, sources and the trend", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("daily report weekday follows the report date, not the formatting wall clock", () => {
+  const text = formatDailyReport({
+    day: "2026-01-01",
+    totals: { tasks: 0, ok: 0, failed: 0, cancelled: 0, totalMs: 0 },
+    byChat: [],
+    trend: [],
+  })
+  assert.match(text, /2026-01-01（星期四）/, text)
+  assert.doesNotMatch(text, /星期[六日]/, text)
 })
 
 test("source labels cover telegram, app and unknown keys", () => {
@@ -123,6 +134,44 @@ test("daily report sends once per local day, only after the configured time", as
 
     // The day is only persisted after a successful send
     assert.ok(existsSync(path))
+    assert.equal((JSON.parse(readFileSync(path, "utf8")) as { lastSent?: string }).lastSent, "2026-10-31")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("daily report dispose waits for an in-flight send before returning", async () => {
+  const dir = tempDir()
+  try {
+    const store = makeStore(dir)
+    seed(store, AFTER)
+    const path = join(dir, "usage-report.json")
+    let finishSend: () => void = () => {}
+    const service = new DailyReportService({
+      store,
+      path,
+      timeZone: () => TZ,
+      time: "21:00",
+      log,
+      send: () => new Promise<void>((resolve) => {
+        finishSend = resolve
+      }),
+    })
+    const ticking = service.tick(AFTER)
+
+    const stopped = (service.dispose as unknown as (wait?: boolean) => void | Promise<void>)(true)
+    assert.ok(stopped instanceof Promise, "shutdown must be awaitable so the report is not cut off")
+    let settled = false
+    void stopped.then(() => {
+      settled = true
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, "dispose must not return before the delivery finishes")
+    assert.equal(existsSync(path), false, "the sent marker is written only after the send settles")
+
+    finishSend()
+    await stopped
+    await ticking
     assert.equal((JSON.parse(readFileSync(path, "utf8")) as { lastSent?: string }).lastSent, "2026-10-31")
   } finally {
     rmSync(dir, { recursive: true, force: true })

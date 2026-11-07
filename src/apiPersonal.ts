@@ -608,7 +608,7 @@ export async function routeUsageHistory(
       totals: data.totals,
       byChat: data.byChat.map((row) => ({ source: sourceLabel(row.key), key: row.key, usage: row.usage })),
       trend: data.trend,
-      text: formatDailyReport(data, deps.timezone()),
+      text: formatDailyReport(data),
     })
     return
   }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import test from "node:test"
@@ -117,6 +117,20 @@ test("saveAttachment keeps uploads private to the service account", () => {
     const saved = saveAttachment(inbox, 42, ".env", Buffer.from("API_KEY=x"))
     assert.equal(statSync(saved.path).mode & 0o777, 0o600)
     assert.equal(statSync(inbox).mode & 0o777, 0o700)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("saveAttachment tightens an inbox directory created with a permissive umask", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-umask-"))
+  try {
+    const inbox = join(dir, "inbox")
+    mkdirSync(inbox, { recursive: true })
+    chmodSync(inbox, 0o775)
+    const saved = saveAttachment(inbox, 42, "secret.txt", Buffer.from("token"))
+    assert.equal(statSync(saved.path).mode & 0o777, 0o600)
+    assert.equal(statSync(inbox).mode & 0o777, 0o700, "an already-existing inbox must not stay group/other-readable")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

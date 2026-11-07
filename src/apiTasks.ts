@@ -94,7 +94,10 @@ export class ApiTaskManager {
       if (!MIME_RE.test(mime)) throw new ApiError(400, `附件 ${name} 的 mime 无效`)
       const stripped = data.replace(/\s+/g, "")
       if (!BASE64_RE.test(stripped)) throw new ApiError(400, `附件 ${name} 不是合法的 base64`)
-      const bytes = Math.floor((stripped.length * 3) / 4)
+      // "=" is padding, not a fourth data byte. Deriving the decoded size from the
+      // actual byte length avoids charging up to two extra bytes per attachment,
+      // which was enough to reject a legal 15MB batch.
+      const bytes = Buffer.from(stripped, "base64").byteLength
       total += bytes
       if (total > MAX_ATTACH_TOTAL_BYTES) {
         throw new ApiError(400, `附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
@@ -500,7 +503,25 @@ export class ApiTaskManager {
         )
       }
     } else {
-      data = readFileSync(item.target)
+      // The path was safe when the reply settled, not necessarily now: outbox files
+      // are writable during the task's lifetime. Re-run the same containment, file
+      // type and size checks against the current path before reading anything.
+      let resolved: ReturnType<typeof resolveMedia>
+      try {
+        resolved = resolveMedia(item.kind, item.target, this.#deps.cfg.outboxDir, this.#deps.cfg.maxMediaBytes)
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        if (detail.includes("不存在")) throw new ApiError(410, "媒体文件已从 outbox 清理")
+        if (detail.includes("超过")) throw new ApiError(413, detail)
+        throw new ApiError(410, `媒体文件已不可用：${detail}`)
+      }
+      try {
+        data = readFileSync(resolved.hostPath ?? resolved.target)
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === "ENOENT" || code === "ENOTDIR") throw new ApiError(410, "媒体文件已从 outbox 清理")
+        throw err
+      }
     }
 
     ctx.res.writeHead(200, {
