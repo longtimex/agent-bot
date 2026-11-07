@@ -73,6 +73,7 @@ fun AppDrawer(current: Screen, onNavigate: (Screen) -> Unit, onNewChat: () -> Un
             DrawerItem(Icons.Filled.Extension, "引擎管理", current is Screen.Agents) { onNavigate(Screen.Agents) }
             DrawerItem(Icons.Filled.Memory, "模型管理", current is Screen.Models) { onNavigate(Screen.Models) }
             DrawerItem(Icons.Filled.SwapHoriz, "cc-switch", current is Screen.Cc) { onNavigate(Screen.Cc) }
+            DrawerItem(Icons.Filled.Bolt, "magpie 网关", current is Screen.Magpie) { onNavigate(Screen.Magpie) }
             DrawerItem(Icons.Filled.Note, "Hermes 记忆", current is Screen.Hermes) { onNavigate(Screen.Hermes) }
             DrawerItem(Icons.Filled.Lock, "访问白名单", current is Screen.Access) { onNavigate(Screen.Access) }
             DrawerItem(Icons.Filled.Public, "网络代理", current is Screen.Proxy) { onNavigate(Screen.Proxy) }

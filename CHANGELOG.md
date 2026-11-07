@@ -15,10 +15,12 @@
 
 ### 变更
 
-- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后执行 `assembleDebug`，生成 `agent-bot.apk` 与 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
+- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后，先按标签把 `versionName` / `versionCode` 写入 `build.gradle.kts`（`versionCode = major*1000000+minor*1000+patch`，跨次版本不会回退），再执行 `assembleDebug`，生成 `agent-bot.apk` 与 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
 - **深度审查台账入库**：`DEEP-100.md` 记录当前 42/100 轮审查进度；早期并行审查的重复轮次编号已在文首说明，后续从第 43 轮继续。
 
 ### 新增
+
+- **magpie 模型网关集成**：新增 `/magpie` Telegram 面板与命令（Provider 列表/模板、各 Agent 模型切换、路由组、配额、用量、设置、账号、守护进程、同步/更新），以及 `/api/v1/magpie/*`（概览、视图清单、只读视图、白名单 exec、通用 run、Provider/Agent/路由组写入）。CLI 封装在 `src/magpie.ts`，白名单与确认规则在 `src/magpieGuards.ts` / `src/apiMagpieSpecs.ts`，路由在 `src/apiMagpie.ts`，Telegram 在 `src/telegramMagpieCommands.ts`；新增 `MAGPIE_BIN` / `MAGPIE_URL` 配置，密钥与 Token 输出自动脱敏，交互式/常驻命令（`tui`/`web`/`serve`/`plugin`/`accounts add`/`gateway-key` 等）在聊天与 API 中一律拒绝。安卓 App 新增「magpie 网关」页（概览、只读视图、命令执行与二次确认），并接入 `/` 命令表、抽屉与主菜单按钮。
 
 - **安装脚本**：新增仓库根目录的 `install.sh`，支持在当前 checkout 安装或从 GitHub 克隆到指定目录；自动检查 Node ≥ 20.12 / git / npm，安装依赖与 opencode CLI，构建项目，生成权限 `600` 的 `.env`，并可按需进入 Telegram 配置向导或直接启动。支持 `--dir`、`--branch`、`--local`、`--no-opencode`、`--no-setup`、`--start`、`--dry-run` 与环境变量配置；新增 `tests/install-script.test.ts` 做 shell 语法与帮助输出门禁。
 

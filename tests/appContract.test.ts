@@ -543,6 +543,32 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         if (updatable) await call({ name: "agentAction update", method: "POST", path: `/agents/${updatable.id}/update`, model: "AgentActionResult" })
         else problems.push("agents → GET /agents offered nothing installable, so /agents/:engine/:action went unchecked")
       }
+
+      // ---- magpie: the console's overview, one read-only view and the passthrough ----
+      const overview = await call({
+        name: "magpieOverview → GET /magpie",
+        method: "GET",
+        path: "/magpie",
+        model: "MagpieOverview",
+      })
+      const magpieViews = (overview?.views ?? []) as Array<Record<string, unknown>>
+      const magpieView = magpieViews.find((entry) => !entry.needsTarget) ?? magpieViews[0]
+      if (!magpieView) problems.push("magpieOverview → GET /magpie answered no views at all")
+      else {
+        await call({
+          name: "magpieView → GET /magpie/view",
+          method: "GET",
+          path: `/magpie/view?name=${encodeURIComponent(String(magpieView.name))}`,
+          model: "MagpieViewResult",
+        })
+      }
+      await call({
+        name: "magpieRun → POST /magpie/run",
+        method: "POST",
+        path: "/magpie/run",
+        body: { args: ["providers"], confirm: false },
+        model: "MagpieRunResult",
+      })
     },
     encKey,
   )

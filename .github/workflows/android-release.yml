@@ -34,6 +34,31 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      # A tag is the release version: stamp it into the APK, because the manifest carries
+      # static values. versionCode is major*1000000+minor*1000+patch so it stays monotonic
+      # across minor/major bumps (patch+1 would go backwards at 1.1.0) and two versions can
+      # never share a code while each component stays under 1000.
+      - name: Stamp version from tag
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag '$GITHUB_REF_NAME' is not android-vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          IFS=. read -r major minor patch <<< "$version"
+          if (( minor >= 1000 || patch >= 1000 )); then
+            echo "minor and patch must be < 1000 in '$GITHUB_REF_NAME'" >&2
+            exit 1
+          fi
+          code=$(( major * 1000000 + minor * 1000 + patch ))
+          sed -i -E "s/versionCode = [0-9]+/versionCode = ${code}/" app/build.gradle.kts
+          sed -i -E "s/versionName = \"[^\"]+\"/versionName = \"${version}\"/" app/build.gradle.kts
+          echo "stamped versionName=${version} versionCode=${code}"
+          grep -nE "versionCode|versionName" app/build.gradle.kts
+
       # The project has no checked-in gradlew and all published APKs use the
       # debug key, so release tags build the same installable debug artifact.
       - name: Build APK

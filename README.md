@@ -123,6 +123,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在 Telegram 中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
 - **多模型切换**：Claude Sonnet/Opus、Gemini 3.8/4、Grok 4.7、GPT OSS、DeepSeek、GLM、MiMo、Nemotron 等。
 - **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
+- **magpie 集成**：`/magpie` 面板与 `/magpie <命令>` 管理 magpie 模型网关（Provider、各 Agent 的模型、路由组、配额、用量、守护进程），`/magpie run` 透传非交互命令；危险操作先确认，密钥与 Token 自动打码，并提供 `/api/v1/magpie/*` 给脚本与后续 App 面板使用。
 - **模型管理**：`/cc model` 或 `npm run models` 为 Bot 与其他 agent 添加/删除模型、同步 `opencode.json`、指定 agent 模型，改动无需重启。
 - **Telegram 运维中心**：`/ops` 提供系统诊断、日志查看、项目更新、Bot 重启、OpenCode 服务启停、cc-switch 安装/更新与非密钥配置修改；首次部署之外几乎无需再登录服务器。面板上的「🔍 检查更新」会拉取远端并列出落后提交（干跑，不改动本地代码），确认无误再点「⬆️ 更新项目」。
 - **交互面板**：`/start`、`/agent`、`/model`、`/dir`、`/access`、`/reminders`、`/schedule`、`/proxy`、`/usage`、`/ops` 均带内联按钮，可直接点选切换引擎/模型、设置工作目录、增删访问白名单、暂停任务、取消提醒或操作代理。
@@ -254,6 +255,10 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `/timezone Asia/Shanghai` | 直接指定 IANA 时区，同时写入 `.env` 的 `REMINDER_TIMEZONE` |
 | `/proxy` | 管理网络代理：添加、测试、启用、停用、删除 |
 | `/cc` | cc-switch 面板：Provider 切换/测速、MCP、提示词、环境、代理诊断 |
+| `/magpie` | magpie 模型网关面板：Provider、各 Agent 模型、路由组、配额、用量、守护进程 |
+| `/magpie agent <agent> <provider/model>` | 为某个 Agent 指定模型（等价 `magpie <agent> <model>`） |
+| `/magpie provider add <预设> <key>` · `/magpie group add <名称> models=…` | 新建 Provider / 路由组 |
+| `/magpie quota` · `/magpie usage 7d` · `/magpie sync` · `/magpie update [check]` | 配额、用量、同步模型目录、检查/升级 |
 | `/cc use <id>` / `/cc test [id]` | 切换 Provider / 测试端点速度与连通性 |
 | `/cc mcp [sync]` / `/cc prompts` / `/cc env` / `/cc proxy` | 查看 MCP、同步配置、提示词预设、本地工具与代理状态 |
 | `/cc model add <简称> <provider>/<modelID> [名称] [参数]` | 添加自定义模型并同步 `opencode.json`（参数：`--attachment`、`--context N`、`--output N`） |
@@ -520,6 +525,7 @@ MY_API_KEY=...
 - `OPENCODE_AGENT`：默认 `assistant`，对应 `.opencode/agent/assistant.md`。
 - `AGENT_CLI_CONFIG`：自定义 Agent CLI 档案路径，默认 `data/agents.json`；文件不存在时只使用内置档案。
 - `CC_SWITCH_APP` / `CC_SWITCH_BIN`：cc-switch 集成的应用类型（默认 `opencode`，会自动映射为 CLI 的 `open-code`；也接受 `openclaw` → `open-claw`）与二进制路径；留空时依次查找 `./bin/cc-switch` 和 `PATH`。
+- `MAGPIE_BIN` / `MAGPIE_URL`：magpie 模型的 CLI 路径（留空时查找 `./bin/magpie` 和 `PATH`）与本地网关地址（默认 `http://127.0.0.1:3425`）。
 - `GROK_API_KEY`：Grok provider 的密钥，`opencode.json` 通过 `{env:GROK_API_KEY}` 读取。
 - `SNIPER_EMAIL` / `SNIPER_PASSWORD`：仅 `scripts/sniper_free_vps.mjs` 使用。
 
@@ -804,6 +810,63 @@ npm run models -- assign self argon2
 - 删除仍被 agent 或 `opencode.json` 引用的模型会被拒绝，确认后才可加 `force` / `--force`。
 - 强制删除时，被删模型所在 agent 文件 frontmatter 的 `model:` 行会被清除（该 agent 回落到引擎默认模型），引用它的会话选择同样被重置；`opencode.json` 的 `model` / `small_model` 仍指向它时只提示、不自动改动。
 - Bot 按文件 mtime 自动重载 `data/models.json`，无需重启；新会话生效。文件被写坏（JSON 无效）时不会清空已加载的自定义模型，修好后自动恢复。
+
+## magpie 集成（可选）
+
+[magpie](https://github.com/yetone/magpie) 把各 Agent 的模型统一到一个本地网关（默认 `127.0.0.1:3425`）：Claude Code 可以走 Kimi、Codex 走 DeepSeek、OpenCode 走任意 Provider，并在配额用完时自动切换账号。Bot 不打包 magpie，只调用本机已安装的 CLI。
+
+### 安装
+
+```bash
+curl -fsSL https://usemagpie.ai/install.sh | sh   # 或 go install github.com/yetone/magpie@latest
+# 也可把二进制放到 ./bin/magpie，或设置 MAGPIE_BIN=/path/to/magpie
+```
+
+`.env` 可选配置：
+
+```ini
+MAGPIE_BIN=                 # 留空：依次查找 ./bin/magpie 与 PATH
+MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
+```
+
+### Telegram 操作
+
+```text
+/magpie                      # 面板：版本、网关健康、快捷入口
+/magpie providers            # 已添加的 Provider
+/magpie presets              # 内置供应商模板
+/magpie agents               # 全部支持的 Agent（/magpie status 看本机已检测的）
+/magpie models [agent]       # 模型列表
+/magpie groups               # 路由组
+/magpie quota [provider]     # 配额
+/magpie usage 7d             # 用量（today/7d/30d/all）
+/magpie agent claude deepseek/deepseek-chat   # 为某个 Agent 指定模型
+/magpie claude deepseek/deepseek-chat         # 同上，省略 agent 子命令
+/magpie provider add deepseek sk-…            # 新建 Provider（密钥不回显）
+/magpie group add daily models=deepseek/deepseek-chat routing=smart
+/magpie provider test|models|rm <id>          # rm 需确认
+/magpie daemon start|stop|restart             # 需确认
+/magpie sync · /magpie update check · /magpie update
+/magpie run <任意非交互参数>                  # 通用入口
+/magpie help                                  # 完整指令
+```
+
+需要桌面/终端/交互完成的命令（`tui`、`web`、`serve`、`plugin`、`accounts add`、`gateway-key`、`backup`、`restore` 等）在聊天与 App 中会被拒绝并给出替代写法；所有输出都会去掉 ANSI 并脱敏 Token/Key。
+
+### HTTP API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/magpie` | 概览：是否安装、版本、网关地址与健康状态，并下发视图/命令清单 |
+| `GET` | `/magpie/views` | 只读视图与可执行命令清单（名称、标题、是否需要目标、是否需确认） |
+| `GET` | `/magpie/view?name=&target=` | 运行只读视图（providers、models、quota、usage、settings、daemon 等） |
+| `POST` | `/magpie/exec` | 运行白名单命令 `{name, target?, confirm?}`；需确认的缺 `confirm: true` 返回 400 |
+| `POST` | `/magpie/run` | 通用透传 `{args, confirm?}`，逐段校验、拒绝交互式命令 |
+| `POST` | `/magpie/provider` | 新建 Provider `{preset, key}`，密钥不回显 |
+| `POST` | `/magpie/agent` | 为 Agent 指定模型 `{agent, model}` |
+| `POST` | `/magpie/group` | 新建路由组 `{name, pairs}` |
+
+同一时间只允许一个 magpie 变更操作；只读视图与命令走同一份 `src/apiMagpieSpecs.ts` 白名单，Telegram 与 API 不会脱节。
 
 ## 使用统计
 

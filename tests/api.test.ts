@@ -45,6 +45,7 @@ interface Harness {
   ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }>
   installs: string[]
   ccCalls: string[]
+  magpieCalls: string[]
   /** Makes the next cc-switch read fail, for a route that writes first and then re-reads. */
   ccFailNextRead: () => void
 }
@@ -312,6 +313,37 @@ export async function withApi(
       return { ok: true, message: `removed ${engine}` }
     },
   } as unknown as AgentCliInstaller
+  const magpieCalls: string[] = []
+  const magpie = {
+    available: true,
+    bin: "/usr/local/bin/magpie",
+    gatewayUrl: "http://127.0.0.1:3425",
+    overview: async () => ({
+      available: true,
+      bin: "/usr/local/bin/magpie",
+      version: "magpie 1.2.3",
+      gatewayUrl: "http://127.0.0.1:3425",
+      healthy: true,
+    }),
+    runRaw: async (args: string[]) => {
+      magpieCalls.push(args.join(" "))
+      return `magpie: ${args.join(" ")}`
+    },
+    addProvider: async (preset: string, key: string) => {
+      magpieCalls.push(`add:${preset}`)
+      void key
+      return "provider added"
+    },
+    setAgentModel: async (agent: string, model: string) => {
+      magpieCalls.push(`set:${agent}:${model}`)
+      return "model set"
+    },
+    addGroup: async (name: string, pairs: string[]) => {
+      magpieCalls.push(`group:${name}:${pairs.join(",")}`)
+      return "group added"
+    },
+  }
+
   const cfg = {
     opencode: { url: "http://127.0.0.1:1", username: "opencode", agent: "assistant" },
     taskTimeoutMs: 10_000,
@@ -353,6 +385,7 @@ export async function withApi(
       ops,
       installer,
       ccswitch,
+      magpie: magpie as unknown as import("../src/magpie.js").MagpieService,
       fetchMedia: async (target: string) => Buffer.from(`remote:${target}`),
       ownerChatId: 42,
     },
@@ -380,6 +413,7 @@ export async function withApi(
       ocCalls,
       installs,
       ccCalls,
+      magpieCalls,
       ccFailNextRead: () => {
         ccFailsOneRead = true
       },

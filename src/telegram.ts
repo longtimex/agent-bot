@@ -8,6 +8,8 @@ import type { BotConfig, ModelRef } from "./config.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
+import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
+import { MagpieService } from "./magpie.js"
 import { TaskHistoryStore } from "./history.js"
 import { BOT_MENU_COMMANDS, CC_HELP, HELP, HELP_FULL, isBotCommand } from "./help.js"
 import type { Logger } from "./logger.js"
@@ -146,6 +148,8 @@ export class TelegramBridge {
   /** Prompt behind each failure card's 重试 button, keyed by the failed job id. */
   readonly #retryPrompts = new Map<string, { key: string; text: string; attachments?: AttachmentDescriptor[] }>()
   readonly #ccCommands: CcCommands
+  readonly #magpie: MagpieService
+  readonly #magpieCommands: MagpieCommands
   readonly #reminders: ReminderService
   readonly #aliases: AliasStore
   readonly #schedules: ScheduleService
@@ -186,6 +190,7 @@ export class TelegramBridge {
     models?: ModelAdmin,
     agentInstaller?: AgentCliInstaller,
     ops?: OpsService,
+    magpie?: MagpieService,
   ) {
     if (!cfg.telegram.token) throw new Error("TELEGRAM_BOT_TOKEN 未配置")
     this.#cfg = cfg
@@ -199,6 +204,9 @@ export class TelegramBridge {
     this.#cc =
       ccswitch ??
       new CcSwitchService({ bin: cfg.ccswitch?.bin, app: cfg.ccswitch?.app ?? "opencode", projectDir: process.cwd() })
+    this.#magpie =
+      magpie ??
+      new MagpieService({ bin: cfg.magpie?.bin, gatewayUrl: cfg.magpie?.gatewayUrl, projectDir: process.cwd() })
     this.#models =
       models ??
       new ModelAdmin(
@@ -404,6 +412,12 @@ export class TelegramBridge {
       usagePanel: (key) => this.#stats.usagePanel(key),
     })
     this.#ccCommands = new CcCommands(ccHost, this.#cc, this.#models, log)
+    const magpieHost: MagpieHost = {
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      editPanel: (ctx, panel) => this.#editPanel(ctx, panel),
+    }
+    this.#magpieCommands = new MagpieCommands(magpieHost, this.#magpie, log)
   }
 
   /** Shared services the HTTP API reuses; both surfaces then see the same reminders and stats. */
@@ -441,6 +455,11 @@ export class TelegramBridge {
   /** Exposed to the HTTP API for the app's cc-switch console (/cc parity). */
   get ccSwitch(): CcSwitchService {
     return this.#cc
+  }
+
+  /** Exposed to the HTTP API for the app's magpie console (/magpie parity). */
+  get magpieService(): MagpieService {
+    return this.#magpie
   }
 
   /** Lets the HTTP API deliver remote media with the same SSRF/proxy guards as Telegram. */
@@ -860,8 +879,8 @@ export class TelegramBridge {
       if (data.startsWith("show:")) {
         const which = data.slice("show:".length)
         await answer()
-        // cc/ops/service panels spawn subprocesses: build them off the update loop
-        if (which === "cc" || which === "ops" || which === "service") {
+        // cc/ops/service/magpie panels spawn subprocesses: build them off the update loop
+        if (which === "cc" || which === "ops" || which === "service" || which === "magpie") {
           const message = ctx.callbackQuery?.message
           const messageId = message && "message_id" in message ? message.message_id : undefined
           this.#offLoop(chatId, "面板刷新", async () => {
@@ -907,6 +926,12 @@ export class TelegramBridge {
       if (data.startsWith("tz:")) {
         await answer()
         await this.#handleTimeZone(chatId, data.slice("tz:".length))
+        return
+      }
+
+      if (data.startsWith("magpie:")) {
+        const rest = data.slice("magpie:".length)
+        this.#offLoop(chatId, "magpie 操作", () => this.#magpieCommands.handleCallback(ctx, chatId, rest, answer))
         return
       }
 
@@ -1580,6 +1605,12 @@ export class TelegramBridge {
       return
     }
 
+    if (command === "/magpie") {
+      // Every magpie call shells out to the CLI; keep the update loop free for other chats.
+      this.#offLoop(job.chatId, "magpie 操作", () => this.#magpieCommands.handleCommand(job.chatId, job.key, arg))
+      return
+    }
+
     if (command === "/cc") {
       await this.#ccCommands.handleCommand(job.chatId, job.key, arg)
       return
@@ -1930,6 +1961,7 @@ export class TelegramBridge {
         return this.#historyPanel(key, count, offset)
       }
       case "cc": return await this.#ccCommands.panel(chatId)
+      case "magpie": return await this.#magpieCommands.panel(chatId)
       case "ops": return await this.#opsPanel()
       case "service": return await this.#servicePanel()
       case "status": return { text: this.#statusText(chatId, key), keyboard: this.#statusKeyboard() }

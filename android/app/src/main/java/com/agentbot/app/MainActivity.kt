@@ -40,6 +40,7 @@ import com.agentbot.app.ui.ConfigScreen
 import com.agentbot.app.ui.HelpScreen
 import com.agentbot.app.ui.HistoryScreen
 import com.agentbot.app.ui.HermesScreen
+import com.agentbot.app.ui.MagpieScreen
 import com.agentbot.app.ui.ModelsScreen
 import com.agentbot.app.ui.OpsScreen
 import com.agentbot.app.ui.ProxyScreen
@@ -184,6 +185,7 @@ class MainActivity : ComponentActivity() {
                                     Screen.Access -> AccessScreen(vm)
                                     Screen.Models -> ModelsScreen(vm)
                                     Screen.Cc -> CcScreen(vm)
+                                    Screen.Magpie -> MagpieScreen(vm)
                                     Screen.Hermes -> HermesScreen(vm)
                                     Screen.Config -> ConfigScreen(vm)
                                     Screen.Status -> StatusScreen(vm)

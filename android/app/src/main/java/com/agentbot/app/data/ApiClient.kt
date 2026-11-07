@@ -816,6 +816,34 @@ class ApiClient {
         return json.decodeFromJsonElement(CcExecResult.serializer(), json.parseToJsonElement(text))
     }
 
+    // ---- magpie ----
+
+    /** `/magpie`: CLI availability, version, gateway health, and the server's view/command lists. */
+    suspend fun magpieOverview(connection: Connection): MagpieOverview {
+        val text = executeEncryptedFallback(connection, "GET", "/magpie", client = longHttp)
+        return json.decodeFromJsonElement(MagpieOverview.serializer(), json.parseToJsonElement(text).jsonObject)
+    }
+
+    /** One read-only magpie view; long views (quota/usage) share the long client. */
+    suspend fun magpieView(connection: Connection, name: String, target: String? = null): MagpieViewResult {
+        val suffix = target?.takeIf { it.isNotBlank() }?.let { "&target=" + Uri.encode(it) } ?: ""
+        val text = executeEncryptedFallback(connection, "GET", "/magpie/view?name=${Uri.encode(name)}$suffix", client = longHttp)
+        return json.decodeFromJsonElement(MagpieViewResult.serializer(), json.parseToJsonElement(text).jsonObject)
+    }
+
+    /**
+     * Telegram's `/magpie run <argv>`: any non-interactive magpie command. `confirm` answers
+     * the server guard's own request; destructive commands refuse without it.
+     */
+    suspend fun magpieRun(connection: Connection, args: List<String>, confirm: Boolean): MagpieRunResult {
+        val body = buildJsonObject {
+            put("args", buildJsonArray { args.forEach { add(it) } })
+            if (confirm) put("confirm", true)
+        }
+        val text = executeEncryptedFallback(connection, "POST", "/magpie/run", body, client = longHttp)
+        return json.decodeFromJsonElement(MagpieRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
     /**
      * Telegram's `/cc run <argv>`: one non-interactive cc-switch command as the words the
      * server's guard accepts. `confirm` answers the guard's own request for confirmation.

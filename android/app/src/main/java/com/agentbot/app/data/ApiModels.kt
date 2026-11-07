@@ -604,6 +604,45 @@ data class CcRunResult(
     val text: String = "",
 )
 
+/** One magpie view or command, as the server's own tables describe it. */
+@Serializable
+data class MagpieSpec(
+    val name: String,
+    val label: String,
+    val needsTarget: Boolean = false,
+    val targetLabel: String = "目标（可选）",
+    val confirm: Boolean = false,
+    val long: Boolean = false,
+)
+
+/** `/magpie` overview: whether the CLI is installed, its version and gateway health. */
+@Serializable
+data class MagpieOverview(
+    val available: Boolean = false,
+    val bin: String? = null,
+    val version: String? = null,
+    val gatewayUrl: String = "",
+    val healthy: Boolean = false,
+    val error: String? = null,
+    val views: List<MagpieSpec> = emptyList(),
+    val commands: List<MagpieSpec> = emptyList(),
+)
+
+/** One read-only magpie command's output. */
+@Serializable
+data class MagpieViewResult(
+    val name: String = "",
+    val label: String = "",
+    val text: String = "",
+)
+
+/** Answer to a magpie command (or passthrough); `text` is already redacted by the server. */
+@Serializable
+data class MagpieRunResult(
+    val ok: Boolean = false,
+    val text: String = "",
+)
+
 /**
  * Hermes' two memory blobs with cc-switch's limits summary. The enable flags are read out
  * of that summary's wording, so a cc-switch change leaves them null instead of wrong.

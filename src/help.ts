@@ -20,6 +20,7 @@ export const HELP = `🤖 *AI 私人助手 · 功能菜单*
 
 *集成*
 • \`/cc\` cc-switch 控制台（Provider / MCP / 提示词等）
+• \`/magpie\` magpie 模型网关控制台（Provider / 模型 / 路由组 / 配额），\`/magpie help\` 查看指令
 • \`/proxy\` 网络代理
 • \`/api\` 安卓 App 配对信息（API 地址与令牌）
 
@@ -65,6 +66,8 @@ export const HELP_FULL = `🤖 *AI 私人助手 (Telegram 版)*
 • \`/cc\` - cc-switch 控制台：Provider/MCP/提示词/配置/代理/会话/认证等全部命令
 • \`/cc help\` - 查看 cc-switch 全部指令（含通用 \`/cc run\` 入口）
 • \`/cc model\` - 模型管理：为 Bot 或其他 agent 添加/删除模型、指定 agent 模型
+• \`/magpie\` - magpie 模型网关控制台（Provider、各 Agent 模型、路由组、配额、用量、守护进程）
+• \`/magpie help\` - 查看 magpie 全部指令（含 \`/magpie run\` 通用入口）
 • \`/ops\` - 运维中心：诊断、日志、更新、重启、OpenCode 服务与配置
 • \`/diag\` / \`/logs [行数]\` - 系统诊断 / 查看 Bot 日志
 • \`/update\` - 拉取代码、安装依赖并构建（需确认）
@@ -150,6 +153,36 @@ export const CC_HELP = `🔌 *cc-switch 控制台*
 \`hermes memory open-dir\`。
 输出中的 API Key / Token 会自动打码。`
 
+export const MAGPIE_HELP = `🧩 *magpie 模型网关*
+
+把每个 Agent 的模型统一到一处：Claude Code 用 Kimi、Codex 用 DeepSeek、OpenCode 用任意 Provider。
+
+*查看*
+• \`/magpie\` · \`/magpie status\` - 面板（版本、网关、快捷入口）
+• \`/magpie providers\` - 已添加的 Provider
+• \`/magpie presets\` - 内置供应商模板
+• \`/magpie agents\` - 全部支持的 Agent；\`/magpie status\` 列出本机已检测的
+• \`/magpie models [agent]\` - 模型列表
+• \`/magpie groups\` - 路由组
+• \`/magpie quota [provider]\` · \`/magpie usage [today|7d|30d|all]\`
+• \`/magpie settings\` · \`/magpie accounts\` · \`/magpie daemon status\`
+
+*切换与新建*
+• \`/magpie agent <agent> [provider/model]\` - 查看或设置某 Agent 的模型
+• \`/magpie claude deepseek/deepseek-chat\` - 等价简写
+• \`/magpie provider add <预设> <API Key>\` - 新建 Provider（密钥不回显）
+• \`/magpie group add <名称> models=a/b,c/d [routing=smart]\`
+
+*维护*
+• \`/magpie sync\` - 刷新模型目录
+• \`/magpie update check\` · \`/magpie update\`（升级需确认）
+• \`/magpie daemon start|stop|restart\`（需确认）
+• \`/magpie provider test|models|rm <id>\`（rm 需确认）
+• \`/magpie run <任意非交互参数>\` - 通用入口
+
+⚠️ 需要桌面/终端/交互登录的命令（\`tui\`、\`web\`、\`serve\`、\`plugin\`、\`accounts add\`、
+\`gateway-key\`、\`backup\`、\`restore\` 等）无法在聊天中执行。输出中的 Key/Token 会自动打码。`
+
 export interface HelpSection {
   id: "basic" | "full" | "cc"
   title: string
@@ -220,6 +253,7 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "export", description: "导出任务历史为 Markdown/JSON 文件" },
   { command: "proxy", description: "管理网络代理（添加/测试/启用/删除）" },
   { command: "cc", description: "cc-switch：Provider、MCP、提示词与环境诊断" },
+  { command: "magpie", description: "magpie 模型网关：Provider、模型、路由组与配额" },
   { command: "ops", description: "运维中心：诊断、日志、更新与服务管理" },
   { command: "logs", description: "查看 Bot 或 OpenCode 日志" },
   { command: "diag", description: "查看系统诊断信息" },

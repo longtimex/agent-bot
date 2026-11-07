@@ -94,6 +94,17 @@ cd android
 > 服务器写下的时间戳，拿手机自己的时钟去减，手机慢一小时就永远显示「已运行 0 秒」，看着像卡死。
 > 它不能替代 `./gradlew assembleDebug`，改动 App 代码后仍需在本地编译一次。
 
+### 打标签发布（GitHub Actions）
+
+推送匹配 `android-v*` 的标签即触发 `.github/workflows/android-release.yml`：
+
+```bash
+git tag -a android-v1.0.13 -m "Android v1.0.13"
+git push origin android-v1.0.13
+```
+
+工作流会先按标签把 `versionName` 写成标签版本（`1.0.13`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode` 再编译，因此每次标签产物都带着对应版本号；构建完成后创建/更新同名 Release，附上 `agent-bot.apk` 与 `.sha256`。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
+
 ### 直接安装现成的 APK
 
 不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot.apk` 与同名 `.sha256`：

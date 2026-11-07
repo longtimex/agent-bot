@@ -4,6 +4,7 @@ import { ApiServer, resolveApiToken, resolveEncKey } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
+import { MagpieService } from "./magpie.js"
 import { ConfigError, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
 import { acquireLock } from "./lock.js"
 import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
@@ -141,6 +142,14 @@ async function main(): Promise<void> {
     app: cfg.ccswitch.app,
     projectDir: process.cwd(),
   })
+  const magpie = new MagpieService({
+    bin: cfg.magpie.bin,
+    gatewayUrl: cfg.magpie.gatewayUrl,
+    projectDir: process.cwd(),
+  })
+  if (!magpie.available) {
+    log.info("magpie CLI 未安装；/magpie 面板可用但需要先安装 magpie")
+  }
   if (!ccswitch.available) {
     log.info("cc-switch CLI 未安装；/cc 面板可用但需要先运行 npm run cc-switch:install")
   }
@@ -151,7 +160,7 @@ async function main(): Promise<void> {
     store,
   )
 
-  const tgBridge = new TelegramBridge(cfg, oc, agents, store, log, proxies, undefined, ccswitch, models)
+  const tgBridge = new TelegramBridge(cfg, oc, agents, store, log, proxies, undefined, ccswitch, models, undefined, undefined, magpie)
 
   let apiServer: ApiServer | undefined
   if (cfg.api.enabled) {
@@ -175,6 +184,7 @@ async function main(): Promise<void> {
           proxies,
           aliases: tgBridge.aliasStore,
           ccswitch: tgBridge.ccSwitch,
+          magpie,
           fetchMedia: (target) => tgBridge.fetchRemoteMedia(target),
           access: {
             list: () => tgBridge.accessState,

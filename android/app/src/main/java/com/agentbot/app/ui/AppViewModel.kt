@@ -20,6 +20,7 @@ import com.agentbot.app.data.AttachmentLimits
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.LogTail
+import com.agentbot.app.data.MagpieOverview
 import com.agentbot.app.data.MediaCache
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.Peer
@@ -107,6 +108,7 @@ sealed interface Screen {
     data object Access : Screen
     data object Models : Screen
     data object Cc : Screen
+    data object Magpie : Screen
     data object Hermes : Screen
     data object Config : Screen
     data object Status : Screen
@@ -253,6 +255,15 @@ class AppViewModel(
         private set
 
     var ccPanelText by mutableStateOf<String?>(null)
+        private set
+
+    // ---- magpie ----
+    var magpie by mutableStateOf<MagpieOverview?>(null)
+    var magpieBusy by mutableStateOf(false)
+    var magpieTitle by mutableStateOf("")
+    var magpieOutput by mutableStateOf("")
+    /** Words awaiting the user's confirmation (the server refused with 「需要确认」). */
+    var magpieConfirmation by mutableStateOf<String?>(null)
         private set
 
     /** Hermes' MEMORY.md / USER.md and the limits line, loaded when the screen opens. */
@@ -596,6 +607,7 @@ class AppViewModel(
             Screen.Access -> refreshAccess()
             Screen.Models -> refreshCustomModels()
             Screen.Cc -> refreshCc()
+            Screen.Magpie -> refreshMagpie()
             Screen.Hermes -> refreshHermes()
             Screen.Config -> refreshConfig()
             Screen.Status -> refreshStatus()
@@ -696,6 +708,7 @@ class AppViewModel(
                 allowAllUsers = info.allowAll
             }
             Screen.Cc -> if (!ccBusy) silent { reloadCcTables() }
+            Screen.Magpie -> if (!magpieBusy) silent { reloadMagpie() }
             Screen.Config -> silent { configView = api.config(conn()) }
             Screen.Help -> silent { helpView = api.help(conn()) }
             Screen.Ops -> if (opsActionBusy == null) {
@@ -1287,6 +1300,95 @@ class AppViewModel(
         ccPanelTitle = null
         ccPanelText = null
         ccTestMessage = null
+    }
+
+    // ---- magpie ----
+
+    fun refreshMagpie() {
+        guarded("加载 magpie") { reloadMagpie() }
+    }
+
+    private suspend fun reloadMagpie() {
+        magpie = api.magpieOverview(conn())
+    }
+
+    /** Runs one read-only view; the server owns the argv, so only a listed name is accepted. */
+    fun showMagpieView(name: String, target: String? = null) {
+        if (magpieBusy) return
+        viewModelScope.launch {
+            magpieBusy = true
+            try {
+                val result = api.magpieView(conn(), name, target)
+                magpieTitle = "🧩 ${result.label.ifBlank { name }}"
+                magpieOutput = result.text.ifBlank { "（无输出）" }
+                connectionError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                magpieTitle = "❌ magpie"
+                magpieOutput = err.message ?: "读取失败"
+            } finally {
+                magpieBusy = false
+            }
+        }
+    }
+
+    /**
+     * Telegram's `/magpie run <argv>`. A refusal that asks for confirmation opens the dialog
+     * instead of failing; confirming re-sends the identical words with `confirm`.
+     */
+    fun runMagpie(words: String, confirm: Boolean = false) {
+        if (magpieBusy) return
+        val argv = words.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (argv.isEmpty()) {
+            toast = "没有要执行的 magpie 参数"
+            return
+        }
+        viewModelScope.launch {
+            magpieBusy = true
+            try {
+                val result = api.magpieRun(conn(), argv, confirm)
+                magpieTitle = "🧩 ${argv.take(3).joinToString(" ")}"
+                magpieOutput = result.text.ifBlank { "（无输出）" }
+                magpieConfirmation = null
+                // The command already succeeded; a refresh hiccup must not turn it into a failure.
+                if (argv.first() == "provider" || argv.first() == "group" || argv.first() == "sync") {
+                    try {
+                        reloadMagpie()
+                    } catch (err: CancellationException) {
+                        throw err
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: ApiException) {
+                if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
+                    magpieConfirmation = words
+                } else {
+                    connectionError = "magpie 执行失败：${err.message}"
+                }
+            } catch (err: Exception) {
+                connectionError = "magpie 执行失败：${err.message}"
+            } finally {
+                magpieBusy = false
+            }
+        }
+    }
+
+    fun confirmMagpieRun() {
+        val words = magpieConfirmation ?: return
+        magpieConfirmation = null
+        runMagpie(words, true)
+    }
+
+    fun dismissMagpieRun() {
+        magpieConfirmation = null
+    }
+
+    fun clearMagpieOutput() {
+        magpieTitle = ""
+        magpieOutput = ""
     }
 
     // ---- Hermes memory ----

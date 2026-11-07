@@ -20,7 +20,7 @@ internal val SLASH_COMMANDS = setOf(
     "start", "menu", "help", "new", "stop", "retry", "queue", "history", "export",
     "status", "usage", "report", "id", "api", "agent", "agents", "model", "dir", "timezone",
     "remind", "reminders", "cancel", "schedule", "env", "access", "alias", "proxy",
-    "cc", "ops", "logs", "diag", "update", "restart", "service",
+    "cc", "magpie", "ops", "logs", "diag", "update", "restart", "service",
 )
 
 /** Telegram's words for dropping the session's model pick. */
@@ -282,6 +282,12 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
         "cc" -> {
             // The console resolves the words against the server's tables (see matchCcQuery)
             if (arg.isBlank()) vm.navigate(Screen.Cc) else vm.requestCcWords(arg.trim())
+        }
+
+        "magpie" -> {
+            // The screen shows the panel; words typed after it run through the server guard.
+            vm.navigate(Screen.Magpie)
+            if (arg.isNotBlank()) vm.runMagpie(arg.trim())
         }
 
         // Telegram reads `/logs` tokens in any order and ignores the ones it does not know

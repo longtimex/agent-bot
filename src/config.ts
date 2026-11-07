@@ -33,6 +33,11 @@ export interface BotConfig {
     bin?: string
     app: string
   }
+  /** magpie console; the CLI is optional and the gateway URL is informational. */
+  magpie: {
+    bin?: string
+    gatewayUrl: string
+  }
   agentCli: {
     /** Optional data/agents.json with custom profiles / built-in overrides. */
     configPath: string
@@ -192,6 +197,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       bin: pick(env.CC_SWITCH_BIN),
       app: ccswitchApp,
     },
+    magpie: {
+      bin: pick(env.MAGPIE_BIN),
+      gatewayUrl: parseGatewayUrl(pick(env.MAGPIE_URL)),
+    },
     agentCli: {
       configPath: agentCliConfig ? resolve(agentCliConfig) : resolve(dataDir, "agents.json"),
     },
@@ -221,6 +230,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       enabled: bool(env.API_ENCRYPTION, false),
     },
   }
+}
+
+/** magpie's local gateway is informational: only protocol+host[:port], no path/query. */
+function parseGatewayUrl(value: string | undefined): string {
+  const raw = value ?? "http://127.0.0.1:3425"
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new StartupConfigError(`拒绝启动：MAGPIE_URL 无效（${raw}）。请使用形如 http://127.0.0.1:3425 的地址。`)
+  }
+  if (!/^https?:$/.test(url.protocol) || !url.host) {
+    throw new StartupConfigError(`拒绝启动：MAGPIE_URL 只能是协议+主机+端口（${raw}）。`)
+  }
+  return `${url.protocol}//${url.host}`
 }
 
 /** STT stays off until STT_BASE_URL is set; the model then defaults to whisper-1. */

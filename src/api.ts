@@ -14,6 +14,8 @@ import { API_PREFIX, ApiError, type ApiRequestContext } from "./apiCore.js"
 import { ApiTaskManager } from "./apiTasks.js"
 import { AuthFailureLimiter } from "./apiRateLimit.js"
 import { routeCc } from "./apiCc.js"
+import { routeMagpie } from "./apiMagpie.js"
+import type { MagpieService } from "./magpie.js"
 import type { Logger } from "./logger.js"
 import type { ReminderService } from "./reminders.js"
 import type { ScheduleService } from "./scheduler.js"
@@ -90,6 +92,8 @@ export interface ApiServerOptions {
   }
   /** cc-switch console shared with `/cc`; only allowlisted, non-interactive actions are exposed. */
   ccswitch?: CcSwitchService
+  /** magpie gateway console shared with `/magpie`; same allowlist discipline as cc-switch. */
+  magpie?: MagpieService
   /** Fetches remote media (Telegram's guarded downloader) so the app can receive it too. */
   fetchMedia?: (target: string) => Promise<Buffer>
   version?: string
@@ -169,6 +173,7 @@ export class ApiServer {
   /** Update/check can run npm for minutes; one at a time keeps the repo files sane. */
   #opsActionRunning = false
   #ccActionRunning = false
+  #magpieActionRunning = false
   readonly #taskManager: ApiTaskManager
   readonly #agentActions: ApiAgentActions
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
@@ -441,6 +446,11 @@ export class ApiServer {
       return
     }
 
+    if (resource === "magpie") {
+      await this.#routeMagpie(ctx, id, action)
+      return
+    }
+
     if (resource === "config") {
       await this.#routeConfig(ctx, id)
       return
@@ -636,6 +646,31 @@ export class ApiServer {
         ccQuery: (run) => this.#ccQuery(run),
         runCcAction: (run) => this.#runCcAction(run),
         withCcLock: (run) => this.#withCcLock(run),
+      },
+      ctx,
+      id,
+      action,
+    )
+  }
+
+  /** One magpie CLI call at a time: the gateway reads/writes shared agent config files. */
+  async #withMagpieLock<T>(run: () => Promise<T>): Promise<T> {
+    if (this.#magpieActionRunning) throw new ApiError(409, "已有 magpie 操作在执行，请稍后再试")
+    this.#magpieActionRunning = true
+    try {
+      return await run()
+    } finally {
+      this.#magpieActionRunning = false
+    }
+  }
+
+  async #routeMagpie(ctx: ApiRequestContext, id: string | undefined, action: string | undefined): Promise<void> {
+    await routeMagpie(
+      {
+        magpie: this.#opts.magpie,
+        json: (res, status, body) => this.#json(res, status, body),
+        readJsonBody: (req) => this.#readJsonBody(req),
+        magpieQuery: (run) => this.#withMagpieLock(run),
       },
       ctx,
       id,

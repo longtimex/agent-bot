@@ -97,10 +97,12 @@ export class TelegramCorePanels {
       .text("📦 Agent CLI", "show:agents")
       .text("🔌 cc-switch", "show:cc")
       .row()
+      .text("🧩 magpie 网关", "show:magpie")
       .text("🌐 网络代理", "show:proxy")
-      .text("🛠 运维中心", "show:ops")
       .row()
+      .text("🛠 运维中心", "show:ops")
       .text("🕐 时区", "tz:")
+      .row()
       .text("❓ 帮助", "show:help")
   }
 
