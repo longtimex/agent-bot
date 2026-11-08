@@ -5,7 +5,8 @@ import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { MagpieService } from "./magpie.js"
-import { ConfigError, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
+import { ConfigError, hasControlClientEvidence, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
+import { createFeishuConnection, createFeishuRuntime, type FeishuRuntime } from "./feishuRuntime.js"
 import { acquireLock } from "./lock.js"
 import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
 import { pruneOutbox } from "./media.js"
@@ -19,11 +20,11 @@ import { appVersion } from "./version.js"
 
 function setupHint(detail: string): string {
   return (
-    `${detail}\n\n首次连接 Telegram Bot：\n` +
-    "1. 在 Telegram 向 @BotFather 发送 /newbot，复制返回的 HTTP API Token\n" +
-    "2. 向 @userinfobot 发送任意消息，获取你的数字用户 ID\n" +
-    "3. 在 .env 中填写 TELEGRAM_BOT_TOKEN 与 TELEGRAM_ALLOW_USERS\n" +
-    "在终端中运行 npm run setup 可进入交互式连接向导。"
+    `${detail}\n\n首次连接控制端：\n` +
+    "导引式配置：在终端运行 npm run setup（或 npm run clients），可多选 Telegram、安卓 App、飞书。\n\n" +
+    "Telegram：向 @BotFather 发送 /newbot 获取 Token，向 @userinfobot 获取数字用户 ID，填写 TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOW_USERS。\n\n" +
+    "安卓 App：设置 API_ENABLED=1，并把 API_BIND 设为手机可达的具体地址，或填写 API_PUBLIC_URL；只监听 0.0.0.0 / :: 无法自动得到配对地址。也可在向导中生成 API_TOKEN 后直接配对。\n\n" +
+    "飞书：在开放平台创建企业自建应用，启用机器人能力，填写 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_ALLOW_OPEN_IDS。"
   )
 }
 
@@ -52,16 +53,19 @@ async function loadConfigOrSetup(): Promise<BotConfig> {
     return loadConfig()
   } catch (err) {
     if (!(err instanceof ConfigError)) throw err
+    // Any partial client block (bad Feishu credentials, a loopback-only API, ...) needs its own
+    // validation error, not a first-run wizard that could overwrite the operator's choices.
+    if (hasControlClientEvidence(process.env)) throw err
     if (!canRunSetup()) throw new ConfigError(setupHint(err.message))
 
-    console.log("检测到尚未完成 Telegram 连接配置，进入首次连接向导…\n")
+    console.log("检测到尚未配置控制端，进入首次连接向导…\n")
     const result = await setupFromCli()
-    if (!result.ok || !result.token || !result.users?.length) {
-      throw new ConfigError("未完成 Telegram 连接配置。可重新运行 npm run setup。")
+    if (!result.ok) {
+      throw new ConfigError("未完成控制端配置。可重新运行 npm run setup 或 npm run clients。")
     }
-    // loadEnvFile does not override existing (possibly empty) environment values
-    process.env.TELEGRAM_BOT_TOKEN = result.token
-    process.env.TELEGRAM_ALLOW_USERS = result.users.join(",")
+    // loadEnvFile does not override values that were already present (sometimes empty) in the
+    // process environment, so apply what the wizard wrote before re-reading the config.
+    for (const [key, value] of Object.entries(result.updates ?? {})) process.env[key] = value
     console.log("\n✅ 配置已就绪，继续启动 Bot…\n")
     return loadConfig()
   }
@@ -160,7 +164,23 @@ async function main(): Promise<void> {
     store,
   )
 
-  const tgBridge = new TelegramBridge(cfg, oc, agents, store, log, proxies, undefined, ccswitch, models, undefined, undefined, magpie)
+  const feishuConnection = createFeishuConnection(cfg, log)
+  const tgBridge = new TelegramBridge(
+    cfg,
+    oc,
+    agents,
+    store,
+    log,
+    proxies,
+    undefined,
+    ccswitch,
+    models,
+    undefined,
+    undefined,
+    magpie,
+    feishuConnection?.resolver,
+    feishuConnection?.client,
+  )
 
   let apiServer: ApiServer | undefined
   if (cfg.api.enabled) {
@@ -191,7 +211,9 @@ async function main(): Promise<void> {
             add: (ids) => tgBridge.addAccess(ids),
             remove: (ids) => tgBridge.removeAccess(ids),
           },
-          ownerChatId: tgBridge.ownerChatId,
+          ownerChatId: () => tgBridge.ownerChatId,
+          ownerUserId: () => tgBridge.ownerUserId,
+          channel: feishuConnection?.resolver,
           version: appVersion(),
         },
         resolveApiToken(cfg),
@@ -200,15 +222,22 @@ async function main(): Promise<void> {
       await apiServer.start()
     } catch (err) {
       apiServer = undefined
-      log.error(`failed to start the HTTP API: ${(err as Error).message} (Telegram 继续正常运行)`)
+      log.error(`failed to start the HTTP API: ${(err as Error).message} (聊天控制端继续正常运行)`)
     }
   }
 
+  // Feishu is optional and independent. It is created after the API so a fatal
+  // long-connection failure can tell whether another control surface remains.
+  let feishu: FeishuRuntime | undefined
+  let shuttingDown = false
   const shutdown = async (signal: string, code = 0): Promise<void> => {
+    if (shuttingDown) return
+    shuttingDown = true
     log.info(`received ${signal}, shutting down`)
     process.exitCode = code
     clearInterval(pruneTimer)
     if (logTimer) clearInterval(logTimer)
+    await feishu?.stop()
     await agents.dispose(1_000).catch(() => {})
     proxies.dispose()
     if (apiServer) await apiServer.stop().catch(() => {})
@@ -218,26 +247,69 @@ async function main(): Promise<void> {
   }
 
   try {
+    feishu = createFeishuRuntime(
+      { cfg, bridge: tgBridge, log, connection: feishuConnection },
+      {
+        onFatal: (err) => {
+          log.error(`飞书控制端不可用：${err.message}`)
+          if (cfg.telegram.token || apiServer) {
+            log.error("飞书长连接已停止，但 Telegram 或 HTTP API 仍可使用")
+            return
+          }
+          void shutdown(`Feishu long connection stopped (${err.message})`, 1).catch((fatal: unknown) => {
+            console.error(`shutdown failed: ${fatalText(fatal)}`)
+            process.exit(1)
+          })
+        },
+      },
+    )
+  } catch (err) {
+    log.error(`Failed to configure Feishu: ${(err as Error).message}`)
+  }
+
+  let telegramReconnecting = false
+  try {
     const started = await tgBridge.start({
       // A polling loop that stopped for good must not linger: systemd/the restart
       // script only recover when the process actually exits.
       onFatal: (err) => {
+        // A Telegram outage is not fatal when Feishu or the App can still
+        // drive the same bridge. Exit only when no control surface remains.
+        if (feishu || apiServer) {
+          log.error(`Telegram polling stopped (${err.message}); other control surfaces remain available`)
+          return
+        }
         void shutdown(`polling stopped (${err.message})`, 1).catch((fatal: unknown) => {
           console.error(`shutdown failed: ${fatalText(fatal)}`)
           process.exit(1)
         })
       },
     })
-    if (started.reconnecting && !apiServer) {
-      // Telegram is down and there is no HTTP API to serve (disabled, or the port was taken):
-      // nothing would answer on either channel, so the supervisor's restart is the way back.
-      log.error("Telegram 未连接，且 HTTP API 不可用，退出以便重启恢复")
-      await shutdown("Telegram unavailable and no HTTP API to serve", 1).catch(() => {})
-      return
-    }
+    telegramReconnecting = started.reconnecting
   } catch (err) {
     log.error((err as Error).message)
-    await shutdown("startup failure", 1).catch(() => {})
+    if (!feishu && !apiServer) {
+      await shutdown("startup failure", 1).catch(() => {})
+      return
+    }
+    log.error("Telegram 启动失败，但飞书/HTTP API 仍可使用")
+  }
+
+  feishu?.start()
+  if (cfg.feishu && !feishu) {
+    // A configured but unusable Feishu client must not silently leave a process
+    // supervising nothing when Telegram is absent.
+    if (!cfg.telegram.token && !apiServer) {
+      log.error("飞书未成功初始化，且没有 Telegram 或 HTTP API 可用，退出以便修复配置")
+      await shutdown("Feishu unavailable and no other control surface", 1).catch(() => {})
+      return
+    }
+  }
+  if (telegramReconnecting && !feishu && !apiServer) {
+    // Telegram is down and there is no HTTP API or Feishu to serve: nothing
+    // would answer on any channel, so the supervisor's restart is the way back.
+    log.error("Telegram 未连接，且飞书与 HTTP API 均不可用，退出以便重启恢复")
+    await shutdown("Telegram unavailable and no other control surface", 1).catch(() => {})
     return
   }
 

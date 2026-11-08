@@ -612,6 +612,19 @@ export class TelegramOpsCommands {
       users.clear()
       for (const id of ids) users.add(id)
       this.#deps.log.info(`access whitelist now ${users.size} user(s): ${[...users].join(",")}`)
+      return
+    }
+    if (key === "FEISHU_ALLOW_OPEN_IDS") {
+      const ids = value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+      if (ids.length === 0 && !this.#deps.cfg.feishu?.allowAll) return
+      const users = this.#deps.cfg.feishu?.allowOpenIds
+      if (!users) return
+      users.clear()
+      for (const id of ids) users.add(id)
+      this.#deps.log.info(`Feishu access whitelist now ${users.size} open_id(s)`)
     }
   }
 

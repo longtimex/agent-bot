@@ -509,10 +509,10 @@ test("ops env ignores inherited prototype keys", () => {
 
     const set = ops.envSet("toString", "abc")
     assert.equal(set.ok, false)
-    assert.match(set.message, /不支持在 Telegram 中修改 TOSTRING/)
+    assert.match(set.message, /不支持在聊天中修改 TOSTRING/)
     assert.equal(ops.envSet("constructor", "x").ok, false)
     assert.equal(ops.envUnset("constructor").ok, false)
-    assert.match(ops.envUnset("toString").message, /不支持在 Telegram 中修改 TOSTRING/)
+    assert.match(ops.envUnset("toString").message, /不支持在聊天中修改 TOSTRING/)
     assert.equal(ops.envList().entries.find((entry) => entry.key === "TOSTRING")?.editable, false)
     assert.equal(readFileSync(join(dir, ".env"), "utf8").includes("TOSTRING=1"), true)
   } finally {

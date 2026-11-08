@@ -5,15 +5,15 @@
 ## 分层
 
 ```text
-Telegram / Android App
+Telegram / Feishu / Android App
         │
         ▼
-┌───────────────────┐        ┌──────────────────┐
-│  Telegram 传输层   │        │  HTTP API 传输层  │
-│  telegram.ts       │        │  api.ts           │
-└─────────┬─────────┘        └────────┬─────────┘
-          │                            │
-          └──────────────┬─────────────┘
+┌──────────────┐  ┌───────────────────┐  ┌──────────────────┐
+│  Telegram    │  │  飞书传输层        │  │  HTTP API 传输层  │
+│  telegram.ts │  │  feishu*.ts        │  │  api.ts           │
+└──────┬───────┘  └────────┬──────────┘  └────────┬─────────┘
+       │                   │                       │
+       └───────────────────┴───────────┬───────────┘
                          ▼
               服务与领域模块
    apiTasks / apiPersonal / apiCc / engineCall
@@ -27,7 +27,10 @@ Telegram / Android App
 ### 传输层
 
 - `src/telegram.ts`：命令分发、面板跳转、任务队列入口。
+- `src/feishu.ts` / `src/feishuApi.ts` / `src/feishuCards.ts` / `src/feishuAttachments.ts`：飞书长连接事件、卡片按钮、消息与附件适配。普通消息走 SDK 长连接；SDK 长连接不分发卡片回调，因此按钮由可选的 `feishuCallback.ts` HTTP 入口接收并复用同一处理函数。飞书事件被转换为合成 grammY Update，出站 Bot API 调用由 transformer 改道飞书，因此不会维护第二套命令实现。
+- `src/feishuIdentity.ts` / `src/channelRegistry.ts`：把飞书 `open_id` / `chat_id` 映射到持久化的私有数字命名空间，并为会话键加上 `tg:` / `fs:` 前缀，避免与 Telegram ID 或彼此上下文串线。
 - `src/api.ts`：`/api/v1` 路由、鉴权、请求解码。
+- `src/setup.ts` / `src/setup-cli.ts`：安装期控制端配置向导。它只负责选择客户端、校验输入并把结果原子写入 `.env`；不启动长连接，也不承载运行时逻辑。
 - 传输层只做三件事：解码请求、调用一个服务方法、把错误映射成 Telegram/HTTP 错误。
 
 ### 服务与领域模块
@@ -41,9 +44,9 @@ Telegram / Android App
 - `src/ops.ts`：运维诊断、日志、更新、服务管理。
 - `src/ccswitch.ts` / `src/ccCommands.ts` / `src/ccGuards.ts`：cc-switch 适配与危险命令拦截。
 
-### Telegram 子模块
+### 聊天子模块（Telegram / 飞书共用）
 
-Telegram 的领域逻辑按命令组拆到独立模块，`telegram.ts` 只保留委托方法：
+命令与面板的领域逻辑按命令组拆到独立模块，`telegram.ts` 只保留委托方法；这些模块同时服务 Telegram 与飞书：
 
 | 模块 | 职责 |
 | --- | --- |
@@ -63,9 +66,9 @@ Telegram 的领域逻辑按命令组拆到独立模块，`telegram.ts` 只保留
 
 ## 新增能力放哪里
 
-1. **Telegram 命令**：新建或扩展对应 `telegram*Commands.ts`，不要直接写进 `telegram.ts`。
+1. **聊天命令**：新建或扩展对应 `telegram*Commands.ts`，不要直接写进 `telegram.ts`。这些模块同时服务 Telegram 与飞书；不要把平台专属调用写进领域逻辑。
 2. **HTTP 路由**：参数解码留在 `api.ts`，领域操作放到 `api*.ts` 或已有服务。
-3. **跨客户端能力**：先做服务方法，再让 Telegram 与 API 各自调用；不要只写在一个 handler 里。
+3. **跨客户端能力**：先做服务方法，再让 Telegram、飞书与 API 各自调用；不要只写在一个 handler 里。需要发消息、编辑面板或上传媒体时，只调用 grammY Bot API，飞书 transformer 会负责翻译。
 4. **纯工具**：放到 `telegramSupport.ts`、`messages.ts`、`media.ts` 等无状态模块。
 5. **持久化**：沿用 `store.ts` / `usage.ts` / `history.ts` 的原子写与损坏隔离规则。
 
@@ -80,14 +83,16 @@ Telegram 的领域逻辑按命令组拆到独立模块，`telegram.ts` 只保留
 ## 数据流
 
 ```text
-Telegram 消息 / App 任务
+Telegram / 飞书消息 / App 任务
   → 命令/路由解码
   → 任务队列（每会话串行）
   → engineCall（OpenCode 或 Agent CLI）
   → 进度/终态
-  → Telegram 卡片 / API SSE
+  → Telegram 卡片 / 飞书交互卡片 / API SSE
   → usage / history / attachments
 ```
+
+飞书与 Telegram 共享同一进程内服务，但会话、usage 与提醒记录使用独立渠道前缀和身份编号；通知类消息由持久化的 owner 聊天投递，不会因另一渠道启动而丢失。
 
 ## 相关文档
 

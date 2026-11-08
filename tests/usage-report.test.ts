@@ -106,8 +106,9 @@ test("daily report weekday follows the report date, not the formatting wall cloc
   assert.doesNotMatch(text, /星期[六日]/, text)
 })
 
-test("source labels cover telegram, app and unknown keys", () => {
+test("source labels cover telegram, feishu, app and unknown keys", () => {
   assert.equal(sourceLabel("tg:123456"), "Telegram 123456")
+  assert.equal(sourceLabel("fs:123456"), "Feishu 123456")
   assert.equal(sourceLabel("api:app"), "App")
   assert.equal(sourceLabel("custom"), "custom")
 })

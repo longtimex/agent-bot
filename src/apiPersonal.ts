@@ -17,6 +17,7 @@ import { scheduleTargetLabel, type ScheduledTask, type ScheduleService } from ".
 import type { SessionStore } from "./store.js"
 import type { UsageStore } from "./usage.js"
 import { buildDailyReportData, formatDailyReport, sourceLabel } from "./usageReport.js"
+import { sessionKeyForChat, type ChannelIdResolver } from "./channelRegistry.js"
 import { AVAILABLE_MODELS, type ModelInfo } from "./models.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import type { ModelAdmin } from "./modelAdmin.js"
@@ -29,6 +30,8 @@ import type { ModelAdmin } from "./modelAdmin.js"
 export interface PersonalRouteDeps {
   appKey: string
   ownerChatId?: number
+  /** Owner user id; Feishu chats and users use separate numeric namespaces. */
+  ownerUserId?: number
   store: SessionStore
   cfg: BotConfig
   registry: AgentCliRegistry
@@ -53,6 +56,8 @@ export interface PersonalRouteDeps {
   ops?: OpsService
   proxies?: ProxyService
   history: TaskHistoryStore
+  /** Resolves whether the app-facing owner chat belongs to Telegram or Feishu. */
+  channel?: ChannelIdResolver
   access?: {
     list(): { users: string[]; allowAll: boolean }
     add(ids: string[]): { ok: boolean; message: string }
@@ -63,9 +68,17 @@ export interface PersonalRouteDeps {
 export function requireOwnerChat(deps: PersonalRouteDeps, feature: string): number {
   const owner = deps.ownerChatId
   if (!owner) {
-    throw new ApiError(409, `${feature}需要一个推送目标：请在 .env 的 TELEGRAM_ALLOW_USERS 配置你的 Telegram 用户 ID`)
+    throw new ApiError(
+      409,
+      `${feature}需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或配置对应渠道的白名单。`,
+    )
   }
   return owner
+}
+
+/** Access checks use the user id while notifications use the chat id. */
+function ownerUserId(deps: PersonalRouteDeps): number {
+  return deps.ownerUserId ?? requireOwnerChat(deps, "提醒")
 }
 
 export function publicReminder(reminder: Reminder): Record<string, unknown> {
@@ -104,7 +117,7 @@ export async function routeReminders(
     if (!text) throw new ApiError(400, "缺少 text 字段，例如：{\"text\":\"30m 喝水\"}")
     let reminder
     try {
-      reminder = deps.reminders.add(chatId, chatId, text)
+      reminder = deps.reminders.add(chatId, ownerUserId(deps), text)
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : "无法解析提醒时间")
     }
@@ -155,7 +168,7 @@ export async function routeSchedules(
         : { engine, cliModel: deps.store.getCliModel(deps.appKey, engine) }
     let task
     try {
-      task = deps.schedules.add(chatId, chatId, text, defaults)
+      task = deps.schedules.add(chatId, ownerUserId(deps), text, defaults)
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : "无法解析定时任务")
     }
@@ -187,7 +200,7 @@ export async function routeSchedules(
     if (!task) throw new ApiError(404, "定时任务不存在")
     deps.json(ctx.res, 200, {
       ok: true,
-      message: `已立即执行定时任务 #${taskId}，结果会发送到 Telegram（不影响原定时间）。`,
+      message: `已立即执行定时任务 #${taskId}，结果会发送到当前聊天（不影响原定时间）。`,
       schedule: publicSchedule(task, deps.registry),
     })
     return
@@ -195,21 +208,25 @@ export async function routeSchedules(
   throw new ApiError(404, "未知的定时任务 API 路径")
 }
 
-/** The live sessions this token can see: the App's own, plus the Telegram chat the bot
- * pushes to. They stay separate on purpose — each client keeps its own engine, model
- * and directory — which is why the App shows what the other end runs instead of guessing. */
+/** The live sessions this token can see: the App's own, plus the chat the bot pushes to.
+ * They stay separate on purpose — each client keeps its own engine, model and
+ * directory — which is why the App shows what the other end runs instead of guessing. */
 export function peerSessions(deps: PersonalRouteDeps): Array<{ scope: string; label: string; key: string }> {
   const peers = [{ scope: "app", label: "本机 App", key: deps.appKey }]
   const owner = deps.ownerChatId
-  if (owner) peers.push({ scope: "telegram", label: "Telegram 会话", key: `tg:${owner}` })
+  if (owner) {
+    const key = sessionKeyForChat(owner, deps.channel)
+    const feishu = key.startsWith("fs:")
+    peers.push({ scope: feishu ? "feishu" : "telegram", label: feishu ? "飞书会话" : "Telegram 会话", key })
+  }
   return peers
 }
 
 /**
  * One live session as the other end sees it. Activity comes from the usage store, which
- * Telegram and the App both write under the same key, so those numbers are real; this
+ * The chat channel and the App both write under the same key, so those numbers are real; this
  * server's task map only ever holds App tasks, so queue depth is deliberately not claimed.
- * Counts and timestamps travel only — never the session key (`tg:<chatId>` for Telegram)
+ * Counts and timestamps travel only — never the session key (`tg:` / `fs:` plus chat id)
  * and never the chat's message text.
  */
 export function peerView(deps: PersonalRouteDeps, peer: { scope: string; label: string; key: string }): Record<string, unknown> {
@@ -241,9 +258,10 @@ export async function routePeers(deps: PersonalRouteDeps, ctx: ApiRequestContext
 
   if (ctx.method === "POST" && id === "follow") {
     const body = await deps.readJsonBody(ctx.req)
-    const scope = typeof body.scope === "string" && body.scope.trim() ? body.scope.trim() : "telegram"
+    const defaultScope = peers.find((entry) => entry.scope !== "app")?.scope ?? "telegram"
+    const scope = typeof body.scope === "string" && body.scope.trim() ? body.scope.trim() : defaultScope
     const peer = peers.find((entry) => entry.scope === scope && entry.key !== deps.appKey)
-    if (!peer) throw new ApiError(409, "没有可跟随的对端会话：请先在 Telegram 里与 Bot 对话一次")
+    if (!peer) throw new ApiError(409, "没有可跟随的对端会话：请先在 Telegram 或飞书里与 Bot 对话一次")
     // Following swaps engine/model/directory at once, which a running task must not be replayed under
     if (deps.hasActiveTask()) throw new ApiError(409, "任务执行中，请先停止当前任务再跟随对端会话")
     const changed = deps.adoptSession(peer.key)
@@ -599,8 +617,8 @@ export async function routeUsageHistory(
     return
   }
 
-  // Cross-chat aggregate (Telegram + App together) for status dashboards; the
-  // rendered text matches what the scheduled daily report pushes to Telegram.
+  // Cross-chat aggregate (chat channels + App together) for status dashboards;
+  // the rendered text matches what the scheduled daily report pushes to chat.
   if (resource === "usage" && id === "report" && method === "GET") {
     const data = buildDailyReportData(deps.usage, deps.timezone())
     deps.json(ctx.res, 200, {

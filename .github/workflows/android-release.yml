@@ -69,9 +69,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          asset="agent-bot-v${version}.apk"
           mkdir -p "$RUNNER_TEMP/release"
-          cp android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/release/agent-bot.apk"
-          (cd "$RUNNER_TEMP/release" && sha256sum agent-bot.apk > agent-bot.apk.sha256)
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/release/$asset"
+          (cd "$RUNNER_TEMP/release" && sha256sum "$asset" > "$asset.sha256")
 
       - name: Publish GitHub Release
         env:
@@ -81,16 +83,17 @@ jobs:
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           version="${tag#android-v}"
+          asset="agent-bot-v${version}.apk"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" \
-              "$RUNNER_TEMP/release/agent-bot.apk#agent-bot.apk" \
-              "$RUNNER_TEMP/release/agent-bot.apk.sha256#agent-bot.apk.sha256" \
+              "$RUNNER_TEMP/release/$asset#$asset" \
+              "$RUNNER_TEMP/release/$asset.sha256#$asset.sha256" \
               --clobber
           else
             gh release create "$tag" \
-              "$RUNNER_TEMP/release/agent-bot.apk#agent-bot.apk" \
-              "$RUNNER_TEMP/release/agent-bot.apk.sha256#agent-bot.apk.sha256" \
+              "$RUNNER_TEMP/release/$asset#$asset" \
+              "$RUNNER_TEMP/release/$asset.sha256#$asset.sha256" \
               --verify-tag \
               --title "Agent Bot Android v${version}" \
-              --notes "Agent Bot Android v${version}. Download agent-bot.apk and verify it against agent-bot.apk.sha256."
+              --notes "Agent Bot Android v${version}. Download ${asset} and verify it against ${asset}.sha256."
           fi

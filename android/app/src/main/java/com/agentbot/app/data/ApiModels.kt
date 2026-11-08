@@ -731,6 +731,7 @@ data class ServerInfo(
     val cliSessionId: String? = null,
     val workDir: String? = null,
     val chatId: Long? = null,
+    val userId: Long? = null,
     val api: ApiEndpointInfo = ApiEndpointInfo(),
 )
 

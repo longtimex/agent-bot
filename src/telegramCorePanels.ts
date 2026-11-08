@@ -44,7 +44,7 @@ export class TelegramCorePanels {
         ? `${detected.slice(0, 6).map((label) => escapeMarkdown(label)).join("、")}${detected.length > 6 ? ` 等 ${detected.length} 个` : ""}`
         : "无（可使用 OpenCode，或发送 /agents 安装）"
     return (
-      `👋 *欢迎使用 AI 私人助手*\n\n• 用户 ID：\`${userId}\`\n` +
+      `👋 *欢迎使用 AI 私人助手*\n\n• 账号 ID：\`${userId}\`\n` +
       `• 引擎：*${escapeMarkdown(this.#deps.agents.registry.label(engine))}*\n• 模型：*${escapeMarkdown(model)}*\n` +
       `• 本机 Agent CLI：${detectedText}\n\n` +
       `💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务。\n` +

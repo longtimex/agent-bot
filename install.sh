@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Installs the Telegram OpenCode bot from a git checkout or a fresh clone.
+# Installs Agent Bot (Telegram, Android App and Feishu control clients) from a git
+# checkout or a fresh clone.
 #
 #   ./install.sh                         # use this checkout
 #   curl -fsSL https://raw.githubusercontent.com/longtimex/agent-bot/main/install.sh | sh
@@ -10,7 +11,7 @@
 #   AGENT_BOT_BRANCH    branch to install (default: main)
 #   AGENT_BOT_DIR       install directory (default: the checkout, or ~/.agent-bot)
 #   AGENT_BOT_OPENCODE  1 to install the opencode CLI (default: 1)
-#   AGENT_BOT_SETUP     1 to run the Telegram setup wizard when .env has no token
+#   AGENT_BOT_SETUP     1 to run the client setup wizard (Telegram / Android / Feishu)
 #                       (default: 1 only when stdin is a TTY)
 set -eu
 
@@ -32,13 +33,17 @@ Usage: install.sh [options]
   --branch NAME      git branch (default: main)
   --local            install this checkout (default when the script is in one)
   --no-opencode      do not install the opencode CLI
-  --no-setup         do not run the Telegram setup wizard
+  --setup            always open the client setup wizard (even if a client exists)
+  --no-setup         do not run the client setup wizard
   --start            start the bot after a successful install
   --dry-run          print what would run without changing anything
   -h, --help         show this help
 
+Clients: Telegram / Android / Feishu. The wizard can configure one or more;
+rerun npm run clients later to add another client without losing existing settings.
+
 Environment: AGENT_BOT_REPO, AGENT_BOT_BRANCH, AGENT_BOT_DIR,
-AGENT_BOT_OPENCODE=0, AGENT_BOT_SETUP=0
+AGENT_BOT_OPENCODE=0, AGENT_BOT_SETUP=0|1
 EOF
 }
 
@@ -55,6 +60,7 @@ while [ "$#" -gt 0 ]; do
       branch="$2"; shift 2 ;;
     --local) use_local=1; shift ;;
     --no-opencode) want_opencode=0; shift ;;
+    --setup) want_setup=1; shift ;;
     --no-setup) want_setup=0; shift ;;
     --start) start_after=1; shift ;;
     --dry-run) dry_run=1; shift ;;
@@ -166,19 +172,43 @@ if [ "$want_opencode" != 0 ] && [ "$dry_run" -eq 0 ]; then
   fi
 fi
 
-has_token=0
-if [ -f .env ] && grep -Eq '^TELEGRAM_BOT_TOKEN=.+' .env; then has_token=1; fi
+# Telegram, Feishu or a phone-reachable Android API is enough to start the bot.
+# The sample .env enables the API on loopback; that is the default, not a configured client.
+env_value() {
+  [ -f .env ] || return 1
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env | tail -n 1 | tr -d '\r'
+}
+
+has_control_channel() {
+  [ -n "$(env_value TELEGRAM_BOT_TOKEN)" ] && return 0
+  if [ -n "$(env_value FEISHU_APP_ID)" ] && [ -n "$(env_value FEISHU_APP_SECRET)" ]; then return 0; fi
+  case "$(env_value API_ENABLED || true)" in 0|false|no|off) return 1 ;; esac
+  [ -n "$(env_value API_PUBLIC_URL)" ] && return 0
+  case "$(env_value API_BIND || true)" in
+    127.*|localhost|*.localhost|"::1"|"[::1]"|0.0.0.0|"::"|"[::]"|"") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+has_channel=0
+if has_control_channel; then has_channel=1; fi
 if [ "$want_setup" = auto ]; then
   if [ "$interactive" = true ] && [ -t 0 ]; then want_setup=1; else want_setup=0; fi
 fi
-if [ "$want_setup" != 0 ] && [ "$has_token" -eq 0 ] && [ "$dry_run" -eq 0 ]; then
-  step "Starting the Telegram setup wizard..."
+if [ "$want_setup" != 0 ] && [ "$dry_run" -eq 0 ]; then
+  if [ "$has_channel" -eq 1 ]; then
+    step "A control client is already configured. Opening the client wizard to add or edit one..."
+  else
+    step "Starting the client setup wizard (Telegram / Android App / Feishu)..."
+  fi
   npm run setup || fail "the setup wizard did not finish; rerun npm run setup in ${install_dir}"
-  has_token=1
+  # Re-read .env so --start sees a client that was configured just now.
+  has_channel=0
+  if has_control_channel; then has_channel=1; fi
 fi
 
 if [ "$start_after" -eq 1 ] && [ "$dry_run" -eq 0 ]; then
-  [ "$has_token" -eq 1 ] || fail "refusing to start without TELEGRAM_BOT_TOKEN; run npm run setup first"
+  [ "$has_channel" -eq 1 ] || fail "refusing to start without a configured Telegram, Android App or Feishu client; run npm run setup or edit .env first"
   step "Starting the bot..."
   run npm run restart
 fi
@@ -191,13 +221,14 @@ else
 fi
 printf '  Next steps:\n'
 printf '    1. %scd %s%s\n' "$bold" "$install_dir" "$reset"
-if [ "$has_token" -eq 0 ]; then
-  printf '    2. %snpm run setup%s   # paste the BotFather token and your Telegram user ID\n' "$bold" "$reset"
+if [ "$has_channel" -eq 0 ]; then
+  printf '    2. %snpm run setup%s   # choose Telegram, Android App or Feishu\n' "$bold" "$reset"
 else
   printf '    2. %snpm run serve%s   # terminal 1: start opencode on 127.0.0.1:4096\n' "$bold" "$reset"
+  printf '       %snpm run clients%s # add or edit another control client later\n' "$bold" "$reset"
 fi
 printf '    3. %snpm run restart%s # start the bot in the background (log: data/bot.log)\n' "$bold" "$reset"
-printf '    4. Open Telegram, send /start to your bot\n\n'
+printf '    4. Open Telegram or Feishu and send /start; pair the Android App from its Settings screen\n\n'
 if [ "$dry_run" -eq 1 ]; then
   printf '  Dry run only; nothing was changed.\n\n'
 fi

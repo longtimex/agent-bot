@@ -13,8 +13,8 @@ android {
         applicationId = "com.agentbot.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.0.12"
+        versionCode = 1000002
+        versionName = "1.0.2"
     }
 
     buildTypes {

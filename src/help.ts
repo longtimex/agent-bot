@@ -31,7 +31,7 @@ export const HELP = `🤖 *AI 私人助手 · 功能菜单*
 
 _更多：\`/help full\` 查看完整说明 · \`/help cc\` 查看 cc-switch 指令_`
 
-export const HELP_FULL = `🤖 *AI 私人助手 (Telegram 版)*
+export const HELP_FULL = `🤖 *AI 私人助手*
 
 *常用核心命令：*
 • \`/agent\` - 查看并切换 Agent 引擎（OpenCode / Claude Code / Codex / Gemini / Qoder 等）
@@ -74,7 +74,7 @@ export const HELP_FULL = `🤖 *AI 私人助手 (Telegram 版)*
 • \`/restart\` - 重启 Bot（需确认，systemd 部署会拒绝）
 • \`/service opencode start|stop|restart\` - 管理 OpenCode 服务
 • \`/env\` / \`/env set KEY VALUE\` / \`/env unset KEY\` - 安全查看与修改非密钥配置
-• \`/access\` / \`/access add <ID>\` / \`/access del <ID>\` - 管理 Telegram 访问白名单，立即生效
+• \`/access\` / \`/access add <ID>\` / \`/access del <ID>\` - 管理当前渠道访问白名单，立即生效
 • \`/api\` - 查看安卓 App 配对信息（HTTP API 地址、令牌与连接提示）
 • \`/id\` - 查看你的会话与当前配置信息
 • \`/help\` - 分类帮助；\`/help full\` 查看本文，\`/help cc\` 查看 cc-switch 指令
@@ -261,7 +261,7 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "restart", description: "重启 Bot（需确认）" },
   { command: "service", description: "管理 OpenCode 服务" },
   { command: "env", description: "查看或修改非密钥配置" },
-  { command: "access", description: "管理 Telegram 访问白名单（立即生效）" },
+  { command: "access", description: "管理当前渠道访问白名单（立即生效）" },
   { command: "api", description: "安卓 App 配对信息（HTTP API 地址与令牌）" },
   { command: "alias", description: "自定义快捷指令（/alias add 名称 指令内容）" },
   { command: "timezone", description: "查看或切换时区（立即生效）" },

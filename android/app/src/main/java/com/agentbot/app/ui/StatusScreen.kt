@@ -72,6 +72,7 @@ fun StatusScreen(vm: AppViewModel) {
                     StatusLine("工作目录", info.workDir ?: "-")
                     StatusLine("时区", info.timezone ?: "-")
                     StatusLine("推送聊天 ID", info.chatId?.toString() ?: "未配置")
+                    StatusLine("推送用户 ID", info.userId?.toString() ?: "未配置")
                     StatusLine("会话 ID", info.sessionId ?: info.cliSessionId ?: "暂未创建")
                 }
             }

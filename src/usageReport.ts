@@ -23,10 +23,11 @@ export function trendBars(trend: UsageTrendDay[]): string {
     .join("")
 }
 
-/** Human name for a usage key: `tg:<id>` / `api:app` today, anything else verbatim. */
+/** Human name for a usage key: `tg:<id>` / `fs:<id>` / `api:app`, anything else verbatim. */
 export function sourceLabel(key: string): string {
   if (key === "api:app") return "App"
   if (key.startsWith("tg:")) return `Telegram ${key.slice(3)}`
+  if (key.startsWith("fs:")) return `Feishu ${key.slice(3)}`
   return key
 }
 

@@ -1,4 +1,5 @@
 import { existsSync, statSync } from "node:fs"
+import { isIP } from "node:net"
 import { resolve } from "node:path"
 import process from "node:process"
 import { CC_SWITCH_APPS } from "./ccswitch.js"
@@ -14,6 +15,15 @@ export interface BotConfig {
     token?: string
     allowUsers: Set<string>
     allowAll: boolean
+  }
+  /** Optional Feishu (Lark) control channel. Telegram and Feishu may run together. */
+  feishu?: {
+    appId: string
+    appSecret: string
+    allowOpenIds: Set<string>
+    allowAll: boolean
+    /** Interactive-card callbacks use a public HTTP endpoint; message events stay on the long connection. */
+    callback?: FeishuCallbackConfig
   }
   opencode: {
     url: string
@@ -77,6 +87,15 @@ export interface BotConfig {
   }
 }
 
+export interface FeishuCallbackConfig {
+  enabled: boolean
+  port: number
+  bind: string
+  path: string
+  verificationToken?: string
+  encryptKey?: string
+}
+
 /** A startup configuration problem: the message is the guidance, so no stack is printed. */
 export class StartupConfigError extends Error {
   name = "StartupConfigError"
@@ -92,7 +111,7 @@ export function loadDotEnvFile(): void {
   if (!existsSync(".env")) return
   if (statSync(".env").isDirectory()) {
     // `docker compose up` with a missing host file silently mounts an empty *directory* at
-    // ./.env, and skipping it would only surface later as "未配置 TELEGRAM_BOT_TOKEN".
+    // ./.env, and skipping it would only surface later as "尚未配置可用的控制端".
     throw new ConfigError(
       "拒绝启动：.env 是一个目录，不是文件。多半是宿主机上没有 .env，Docker 自动建了同名目录；" +
         "先执行 cp .env.example .env 并填好配置，再重新 docker compose up。",
@@ -112,6 +131,63 @@ function csv(value: string | undefined): Set<string> {
       .map((item) => item.trim())
       .filter(Boolean),
   )
+}
+
+/** A bind that only accepts connections from the same machine cannot be dialled by the App. */
+export function isLoopbackApiBind(bind: string): boolean {
+  const host = bind.trim().toLowerCase().replace(/^\[|\]$/g, "")
+  if (!host || host === "localhost" || host.endsWith(".localhost")) return true
+  if (host === "::1") return true
+  return isIP(host) === 4 && host.startsWith("127.")
+}
+
+/** Wildcard and loopback binds do not tell a phone which address to dial for a pairing QR. */
+export function isConcreteApiBind(bind: string): boolean {
+  const host = bind.trim().toLowerCase().replace(/^\[|\]$/g, "")
+  if (!host || host === "0.0.0.0" || host === "::") return false
+  return !isLoopbackApiBind(host)
+}
+
+export interface ControlClientEvidence {
+  telegram: boolean
+  feishu: boolean
+  android: boolean
+}
+
+/**
+ * Whether the environment contains any control-client configuration. This is intentionally
+ * broader than validation: a half-filled Feishu block must surface its own error instead of
+ * being mistaken for a first run and overwritten by the wizard.
+ */
+export function controlClientEvidence(env: NodeJS.ProcessEnv = process.env): ControlClientEvidence {
+  const apiBind = pick(env.API_BIND) ?? "127.0.0.1"
+  const apiPublicUrl = pick(env.API_PUBLIC_URL)
+  return {
+    telegram: Boolean(pick(env.TELEGRAM_BOT_TOKEN)),
+    feishu: Boolean(pick(env.FEISHU_APP_ID) || pick(env.FEISHU_APP_SECRET)),
+    // A wildcard bind is not a phone-reachable address: without API_PUBLIC_URL the
+    // operator can only guess the host and the /api pairing QR cannot be generated.
+    android: bool(env.API_ENABLED, true) && Boolean(apiPublicUrl || isConcreteApiBind(apiBind)),
+  }
+}
+
+export function hasControlClientEvidence(env: NodeJS.ProcessEnv = process.env): boolean {
+  const evidence = controlClientEvidence(env)
+  return evidence.telegram || evidence.feishu || evidence.android
+}
+
+/**
+ * The long-connection client only accepts `cli_` plus 16 hex characters and
+ * otherwise declines to connect without surfacing an error. Validate the same
+ * shape here so a typo cannot leave a Feishu-only process looking healthy but
+ * silently deaf.
+ */
+export const FEISHU_APP_ID_RE = /^cli_[0-9a-f]{16}$/i
+export const FEISHU_OPEN_ID_RE = /^ou_[A-Za-z0-9_-]{1,64}$/
+
+function feishuIds(value: Set<string>): string | undefined {
+  const invalid = [...value].filter((id) => !FEISHU_OPEN_ID_RE.test(id))
+  return invalid.length > 0 ? invalid.join("、") : undefined
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -152,15 +228,73 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const tgToken = pick(env.TELEGRAM_BOT_TOKEN)
   const tgUsers = csv(env.TELEGRAM_ALLOW_USERS)
   const tgAllowAll = bool(env.TELEGRAM_ALLOW_ALL_USERS, false)
+  const feishuAppId = pick(env.FEISHU_APP_ID)
+  const feishuAppSecret = pick(env.FEISHU_APP_SECRET)
+  const feishuUsers = csv(env.FEISHU_ALLOW_OPEN_IDS)
+  const feishuAllowAll = bool(env.FEISHU_ALLOW_ALL_USERS, false)
+  const feishuCallbackEnabled = bool(env.FEISHU_CALLBACK_ENABLED, false)
+  const feishuCallbackPort = int(env.FEISHU_CALLBACK_PORT, 3081, 1, 65535)
+  const feishuCallbackBind = pick(env.FEISHU_CALLBACK_BIND) ?? "127.0.0.1"
+  const feishuCallbackPath = pick(env.FEISHU_CALLBACK_PATH) ?? "/feishu/card"
+  const feishuCallbackVerificationToken = pick(env.FEISHU_CALLBACK_VERIFICATION_TOKEN)
+  const feishuCallbackEncryptKey = pick(env.FEISHU_CALLBACK_ENCRYPT_KEY)
+  const apiEnabled = bool(env.API_ENABLED, true)
+  const apiPort = int(env.API_PORT, 3080, 1, 65535)
+  const apiBind = pick(env.API_BIND) ?? "127.0.0.1"
+  const apiPublicUrl = parseApiPublicUrl(pick(env.API_PUBLIC_URL))
+  const apiToken = pick(env.API_TOKEN)
+  // The API is on by default, but the sample .env binds it to loopback. Treating that as a
+  // configured control client would let an untouched .env start a bot no phone can reach.
+  const androidConfigured = apiEnabled && Boolean(apiPublicUrl || isConcreteApiBind(apiBind))
 
-  if (!tgToken) {
-    throw new ConfigError("拒绝启动：未配置 TELEGRAM_BOT_TOKEN。请在 .env 中设置。")
+  if (Boolean(feishuAppId) !== Boolean(feishuAppSecret)) {
+    throw new StartupConfigError("拒绝启动：FEISHU_APP_ID 与 FEISHU_APP_SECRET 必须同时配置。")
   }
-
-  if (tgUsers.size === 0 && !tgAllowAll) {
+  if (!tgToken && !feishuAppId && !androidConfigured) {
+    throw new ConfigError(
+      "拒绝启动：尚未配置可用的控制端。请配置 Telegram（TELEGRAM_BOT_TOKEN）、飞书" +
+        "（FEISHU_APP_ID/FEISHU_APP_SECRET）或安卓 App（API_PUBLIC_URL，或把 API_BIND 改为手机可达的具体地址；" +
+        "不能只监听 0.0.0.0 或 ::）。" +
+        "可运行 npm run setup 进入向导。",
+    )
+  }
+  if (tgToken && tgUsers.size === 0 && !tgAllowAll) {
     throw new ConfigError(
       "拒绝启动：TELEGRAM_ALLOW_USERS 为空。请在 .env 中填写允许使用的 Telegram 用户 ID（逗号分隔），" +
         "或显式设置 TELEGRAM_ALLOW_ALL_USERS=1 放行所有用户。",
+    )
+  }
+  if (feishuAppId && !FEISHU_APP_ID_RE.test(feishuAppId)) {
+    throw new StartupConfigError(
+      `拒绝启动：FEISHU_APP_ID 格式无效（${feishuAppId}）。应形如 cli_0123456789abcdef（cli_ 后 16 位十六进制字符）。`,
+    )
+  }
+  const invalidFeishuIds = feishuIds(feishuUsers)
+  if (invalidFeishuIds) {
+    throw new StartupConfigError(
+      `拒绝启动：FEISHU_ALLOW_OPEN_IDS 含无效 open_id（${invalidFeishuIds}）。每项应形如 ou_xxx。`,
+    )
+  }
+  if (feishuAppId && feishuUsers.size === 0 && !feishuAllowAll) {
+    throw new StartupConfigError(
+      "拒绝启动：FEISHU_ALLOW_OPEN_IDS 为空。请填写允许使用的飞书 open_id（逗号分隔），" +
+        "或显式设置 FEISHU_ALLOW_ALL_USERS=1 放行所有用户。",
+    )
+  }
+  if (feishuCallbackEnabled && !feishuAppId) {
+    throw new StartupConfigError("拒绝启动：FEISHU_CALLBACK_ENABLED=1 需要同时配置 FEISHU_APP_ID/FEISHU_APP_SECRET。")
+  }
+  if (!/^\/[A-Za-z0-9._~/-]+$/.test(feishuCallbackPath) || feishuCallbackPath.includes("//")) {
+    throw new StartupConfigError(
+      `拒绝启动：FEISHU_CALLBACK_PATH 无效（${feishuCallbackPath}）。请使用以 / 开头且不含查询参数的路径，例如 /feishu/card。`,
+    )
+  }
+  if (!feishuCallbackBind.trim()) {
+    throw new StartupConfigError("拒绝启动：FEISHU_CALLBACK_BIND 不能为空。")
+  }
+  if (feishuCallbackEnabled && !feishuCallbackVerificationToken && !feishuCallbackEncryptKey) {
+    throw new StartupConfigError(
+      "拒绝启动：飞书卡片回调需要验签凭据。请配置 FEISHU_CALLBACK_VERIFICATION_TOKEN 或 FEISHU_CALLBACK_ENCRYPT_KEY。",
     )
   }
 
@@ -183,6 +317,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       allowUsers: tgUsers,
       allowAll: tgAllowAll,
     },
+    feishu: feishuAppId
+      ? {
+          appId: feishuAppId,
+          appSecret: feishuAppSecret!,
+          allowOpenIds: feishuUsers,
+          allowAll: feishuAllowAll,
+          callback: feishuCallbackEnabled
+            ? {
+                enabled: true,
+                port: feishuCallbackPort,
+                bind: feishuCallbackBind,
+                path: feishuCallbackPath,
+                verificationToken: feishuCallbackVerificationToken,
+                encryptKey: feishuCallbackEncryptKey,
+              }
+            : undefined,
+        }
+      : undefined,
     opencode: {
       url: (pick(env.OPENCODE_URL) ?? "http://127.0.0.1:4096").replace(/\/+$/, ""),
       username: pick(env.OPENCODE_SERVER_USERNAME) ?? "opencode",
@@ -205,17 +357,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       configPath: agentCliConfig ? resolve(agentCliConfig) : resolve(dataDir, "agents.json"),
     },
     api: {
-      enabled: bool(env.API_ENABLED, true),
-      port: int(env.API_PORT, 3080, 1, 65535),
-      bind: pick(env.API_BIND) ?? "127.0.0.1",
-      publicUrl: parseApiPublicUrl(pick(env.API_PUBLIC_URL)),
-      token: pick(env.API_TOKEN),
+      enabled: apiEnabled,
+      port: apiPort,
+      bind: apiBind,
+      publicUrl: apiPublicUrl,
+      token: apiToken,
     },
     maxReplyLength: int(env.MAX_REPLY_LENGTH, 1500, 100, 4000),
     maxMediaBytes: int(env.MAX_MEDIA_MB, 20, 1, 100) * 1024 * 1024,
     mediaAllowPrivateUrls: bool(env.MEDIA_ALLOW_PRIVATE_URLS, false),
-    // Telegram Bot API only serves files up to 20MB via getFile
-    maxInputBytes: int(env.MAX_INPUT_MB, 20, 1, 20) * 1024 * 1024,
+    // Telegram serves files up to 20MB via getFile; Feishu's message-resource API accepts 100MB.
+    maxInputBytes: int(env.MAX_INPUT_MB, 20, 1, 100) * 1024 * 1024,
     dataDir,
     outboxDir: resolve(dataDir, "outbox"),
     inboxDir: resolve(dataDir, "inbox"),
@@ -268,7 +420,7 @@ function parseStt(env: NodeJS.ProcessEnv): BotConfig["stt"] {
  * it. Only values that would point the App somewhere the operator did not mean are refused, and a
  * pasted API endpoint is trimmed back to the base it stands for.
  */
-function parseApiPublicUrl(value: string | undefined): string | undefined {
+export function parseApiPublicUrl(value: string | undefined): string | undefined {
   if (!value) return undefined
   let url: URL
   try {

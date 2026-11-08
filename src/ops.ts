@@ -20,6 +20,7 @@ import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { childEnv, installerChildEnv } from "./binPath.js"
 import { CC_SWITCH_APPS, redactSecrets, resolveCcSwitchBin, stripAnsi } from "./ccswitch.js"
+import { FEISHU_OPEN_ID_RE } from "./config.js"
 import { whichSync } from "./agentCli.js"
 import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import { rotateLogIfNeeded } from "./logger.js"
@@ -200,12 +201,24 @@ function allowUsersRule(value: string): string | undefined {
   return bad.length > 0 ? `用户 ID 只能是数字（收到：${bad.join("、")}）` : undefined
 }
 
+/** Feishu open_ids are opaque but always carry the `ou_` prefix and no whitespace. */
+function allowOpenIdsRule(value: string): string | undefined {
+  const ids = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+  if (ids.length === 0) return "至少需要 1 个飞书 open_id"
+  if (ids.length > 200) return "白名单最多 200 个 open_id"
+  const bad = ids.filter((item) => !FEISHU_OPEN_ID_RE.test(item))
+  return bad.length > 0 ? `open_id 应形如 ou_xxx（收到：${bad.join("、")}）` : undefined
+}
+
 const ENV_RULES: Record<string, EnvRule> = {
   TASK_TIMEOUT_MS: intRule(10_000, 86_400_000),
   TASK_MAX_TIMEOUT_MS: intRule(10_000, 86_400_000),
   MAX_REPLY_LENGTH: intRule(100, 4000),
   MAX_MEDIA_MB: intRule(1, 100),
-  MAX_INPUT_MB: intRule(1, 20),
+  MAX_INPUT_MB: intRule(1, 100),
   REMINDER_TIMEZONE: { hint: "IANA 时区", validate: timezoneRule },
   LOG_LEVEL: enumRule(["debug", "info", "warn", "error"]),
   STARTUP_NOTICE: boolRule,
@@ -227,6 +240,19 @@ const ENV_RULES: Record<string, EnvRule> = {
   API_ENCRYPTION: boolRule,
   TELEGRAM_ALLOW_ALL_USERS: boolRule,
   TELEGRAM_ALLOW_USERS: { hint: "逗号分隔的 Telegram 用户 ID（请用 /access 修改）", validate: allowUsersRule },
+  FEISHU_ALLOW_ALL_USERS: boolRule,
+  FEISHU_ALLOW_OPEN_IDS: { hint: "逗号分隔的飞书 open_id（请用 /access 修改）", validate: allowOpenIdsRule },
+  FEISHU_CALLBACK_ENABLED: boolRule,
+  FEISHU_CALLBACK_PORT: intRule(1, 65535),
+  FEISHU_CALLBACK_BIND: {
+    hint: "回调监听地址（如 0.0.0.0 或 127.0.0.1）",
+    validate: (value) => (value.trim() ? undefined : "监听地址不能为空"),
+  },
+  FEISHU_CALLBACK_PATH: {
+    hint: "回调路径（以 / 开头，如 /feishu/card）",
+    validate: (value) =>
+      /^\/[A-Za-z0-9._~/-]+$/.test(value) && !value.includes("//") ? undefined : "路径无效",
+  },
   OPENCODE_URL: urlRule(false),
   OPENCODE_AGENT: {
     hint: "agent 名称（字母、数字、点、下划线、连字符）",
@@ -246,10 +272,17 @@ export const OPS_ENV_KEYS = Object.keys(ENV_RULES)
  * Editing them through `/env` would let the file and the live process disagree, so the
  * dedicated command owns the write.
  */
-export const OPS_COMMAND_MANAGED_KEYS: ReadonlySet<string> = new Set(["TELEGRAM_ALLOW_USERS"])
+export const OPS_COMMAND_MANAGED_KEYS: ReadonlySet<string> = new Set([
+  "TELEGRAM_ALLOW_USERS",
+  "FEISHU_ALLOW_OPEN_IDS",
+])
 
 /** Written to .env and applied to the running bot at the same time, so no /restart is needed. */
-export const OPS_HOT_ENV_KEYS: ReadonlySet<string> = new Set(["REMINDER_TIMEZONE", "TELEGRAM_ALLOW_USERS"])
+export const OPS_HOT_ENV_KEYS: ReadonlySet<string> = new Set([
+  "REMINDER_TIMEZONE",
+  "TELEGRAM_ALLOW_USERS",
+  "FEISHU_ALLOW_OPEN_IDS",
+])
 
 const SECRET_KEY_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|AUTH|_KEY$|API_KEY)/i
 const ENV_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/
@@ -815,7 +848,7 @@ export class OpsService {
     if (!rule) {
       return {
         ok: false,
-        message: `不支持在 Telegram 中修改 ${key || "该配置"}。可修改：${OPS_ENV_KEYS.join("、")}`,
+        message: `不支持在聊天中修改 ${key || "该配置"}。可修改：${OPS_ENV_KEYS.join("、")}`,
       }
     }
     if (!managed && OPS_COMMAND_MANAGED_KEYS.has(key)) {
@@ -855,7 +888,7 @@ export class OpsService {
   envUnset(rawKey: string): OpsEnvResult {
     const key = rawKey.trim().toUpperCase()
     if (!Object.hasOwn(ENV_RULES, key)) {
-      return { ok: false, message: `不支持在 Telegram 中修改 ${key || "该配置"}。` }
+      return { ok: false, message: `不支持在聊天中修改 ${key || "该配置"}。` }
     }
     if (OPS_COMMAND_MANAGED_KEYS.has(key)) {
       return { ok: false, message: `${key} 请使用 /access del <ID> 逐项删除：清空白名单会让所有人都无法使用 Bot。` }

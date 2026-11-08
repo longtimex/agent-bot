@@ -205,7 +205,7 @@ export class AgentCliInstaller {
     const spec = profile.installSpec
     if (!spec) {
       const hint = profile.install ? `\n请手动安装：${profile.install}` : "\n该 CLI 没有可自动执行的安装方式。"
-      return { ok: false, message: `${profile.label} 暂不支持在 Telegram 内自动安装。${hint}` }
+      return { ok: false, message: `${profile.label} 暂不支持在聊天内自动安装。${hint}` }
     }
     const existing = this.#registry.binPath(profile)
     if (existing) {

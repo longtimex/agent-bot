@@ -15,10 +15,14 @@
 
 ### 变更
 
-- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后，先按标签把 `versionName` / `versionCode` 写入 `build.gradle.kts`（`versionCode = major*1000000+minor*1000+patch`，跨次版本不会回退），再执行 `assembleDebug`，生成 `agent-bot.apk` 与 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
+- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后，先按标签把 `versionName` / `versionCode` 写入 `build.gradle.kts`（`versionCode = major*1000000+minor*1000+patch`，跨次版本不会回退），再执行 `assembleDebug`，生成按版本命名的 `agent-bot-v<版本>.apk` 与同名 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
 - **深度审查台账入库**：`DEEP-100.md` 记录当前 42/100 轮审查进度；早期并行审查的重复轮次编号已在文首说明，后续从第 43 轮继续。
 
 ### 新增
+
+- **统一控制端安装向导**：`npm run setup` / `npm run clients` 现在共用同一个可重复运行的多选向导，支持 Telegram、安卓 App 与飞书，并可一次选择多个控制端。向导会标记 `[已配置]` / `[未配置]`，Telegram 继续自动识别 owner；安卓向导生成固定 `API_TOKEN`、校验手机可达的 `API_PUBLIC_URL` 并直接打印配对地址；飞书向导校验 App 凭据、open_id 白名单与可选卡片回调验签配置。重复运行只更新选中的控制端，保留 `.env` 注释与其他配置。`install.sh` 的交互式安装改为启动该向导，新增 `--setup`，并在结束后提示用 `npm run clients` 继续添加客户端。仅监听 `0.0.0.0` / `::` 且没有 `API_PUBLIC_URL` 不再被误判为已配置的安卓控制端。
+
+- **飞书第三控制端**：新增企业自建应用接入，私聊消息通过长连接接收；交互卡片按钮通过可选的 HTTP 回调入口接收（飞书 SDK 长连接只分发事件、不分发卡片回调）。两者都会转换为内部 Telegram 更新，复用同一套命令、面板、会话队列、附件、提醒、定时任务、统计、白名单与运维能力；飞书与 Telegram 会话使用独立的 `fs:` / `tg:` 键，群聊忽略。支持图片、文件、音频、视频、富文本、按钮、二维码、导出与出站媒体，飞书-only 部署也可独立运行；访问控制走 `/access` 自动识别当前渠道，`open_id` 与 `chat_id` 映射持久化在 `data/feishu-identities.json`。未启用回调时文字命令仍可用，但面板按钮不可用；回调必须配置 Verification Token 或 Encrypt Key 验签。
 
 - **magpie 模型网关集成**：新增 `/magpie` Telegram 面板与命令（Provider 列表/模板、各 Agent 模型切换、路由组、配额、用量、设置、账号、守护进程、同步/更新），以及 `/api/v1/magpie/*`（概览、视图清单、只读视图、白名单 exec、通用 run、Provider/Agent/路由组写入）。CLI 封装在 `src/magpie.ts`，白名单与确认规则在 `src/magpieGuards.ts` / `src/apiMagpieSpecs.ts`，路由在 `src/apiMagpie.ts`，Telegram 在 `src/telegramMagpieCommands.ts`；新增 `MAGPIE_BIN` / `MAGPIE_URL` 配置，密钥与 Token 输出自动脱敏，交互式/常驻命令（`tui`/`web`/`serve`/`plugin`/`accounts add`/`gateway-key` 等）在聊天与 API 中一律拒绝。安卓 App 新增「magpie 网关」页（概览、只读视图、命令执行与二次确认），并接入 `/` 命令表、抽屉与主菜单按钮。
 

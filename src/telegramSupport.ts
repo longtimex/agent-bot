@@ -1,4 +1,5 @@
 import { zonedParts } from "./reminders.js"
+import { BOT_MENU_COMMANDS } from "./help.js"
 
 /** Text of the one-shot "Bot 已上线" ping sent to the owner chat after polling connects. */
 export function startupNoticeText(opts: {
@@ -6,13 +7,17 @@ export function startupNoticeText(opts: {
   version: string
   opencodeOk: boolean
   timezone: string
+  channel?: "telegram" | "feishu"
 }): string {
+  const feishu = opts.channel === "feishu"
   const who = opts.username ? ` @${opts.username}` : ""
   const opencode = opts.opencodeOk
     ? "OpenCode 服务：✅ 可达"
-    : "OpenCode 服务：❌ 不可达（运行 npm run serve，或在 Telegram 里发送 /service opencode start）"
+    : feishu
+      ? "OpenCode 服务：❌ 不可达（运行 npm run serve，或在这里发送 /service opencode start）"
+      : "OpenCode 服务：❌ 不可达（运行 npm run serve，或在 Telegram 里发送 /service opencode start）"
   return [
-    `✅ Bot 已上线${who} · v${opts.version}`,
+    `✅ ${feishu ? "飞书 Bot" : "Bot"} 已上线${who} · v${opts.version}`,
     opencode,
     `时区 ${opts.timezone} · 发送 /menu 打开功能菜单`,
   ].join("\n")
@@ -105,5 +110,30 @@ export function sortUserIds(ids: Iterable<string>): string[] {
 
 export function parseAllowUsers(value: string): string[] {
   return sortUserIds(value.split(","))
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[b.length]!
+}
+
+/** 与输入编辑距离 ≤1 的菜单命令;短词与完全匹配返回 undefined,避免误提示。 */
+export function nearestMenuCommand(word: string): string | undefined {
+  const name = word.replace(/^\/+/, "").toLowerCase()
+  if (name.length < 3) return undefined
+  let best: { name: string; dist: number } | undefined
+  for (const item of BOT_MENU_COMMANDS) {
+    const dist = levenshtein(name, item.command)
+    if (!best || dist < best.dist) best = { name: item.command, dist }
+  }
+  return best && best.name !== name && best.dist <= 1 ? best.name : undefined
 }
 

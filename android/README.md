@@ -1,8 +1,8 @@
 # Agent Bot 安卓客户端
 
 控制云端 agent-bot 的原生安卓应用。界面参考 Grok 安卓版：暗色为主、居中对话、抽屉导航。
-Bot 的 Telegram 控制方式不受影响——App 通过 bot 进程内置的 HTTP API(`/api/v1`)工作,
-两者可以同时使用，共享提醒、定时任务、用量统计与运维能力。
+Telegram 与飞书控制方式不受影响——App 通过 bot 进程内置的 HTTP API(`/api/v1`)工作，
+三种控制端可以同时使用，共享提醒、定时任务、用量统计与运维能力。
 
 ## 功能
 
@@ -99,23 +99,23 @@ cd android
 推送匹配 `android-v*` 的标签即触发 `.github/workflows/android-release.yml`：
 
 ```bash
-git tag -a android-v1.0.13 -m "Android v1.0.13"
-git push origin android-v1.0.13
+git tag -a android-v1.0.2 -m "Android v1.0.2"
+git push origin android-v1.0.2
 ```
 
-工作流会先按标签把 `versionName` 写成标签版本（`1.0.13`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode` 再编译，因此每次标签产物都带着对应版本号；构建完成后创建/更新同名 Release，附上 `agent-bot.apk` 与 `.sha256`。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
+工作流会先按标签把 `versionName` 写成标签版本（如 `1.0.2`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode` 再编译，因此每次标签产物都带着对应版本号；构建完成后创建/更新同名 Release，附上 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
 
 ### 直接安装现成的 APK
 
-不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot.apk` 与同名 `.sha256`：
+不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`：
 
 ```bash
-# 把 <tag> 换成实际版本，例如 android-v1.0.12
-tag=android-v1.0.12
+# 把 <tag> 换成实际版本，例如 android-v1.0.2
+tag=android-v1.0.2
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -o agent-bot.apk "$base/agent-bot.apk"
-curl -L -o agent-bot.apk.sha256 "$base/agent-bot.apk.sha256"
-sha256sum -c agent-bot.apk.sha256
+curl -L -o agent-bot-v1.0.2.apk "$base/agent-bot-v1.0.2.apk"
+curl -L -o agent-bot-v1.0.2.apk.sha256 "$base/agent-bot-v1.0.2.apk.sha256"
+sha256sum -c agent-bot-v1.0.2.apk.sha256
 ```
 
 用 debug 密钥（`CN=Android Debug`）签名，因此需要在手机上允许「安装未知来源应用」。各版本
@@ -124,9 +124,11 @@ release 都用同一个 debug 密钥签名，直接覆盖安装即可升级，�
 
 ## 连接服务器
 
-1. 服务器端确保 `.env` 中 `API_ENABLED=1`（默认开启，默认只监听 `127.0.0.1:3080`）。
-2. 在 Telegram 里向 bot 发送 `/api`，会返回 API 地址与访问令牌。
-3. 手机能访问到服务器后（公网地址、反向代理、SSH 隧道或 VPN 均可），在 App「设置」页填入地址与令牌。
+1. 在服务器安装目录运行 `npm run setup`（或稍后运行 `npm run clients`），选择「安卓 App」。向导会填写 `API_ENABLED` / `API_BIND` / `API_PORT` / `API_PUBLIC_URL`，生成或沿用 `API_TOKEN`，并打印配对地址与令牌。也可手动确保 `.env` 中 `API_ENABLED=1`，并设置手机可达的 `API_PUBLIC_URL`；默认的 `127.0.0.1` 回环监听不能单独作为安卓控制端。
+2. 若已配置 Telegram 或飞书，也可在对应聊天里向 Bot 发送 `/api` 获取 API 地址、令牌与可扫码二维码。
+3. 手机能访问到服务器后（公网地址、反向代理、SSH 隧道或 VPN 均可），在 App「设置」页扫码或填入地址与令牌。
+
+> 仅安卓 App 也能使用聊天、附件、引擎/模型、目录、历史与运维功能；但提醒、定时任务和每日用量报告需要向 Telegram 或飞书 owner 聊天推送，此类接口会返回 `409`。
 
 ### 暴露方式建议
 
@@ -140,7 +142,7 @@ release 都用同一个 debug 密钥签名，直接覆盖安装即可升级，�
 
 ## 使用说明
 
-1. **配对连接**：首次打开进入「设置」页，填入服务器地址与访问令牌（Telegram 里向 Bot 发 `/api` 获取；服务端设置了 `API_PUBLIC_URL` 时，回复里的二维码可直接扫码导入）；保存即测连，顶栏状态点实时反映连接健康，点按直达设置页。
+1. **配对连接**：运行 `npm run setup` 选择安卓 App，按终端输出的地址与令牌连接；或在 Telegram / 飞书里向 Bot 发 `/api` 获取（设置了 `API_PUBLIC_URL` 时，回复里的二维码可直接扫码导入）。首次打开进入「设置」页，扫码或填入服务器地址与访问令牌；保存即测连，顶栏状态点实时反映连接健康，点按直达设置页。
 2. **发消息**：底部输入框直接输入提示词发送；点「📎」拍照、选相册图片或选任意文件（最多 4 个 / 共 15MB）；输入框为空时右侧按钮变为麦克风，点击录音（最长 2 分钟）后自动发送。发送失败时内容自动回到输入框、附件保留，可直接重发。
 3. **用命令**：输入 `/` 弹出与 Telegram 一致的命令和服务器上的快捷指令，点选即执行或跳转对应页面。
 4. **切引擎 / 模型**：顶栏芯片切换本会话的引擎与模型；输入框右侧「🎚」可把**下一条**消息临时交给其他引擎并为其选模型，发送后自动恢复默认。

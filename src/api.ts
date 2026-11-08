@@ -41,6 +41,7 @@ import type { TaskHistoryStore } from "./history.js"
 import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS, helpSections } from "./help.js"
 import type { AgentCliService } from "./agentCli.js"
 import type { BotConfig } from "./config.js"
+import type { ChannelIdResolver } from "./channelRegistry.js"
 import type { Opencode } from "./opencode.js"
 import { type OpsResult, type OpsService } from "./ops.js"
 import type { AliasStore } from "./aliases.js"
@@ -70,8 +71,12 @@ export interface ApiServerOptions {
   models: ModelAdmin
   /** Live timezone (changes via /timezone must be reflected without a restart). */
   timezone: () => string
-  /** Telegram chat that receives reminders/schedules created from the app. */
-  ownerChatId?: number
+  /** Live owner chat that receives reminders/schedules created from the app. */
+  ownerChatId?: number | (() => number | undefined)
+  /** Live owner user id used for access checks; differs from chatId on Feishu. */
+  ownerUserId?: number | (() => number | undefined)
+  /** Resolver for the owner chat's channel, so Feishu-only peers use `fs:` keys. */
+  channel?: ChannelIdResolver
   /** Session key used by app-initiated prompts; independent from Telegram chats. */
   appKey?: string
   /** Applies a timezone change (persists `.env` and updates reminders/schedules/usage live). */
@@ -186,6 +191,17 @@ export class ApiServer {
   /** Failed bearer attempts are counted per client address so a static token cannot be brute-forced. */
   readonly #authLimit = new AuthFailureLimiter()
 
+  /** Owner and task routes must see a Feishu chat that is mapped after startup. */
+  private get ownerChatId(): number | undefined {
+    const owner = this.#opts.ownerChatId
+    return typeof owner === "function" ? owner() : owner
+  }
+
+  private get ownerUserId(): number | undefined {
+    const owner = this.#opts.ownerUserId
+    return typeof owner === "function" ? owner() : owner
+  }
+
   constructor(options: ApiServerOptions, token: string, encKey?: Buffer) {
     this.#opts = options
     this.#log = options.log
@@ -200,7 +216,7 @@ export class ApiServer {
       usage: options.usage,
       history: options.history,
       models: options.models,
-      ownerChatId: options.ownerChatId,
+      ownerChatId: () => this.ownerChatId,
       fetchMedia: options.fetchMedia,
       appKey: options.appKey ?? "api:app",
     })
@@ -388,7 +404,8 @@ export class ApiServer {
         sessionId: engine === "opencode" ? (this.#opts.store.get(this.appKey) ?? null) : null,
         cliSessionId: engine === "opencode" ? null : (this.#opts.store.getCliSession(this.appKey, engine) ?? null),
         workDir: this.#opts.agents.workDir(this.appKey),
-        chatId: this.#opts.ownerChatId ?? null,
+        chatId: this.ownerChatId ?? null,
+        userId: this.ownerUserId ?? this.ownerChatId ?? null,
         api: {
           enabled: this.#opts.cfg.api.enabled,
           bind: this.#opts.cfg.api.bind,
@@ -688,7 +705,7 @@ export class ApiServer {
 
   #expandAlias(text: string): string {
     const aliases = this.#opts.aliases
-    const chatId = this.#opts.ownerChatId
+    const chatId = this.ownerChatId
     if (!aliases || chatId === undefined) return text
     let current = text
     for (let depth = 0; depth < 3; depth++) {
@@ -767,7 +784,9 @@ export class ApiServer {
   #personalDeps(): PersonalRouteDeps {
     return {
       appKey: this.appKey,
-      ownerChatId: this.#opts.ownerChatId,
+      ownerChatId: this.ownerChatId,
+      ownerUserId: this.ownerUserId,
+      channel: this.#opts.channel,
       store: this.#opts.store,
       cfg: this.#opts.cfg,
       registry: this.#opts.agents.registry,

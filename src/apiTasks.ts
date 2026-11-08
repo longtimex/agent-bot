@@ -33,7 +33,8 @@ export interface TaskManagerDeps {
   usage: UsageStore
   history: TaskHistoryStore
   models: ModelAdmin
-  ownerChatId?: number
+  /** Live owner chat; the API server may learn it after startup (e.g. first Feishu message). */
+  ownerChatId?: number | (() => number | undefined)
   fetchMedia?: (target: string) => Promise<Buffer>
   appKey: string
 }
@@ -109,7 +110,8 @@ export class ApiTaskManager {
 
   /** Persists API attachments into the same inbox the Telegram flow uses. */
   #saveAttachments(attachments: ApiAttachment[]): { saved: SavedAttachment[]; failed: string[] } {
-    const chatId = this.#deps.ownerChatId ?? 0
+    const owner = this.#deps.ownerChatId
+    const chatId = (typeof owner === "function" ? owner() : owner) ?? 0
     const saved: SavedAttachment[] = []
     const failed: string[] = []
     for (const att of attachments) {

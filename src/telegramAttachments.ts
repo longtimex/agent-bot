@@ -17,9 +17,16 @@ import type { Opencode, PromptFile } from "./opencode.js"
 import { applyStt } from "./stt.js"
 import type { Job } from "./telegram.js"
 import { extensionFromMime } from "./telegramSupport.js"
+import {
+  attachmentFromRef,
+  decodeFeishuFileId,
+  FEISHU_RESOURCE_REFS,
+  type FeishuResourceRef,
+} from "./feishuAttachments.js"
 
 const MAX_ATTACHMENTS = 4
 const MAX_ATTACH_FILE_BYTES = 10 * 1024 * 1024
+const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
 export interface AttachmentCommandDeps {
   bot: Bot
@@ -27,6 +34,7 @@ export interface AttachmentCommandDeps {
   oc: Opencode
   maskToken: (text: string) => string
   log: Logger
+  feishuDownload?: (ref: FeishuResourceRef, signal?: AbortSignal) => Promise<Buffer>
 }
 
 export class TelegramAttachments {
@@ -38,6 +46,11 @@ export class TelegramAttachments {
 
   collectAttachments(message: Message): AttachmentDescriptor[] {
     const attachments: AttachmentDescriptor[] = []
+    const feishuRefs = (message as unknown as Record<string, unknown>)[FEISHU_RESOURCE_REFS]
+    if (Array.isArray(feishuRefs)) {
+      for (const ref of feishuRefs as FeishuResourceRef[]) attachments.push(attachmentFromRef(ref))
+      return attachments.slice(0, MAX_ATTACHMENTS)
+    }
 
     if (message.photo?.length) {
       const largest = message.photo[message.photo.length - 1]!
@@ -84,10 +97,42 @@ export class TelegramAttachments {
       })
     }
 
+    if (message.video) {
+      const mime = message.video.mime_type ?? "video/mp4"
+      attachments.push({
+        fileId: message.video.file_id,
+        kind: "document",
+        name: message.video.file_name ?? `video-${message.video.file_id.slice(-8)}${extensionFromMime(mime) || ".mp4"}`,
+        mime,
+        size: message.video.file_size,
+      })
+    }
+
     return attachments.slice(0, MAX_ATTACHMENTS)
   }
 
   async downloadAttachment(chatId: number, att: AttachmentDescriptor, signal?: AbortSignal): Promise<SavedAttachment> {
+    const feishuRef = decodeFeishuFileId(att.fileId)
+    if (feishuRef) {
+      if (!this.#deps.feishuDownload) throw new Error("飞书附件下载器未配置")
+      const data = await this.#deps.feishuDownload(feishuRef, signal)
+      if (signal?.aborted) throw new Error("已取消下载")
+      if (data.byteLength > this.#deps.cfg.maxInputBytes) {
+        throw new Error(`超过 ${Math.round(this.#deps.cfg.maxInputBytes / 1024 / 1024)}MB 上限`)
+      }
+      const saved = saveAttachment(this.#deps.cfg.inboxDir, chatId, att.name, data)
+      const result: SavedAttachment = { ...att, path: saved.path, bytes: data.byteLength }
+      if (isTextAttachment(att.mime, saved.name)) {
+        try {
+          const { text, truncated } = readTextAttachment(saved.path)
+          result.text = text
+          result.truncated = truncated
+        } catch {
+          // treat as binary if decoding fails
+        }
+      }
+      return result
+    }
     const file = await this.#deps.bot.api.getFile(att.fileId)
     if (!file.file_path) throw new Error("Telegram 未返回文件路径（文件可能超过 20MB）")
 
@@ -107,8 +152,11 @@ export class TelegramAttachments {
       throw new Error(`下载失败 (HTTP ${res.status})`)
     }
     const data = Buffer.from(await res.arrayBuffer())
-    if (data.byteLength > this.#deps.cfg.maxInputBytes) {
-      throw new Error(`超过 ${Math.round(this.#deps.cfg.maxInputBytes / 1024 / 1024)}MB 上限`)
+    // MAX_INPUT_MB may be raised for Feishu's 100MB message-resource API; the
+    // Bot API's getFile endpoint still refuses anything over 20MB.
+    const telegramLimit = Math.min(this.#deps.cfg.maxInputBytes, TELEGRAM_DOWNLOAD_LIMIT)
+    if (data.byteLength > telegramLimit) {
+      throw new Error(`超过 ${Math.round(telegramLimit / 1024 / 1024)}MB 上限`)
     }
 
     const saved = saveAttachment(this.#deps.cfg.inboxDir, chatId, att.name, data)

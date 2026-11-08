@@ -1,8 +1,9 @@
 import { InlineKeyboard } from "grammy"
-import type { BotConfig } from "./config.js"
+import { FEISHU_OPEN_ID_RE, type BotConfig } from "./config.js"
 import { escapeMarkdown, type Panel } from "./messages.js"
 import type { OpsService } from "./ops.js"
 import { parseAllowUsers, sortUserIds, TIMEZONE_PRESETS, USER_ID_RE } from "./telegramSupport.js"
+import { channelOfChatId, type Channel, type ChannelIdResolver } from "./channelRegistry.js"
 
 export interface AdminCommandDeps {
   cfg: BotConfig
@@ -12,8 +13,12 @@ export interface AdminCommandDeps {
   applyLiveEnv: (key: string, value: string) => void
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
   sendPanel: (chatId: number, panel: Panel) => Promise<void>
-  accessPanel: () => Panel
+  accessPanel: (channel?: Channel) => Panel
   timezonePanel: (headline?: string) => string
+  /** Resolves a Feishu user's synthetic id back to the open_id stored in the whitelist. */
+  openIdForUser?: (userId: number) => string | undefined
+  /** Lets the command use the same identity namespace as inbound updates. */
+  channel?: ChannelIdResolver
 }
 
 export class TelegramAdminCommands {
@@ -24,53 +29,74 @@ export class TelegramAdminCommands {
   }
 
   async handleAccessCommand(chatId: number, userId: number, arg: string): Promise<void> {
+    const channel = this.#channelFor(chatId)
     const [rawAction = "list", ...rest] = arg.split(/\s+/).filter(Boolean)
     const action = rawAction.toLowerCase()
 
     if (action === "list" || action === "show") {
-      await this.#deps.sendPanel(chatId, this.#deps.accessPanel())
+      await this.#deps.sendPanel(chatId, this.#deps.accessPanel(channel))
       return
     }
     if (action !== "add" && action !== "del" && action !== "delete" && action !== "remove") {
       await this.#deps.sendText(
         chatId,
-        "用法：`/access` 查看白名单；`/access add <用户 ID>` 添加；`/access del <用户 ID>` 移除。",
+        channel === "feishu"
+          ? "用法：`/access` 查看飞书白名单；`/access add <open_id>` 添加；`/access del <open_id>` 移除。"
+          : "用法：`/access` 查看白名单；`/access add <用户 ID>` 添加；`/access del <用户 ID>` 移除。",
       )
       return
     }
 
     const wanted = rest.map((token) => token.replace(/^@/, ""))
     if (wanted.length === 0) {
-      await this.#deps.sendText(chatId, "用法：`/access add <用户 ID>` 或 `/access del <用户 ID>`。")
+      await this.#deps.sendText(
+        chatId,
+        channel === "feishu"
+          ? "用法：`/access add <open_id>` 或 `/access del <open_id>`。"
+          : "用法：`/access add <用户 ID>` 或 `/access del <用户 ID>`。",
+      )
       return
     }
-    const invalid = wanted.filter((token) => !USER_ID_RE.test(token))
+    const invalid = wanted.filter((token) => !this.#validAccessId(token, channel))
     if (invalid.length > 0) {
       await this.#deps.sendText(
         chatId,
-        `❌ 用户 ID 只能是 20 位以内的数字（收到：${escapeMarkdown(invalid.join("、"))}）。`,
+        channel === "feishu"
+          ? `❌ 飞书 open_id 应形如 ou_xxx（收到：${escapeMarkdown(invalid.join("、"))}）。`
+          : `❌ 用户 ID 只能是 20 位以内的数字（收到：${escapeMarkdown(invalid.join("、"))}）。`,
       )
       return
     }
 
-    const result = this.mutateAccess(action === "add", wanted, userId)
+    const result = this.mutateAccess(action === "add", wanted, userId, channel)
     if (!result.ok) {
       await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(result.message)}`)
       return
     }
     await this.#deps.sendText(chatId, result.message)
-    await this.#deps.sendPanel(chatId, this.#deps.accessPanel())
+    await this.#deps.sendPanel(chatId, this.#deps.accessPanel(channel))
   }
 
   /** Shared by /access, its remove buttons and the HTTP API so the guards cannot drift. */
-  mutateAccess(adding: boolean, wanted: string[], self: number | undefined): { ok: boolean; message: string } {
+  mutateAccess(
+    adding: boolean,
+    wanted: string[],
+    self: number | string | undefined,
+    channel: Channel = "telegram",
+  ): { ok: boolean; message: string } {
     const tokens = wanted.map((token) => token.replace(/^@/, ""))
     if (tokens.length === 0) return { ok: false, message: "请提供用户 ID。" }
-    const invalid = tokens.filter((token) => !USER_ID_RE.test(token))
+    const invalid = tokens.filter((token) => !this.#validAccessId(token, channel))
     if (invalid.length > 0) {
-      return { ok: false, message: `用户 ID 只能是 20 位以内的数字（收到：${invalid.join("、")}）。` }
+      return {
+        ok: false,
+        message:
+          channel === "feishu"
+            ? `飞书 open_id 应形如 ou_xxx（收到：${invalid.join("、")}）。`
+            : `用户 ID 只能是 20 位以内的数字（收到：${invalid.join("、")}）。`,
+      }
     }
-    const current = new Set(this.#deps.cfg.telegram.allowUsers)
+    const current = new Set(this.#allowList(channel))
     const touched = tokens.filter((id) => (adding ? !current.has(id) : current.has(id)))
     if (touched.length === 0) {
       return { ok: false, message: adding ? "这些用户已经在白名单中。" : "这些用户不在白名单中。" }
@@ -81,13 +107,16 @@ export class TelegramAdminCommands {
       else next.delete(id)
     }
     if (!adding) {
-      const rejection = this.allowListRejection(next, String(self ?? ""))
+      const rejection = this.allowListRejection(next, this.#selfAccessId(self, channel), channel)
       if (rejection) return { ok: false, message: rejection }
     }
-    const value = sortUserIds(next).join(",")
-    const result = this.#deps.ops.envSet("TELEGRAM_ALLOW_USERS", value, true)
+    // Telegram ids are numeric and sorted by length; open_ids are opaque strings
+    // and must not pass through the numeric sorter, which would silently drop them.
+    const value = channel === "feishu" ? [...next].sort().join(",") : sortUserIds(next).join(",")
+    const key = channel === "feishu" ? "FEISHU_ALLOW_OPEN_IDS" : "TELEGRAM_ALLOW_USERS"
+    const result = this.#deps.ops.envSet(key, value, true)
     if (!result.ok) return { ok: false, message: result.message }
-    this.#deps.applyLiveEnv("TELEGRAM_ALLOW_USERS", value)
+    this.#deps.applyLiveEnv(key, value)
     const names = touched.join("、")
     return {
       ok: true,
@@ -95,7 +124,7 @@ export class TelegramAdminCommands {
     }
   }
 
-  /** Snapshot for the app's /access panel. */
+  /** Snapshot for the app's /access panel (the app owns the Telegram whitelist). */
   get accessState(): { users: string[]; allowAll: boolean } {
     return {
       users: parseAllowUsers([...this.#deps.cfg.telegram.allowUsers].join(",")),
@@ -113,13 +142,37 @@ export class TelegramAdminCommands {
   }
 
   /** Lockout guards shared by the `/access` command and its remove buttons. */
-  allowListRejection(next: Set<string>, self: string): string | undefined {
-    if (this.#deps.cfg.telegram.allowAll) return undefined
-    if (!next.has(self) && this.#deps.cfg.telegram.allowUsers.has(self)) {
+  allowListRejection(next: Set<string>, self: string, channel: Channel = "telegram"): string | undefined {
+    const current = new Set(this.#allowList(channel))
+    const allowAll = channel === "feishu" ? this.#deps.cfg.feishu?.allowAll : this.#deps.cfg.telegram.allowAll
+    if (allowAll) return undefined
+    if (!next.has(self) && current.has(self)) {
       return "不能把自己移出白名单，否则你将无法再控制 Bot。"
     }
-    if (next.size === 0) return "白名单不能为空：至少保留 1 个用户 ID，或设置 TELEGRAM_ALLOW_ALL_USERS=1。"
+    if (next.size === 0) {
+      return channel === "feishu"
+        ? "飞书白名单不能为空：至少保留 1 个 open_id，或设置 FEISHU_ALLOW_ALL_USERS=1。"
+        : "白名单不能为空：至少保留 1 个用户 ID，或设置 TELEGRAM_ALLOW_ALL_USERS=1。"
+    }
     return undefined
+  }
+
+  #allowList(channel: Channel): Set<string> {
+    return channel === "feishu" ? (this.#deps.cfg.feishu?.allowOpenIds ?? new Set<string>()) : this.#deps.cfg.telegram.allowUsers
+  }
+
+  #validAccessId(id: string, channel: Channel): boolean {
+    return channel === "feishu" ? FEISHU_OPEN_ID_RE.test(id) : USER_ID_RE.test(id)
+  }
+
+  #selfAccessId(self: number | string | undefined, channel: Channel): string {
+    if (typeof self === "string") return self
+    if (self === undefined) return ""
+    return channel === "feishu" ? (this.#deps.openIdForUser?.(self) ?? "") : String(self)
+  }
+
+  #channelFor(chatId: number): Channel {
+    return channelOfChatId(chatId, this.#deps.channel)
   }
 
   async handleTimeZone(chatId: number, arg: string): Promise<void> {

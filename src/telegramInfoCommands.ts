@@ -3,6 +3,7 @@ import QRCode from "qrcode"
 import { pairingQrPayload, resolveApiToken, resolveEncKey, resolvePairingUrl } from "./api.js"
 import { redactSecrets } from "./ccswitch.js"
 import type { BotConfig } from "./config.js"
+import { channelOfChatId, type ChannelIdResolver } from "./channelRegistry.js"
 import { formatHistoryMarkdown, type TaskHistoryStore } from "./history.js"
 import type { Logger } from "./logger.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"
@@ -19,6 +20,8 @@ export interface InfoCommandDeps {
   statusText: (chatId: number, key: string) => string
   statusKeyboard: () => InlineKeyboard
   usagePanel: (key: string) => Panel
+  /** Distinguishes a synthetic Feishu chat from a Telegram chat in exports. */
+  channel?: ChannelIdResolver
 }
 
 export class TelegramInfoCommands {
@@ -129,7 +132,11 @@ export class TelegramInfoCommands {
       await this.#deps.sendText(chatId, "📭 还没有任务记录，先聊点别的吧。")
       return
     }
-    const markdown = formatHistoryMarkdown(entries, { source: `Telegram ${chatId}`, timeZone: this.#deps.timezone() })
+    const channel = channelOfChatId(chatId, this.#deps.channel)
+    const markdown = formatHistoryMarkdown(entries, {
+      source: `${channel === "feishu" ? "Feishu" : "Telegram"} ${chatId}`,
+      timeZone: this.#deps.timezone(),
+    })
     await this.#deps.bot.api.sendDocument(chatId, new InputFile(Buffer.from(markdown, "utf8"), `${name}.md`), {
       caption: `🗂 任务历史（Markdown，${entries.length} 条）`,
     })

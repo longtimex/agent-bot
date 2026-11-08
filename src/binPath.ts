@@ -60,6 +60,13 @@ const BOT_ONLY = new Set([
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_ALLOW_USERS",
   "TELEGRAM_ALLOW_ALL_USERS",
+  // The Feishu app secret can mint tenant tokens for the bot's own app, and the
+  // whitelist names who may drive it. Neither is a provider credential an engine
+  // has any use for.
+  "FEISHU_APP_ID",
+  "FEISHU_APP_SECRET",
+  "FEISHU_ALLOW_OPEN_IDS",
+  "FEISHU_ALLOW_ALL_USERS",
   "OPENCODE_SERVER_USERNAME",
   "OPENCODE_SERVER_PASSWORD",
   // The HTTP API bearer token is root-equivalent for this bot: git pull, npm install and

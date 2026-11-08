@@ -194,11 +194,14 @@ export class TelegramPersonalPanels {
     }
   }
 
-  accessPanel(headline?: string): Panel {
-    const ids = parseAllowUsers([...this.#deps.cfg.telegram.allowUsers].join(","))
+  accessPanel(headline?: string, channel: "telegram" | "feishu" = "telegram"): Panel {
+    const isFeishu = channel === "feishu"
+    const ids = isFeishu
+      ? [...(this.#deps.cfg.feishu?.allowOpenIds ?? [])].sort()
+      : parseAllowUsers([...this.#deps.cfg.telegram.allowUsers].join(","))
     const keyboard = new InlineKeyboard()
     for (const id of ids.slice(0, 12)) {
-      keyboard.text(`❌ ${id}`, `access:del:${id}`).row()
+      keyboard.text(`❌ ${id}`, `${isFeishu ? "faccess" : "access"}:del:${id}`).row()
     }
     keyboard.text("🔄 刷新", "show:access").row()
     keyboard.text("🛠 运维中心", "show:ops").text("⬅️ 主菜单", "show:menu")
@@ -207,15 +210,22 @@ export class TelegramPersonalPanels {
     const list = ids.length > 0 ? ids.slice(0, listCap).map((id) => `• \`${escapeMarkdown(id)}\``).join("\n") : "_（空白名单）_"
     const listMore = ids.length > listCap ? `\n_…另有 ${ids.length - listCap} 个未显示。_` : ""
     const overflow = ids.length > 12 ? `\n_…另有 ${ids.length - 12} 个未显示按钮，可用 \`/access del <ID>\` 移除。_` : ""
-    const gate = this.#deps.cfg.telegram.allowAll
-      ? "⚠️ `TELEGRAM_ALLOW_ALL_USERS` 已开启：任何 Telegram 用户都能驱动 Bot 与运维操作，建议尽快关闭。"
-      : "✅ 仅白名单用户可用，且只响应私聊。"
+    const gate = isFeishu
+      ? this.#deps.cfg.feishu?.allowAll
+        ? "⚠️ `FEISHU_ALLOW_ALL_USERS` 已开启：任何飞书用户都能驱动 Bot 与运维操作，建议尽快关闭。"
+        : "✅ 仅白名单 open_id 可用，且只响应飞书私聊。"
+      : this.#deps.cfg.telegram.allowAll
+        ? "⚠️ `TELEGRAM_ALLOW_ALL_USERS` 已开启：任何 Telegram 用户都能驱动 Bot 与运维操作，建议尽快关闭。"
+        : "✅ 仅白名单用户可用，且只响应私聊。"
+    const idLabel = isFeishu ? "open_id" : "用户 ID"
 
     return {
       text:
-        `${headline ? `${headline}\n\n` : ""}🔐 *访问白名单*（${ids.length}）\n\n${list}${listMore}${overflow}\n\n${gate}\n\n` +
-        "添加：`/access add <用户 ID>`\n移除：`/access del <用户 ID>` 或点击上方按钮\n\n" +
-        "_让对方发送 `/start` 给 Bot：被拒回复里会显示他的数字 ID。改动写入 `.env` 并立即生效，无需重启。_",
+        `${headline ? `${headline}\n\n` : ""}🔐 *访问白名单*（${isFeishu ? "飞书" : "Telegram"} · ${ids.length}）\n\n${list}${listMore}${overflow}\n\n${gate}\n\n` +
+        `添加：\`/access add <${idLabel}>\`\n移除：\`/access del <${idLabel}>\` 或点击上方按钮\n\n` +
+        (isFeishu
+          ? "_让对方私聊 Bot：被拒回复里会显示 open_id。改动写入 `.env` 的 `FEISHU_ALLOW_OPEN_IDS` 并立即生效。_"
+          : "_让对方发送 `/start` 给 Bot：被拒回复里会显示他的数字 ID。改动写入 `.env` 并立即生效，无需重启。_"),
       keyboard,
     }
   }

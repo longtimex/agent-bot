@@ -6,7 +6,11 @@ import test from "node:test"
 import {
   isValidToken,
   maskToken,
+  parseClientSelection,
+  parseFeishuOpenIds,
   parseUserIds,
+  runClientSetup,
+  runFeishuSetup,
   runSetup,
   upsertEnv,
   writeEnvFile,
@@ -18,6 +22,13 @@ const TOKEN = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 function jsonResponse(result: unknown, status = 200): Response {
   return new Response(JSON.stringify({ ok: status === 200, result, description: status === 200 ? undefined : String(result) }), {
     status,
+    headers: { "content-type": "application/json" },
+  })
+}
+
+function feishuTokenResponse(): Response {
+  return new Response(JSON.stringify({ code: 0, msg: "ok", tenant_access_token: "t-test-token" }), {
+    status: 200,
     headers: { "content-type": "application/json" },
   })
 }
@@ -78,6 +89,13 @@ test("setup helpers validate tokens, mask secrets and parse whitelist ids", () =
 
   assert.deepEqual(parseUserIds("123, 456 789，abc 0 -1"), [123, 456, 789])
   assert.deepEqual(parseUserIds("42,42"), [42])
+
+  assert.deepEqual(parseClientSelection("1,3"), ["telegram", "feishu"])
+  assert.deepEqual(parseClientSelection("安卓 飞书"), ["android", "feishu"])
+  assert.deepEqual(parseClientSelection("a"), ["telegram", "android", "feishu"])
+  assert.deepEqual(parseClientSelection("3,1,3"), ["telegram", "feishu"])
+  assert.deepEqual(parseClientSelection("unknown"), [])
+  assert.deepEqual(parseFeishuOpenIds("ou_a, ou_b，ou_a"), ["ou_a", "ou_b"])
 })
 
 test("upsertEnv replaces telegram keys and keeps comments and unrelated values", () => {
@@ -259,4 +277,111 @@ test("apiCall failures redact the token that the error URL would otherwise echo"
   assert.ok(failureLine, "the failure branch printed its warning")
   assert.ok(!failureLine.includes(token), "the token must be masked in the printed failure")
   assert.match(failureLine, /\*\*\*/)
+})
+
+test("runClientSetup accepts Android alone and writes a usable pairing configuration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-android-"))
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, "# keep me\nLOG_LEVEL=info\nAPI_BIND=127.0.0.1\n")
+    const { deps, pending, lines } = harness(
+      envPath,
+      ["2", "0.0.0.0", "3080", "http://192.168.1.10:3080", "y"],
+      fakeFetch(undefined, []),
+    )
+
+    const result = await runClientSetup(deps)
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.clients, ["android"])
+    assert.equal(result.api?.url, "http://192.168.1.10:3080")
+    assert.equal(pending.length, 0)
+
+    const env = readFileSync(envPath, "utf8")
+    assert.match(env, /^# keep me$/m)
+    assert.match(env, /^LOG_LEVEL=info$/m)
+    assert.match(env, /^API_ENABLED=1$/m)
+    assert.match(env, /^API_BIND=0\.0\.0\.0$/m)
+    assert.match(env, /^API_PORT=3080$/m)
+    assert.match(env, /^API_PUBLIC_URL=http:\/\/192\.168\.1\.10:3080$/m)
+    assert.match(env, /^API_TOKEN=[0-9a-f]{48}$/m)
+    assert.ok(lines.some((line) => line.includes("http://192.168.1.10:3080/api/v1")))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runFeishuSetup validates credentials and writes a callback-safe configuration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-feishu-"))
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, "LOG_LEVEL=debug\n")
+    const { deps, pending } = harness(
+      envPath,
+      ["cli_0123456789abcdef", "secret-value", "ou_owner", "", "y", "", "verify-me", "y"],
+      (async () => feishuTokenResponse()) as typeof fetch,
+    )
+
+    const result = await runFeishuSetup(deps)
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.clients, ["feishu"])
+    assert.equal(pending.length, 0)
+
+    const env = readFileSync(envPath, "utf8")
+    assert.match(env, /^FEISHU_APP_ID=cli_0123456789abcdef$/m)
+    assert.match(env, /^FEISHU_APP_SECRET=secret-value$/m)
+    assert.match(env, /^FEISHU_ALLOW_OPEN_IDS=ou_owner$/m)
+    assert.match(env, /^FEISHU_ALLOW_ALL_USERS=0$/m)
+    assert.match(env, /^FEISHU_CALLBACK_ENABLED=1$/m)
+    assert.match(env, /^FEISHU_CALLBACK_VERIFICATION_TOKEN=verify-me$/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("adding Feishu later preserves existing Telegram configuration and comments", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-add-"))
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, `# existing deployment\nTELEGRAM_BOT_TOKEN=${TOKEN}\nTELEGRAM_ALLOW_USERS=777\n# trailing note\n`)
+    const { deps, pending } = harness(
+      envPath,
+      ["3", "cli_0123456789abcdef", "secret-value", "ou_owner", "", "n", "y"],
+      (async () => feishuTokenResponse()) as typeof fetch,
+    )
+
+    const result = await runClientSetup(deps)
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.clients, ["feishu"])
+    assert.equal(pending.length, 0)
+
+    const env = readFileSync(envPath, "utf8")
+    assert.match(env, /^# existing deployment$/m)
+    assert.match(env, new RegExp(`^TELEGRAM_BOT_TOKEN=${TOKEN}$`, "m"))
+    assert.match(env, /^TELEGRAM_ALLOW_USERS=777$/m)
+    assert.match(env, /^# trailing note$/m)
+    assert.match(env, /^FEISHU_APP_ID=cli_0123456789abcdef$/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runFeishuSetup retries an invalid app id before writing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-feishu-invalid-"))
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, "LOG_LEVEL=info\n")
+    const { deps, pending } = harness(
+      envPath,
+      ["bad-id", "cli_0123456789abcdef", "secret-value", "ou_owner", "", "y", "", "verify-me", "y"],
+      (async () => feishuTokenResponse()) as typeof fetch,
+    )
+    const result = await runFeishuSetup(deps)
+    assert.equal(result.ok, true)
+    assert.equal(pending.length, 0)
+    const env = readFileSync(envPath, "utf8")
+    assert.match(env, /^FEISHU_CALLBACK_VERIFICATION_TOKEN=verify-me$/m)
+    assert.doesNotMatch(env, /^FEISHU_APP_ID=bad-id$/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

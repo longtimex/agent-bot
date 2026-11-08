@@ -184,7 +184,7 @@ export class TelegramAgentCommands {
       const hint = profile.install ? `\n安装方式：${escapeMarkdown(profile.install)}` : ""
       await this.#deps.sendText(
         job.chatId,
-        `ℹ️ ${escapeMarkdown(profile.label)} 暂不支持在 Telegram 内自动安装。${hint}`,
+        `ℹ️ ${escapeMarkdown(profile.label)} 暂不支持在聊天内自动安装。${hint}`,
       )
       return
     }
@@ -197,7 +197,7 @@ export class TelegramAgentCommands {
     if (!profile || engine === "opencode") return "未识别的 Agent CLI"
     if (action === "install") {
       if (this.#deps.agents.registry.binPath(profile)) return `${profile.label} 已安装，无需重复安装`
-      if (!this.#deps.installer.installCommand(profile)) return `${profile.label} 暂不支持在 Telegram 内自动安装`
+      if (!this.#deps.installer.installCommand(profile)) return `${profile.label} 暂不支持在聊天内自动安装`
       return undefined
     }
     if (!this.#deps.installer.isManaged(engine)) {
@@ -223,7 +223,7 @@ export class TelegramAgentCommands {
       const hint = action === "install" && profile.install ? `\n安装方式：${escapeMarkdown(profile.install)}` : ""
       await this.#deps.sendText(
         chatId,
-        `ℹ️ ${escapeMarkdown(profile.label)} 无法在 Telegram 内自动${AGENT_ACTION_VERB[action]}。${hint}`,
+        `ℹ️ ${escapeMarkdown(profile.label)} 无法在聊天内自动${AGENT_ACTION_VERB[action]}。${hint}`,
       )
       return
     }

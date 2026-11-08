@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto"
 import { resolve } from "node:path"
 import { Bot, GrammyError, InlineKeyboard, InputFile } from "grammy"
 import type { Context } from "grammy"
@@ -38,7 +37,14 @@ import { scheduleTargetLabel, ScheduleService, type ScheduledTask } from "./sche
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
 import { DailyReportService } from "./usageReport.js"
-import { USER_ID_RE, describeRemainingLabel, isMessageNotModified, sleep, startupNoticeText } from "./telegramSupport.js"
+import {
+  USER_ID_RE,
+  isMessageNotModified,
+  nearestMenuCommand,
+  sleep,
+  startupNoticeText,
+} from "./telegramSupport.js"
+import { channelOfChatId, sessionKeyForChat, type Channel, type ChannelIdResolver } from "./channelRegistry.js"
 import { TelegramStatsPanels } from "./telegramStats.js"
 import { TelegramPersonalPanels } from "./telegramPersonalPanels.js"
 import { TelegramCorePanels } from "./telegramCorePanels.js"
@@ -47,10 +53,21 @@ import { TelegramModelCommands } from "./telegramModelCommands.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
 import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
 import { TelegramProxyCommands } from "./telegramProxyCommands.js"
+import { FEISHU_OPEN_ID_RE } from "./config.js"
 import { TelegramAdminCommands } from "./telegramAdminCommands.js"
 import { TelegramAttachments } from "./telegramAttachments.js"
 import { TelegramMediaSender } from "./telegramMedia.js"
 import { TelegramInfoCommands } from "./telegramInfoCommands.js"
+import { ReminderDelivery } from "./telegramReminderDelivery.js"
+import type { FeishuApiLike } from "./feishuTypes.js"
+import {
+  createChannelBot,
+  downloadFeishuAttachment,
+  seedFeishuBotInfo,
+  isUserAllowed,
+  resolveOwnerChatId,
+  resolveOwnerUserId,
+} from "./telegramChannel.js"
 export { startupNoticeText } from "./telegramSupport.js"
 const MAX_INPUT_LENGTH = 12_000
 const MAX_PENDING = 4
@@ -63,8 +80,6 @@ const CHAT_STATE_LIMIT = 500
 
 /** Failure cards keep their prompt for the 重试 button; only the newest ones survive. */
 const RETRY_CARD_LIMIT = 100
-
-
 /**
  * Only a rejected credential is worth dying for: 401/404 from the Bot API cannot heal, and a
  * process that stays up holding the lock answers nothing. A GrammyError means Telegram actually
@@ -79,36 +94,8 @@ function isFatalTelegramCredentialError(err: unknown): boolean {
 // everything else that reaches the queue is a prompt and must respect the cap.
 const QUEUED_COMMANDS = new Set(["/agent", "/new", "/reset", "/id", "/model", "/cc", "/retry"])
 
-function levenshtein(a: string, b: string): number {
-  if (a === b) return 0
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i]
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
-    }
-    prev = cur
-  }
-  return prev[b.length]!
-}
-
-/** 与输入编辑距离 ≤1 的菜单命令;短词与完全匹配返回 undefined,避免误提示。 */
-function nearestMenuCommand(word: string): string | undefined {
-  const name = word.replace(/^\/+/, "").toLowerCase()
-  if (name.length < 3) return undefined
-  let best: { name: string; dist: number } | undefined
-  for (const item of BOT_MENU_COMMANDS) {
-    const dist = levenshtein(name, item.command)
-    if (!best || dist < best.dist) best = { name: item.command, dist }
-  }
-  return best && best.name !== name && best.dist <= 1 ? best.name : undefined
-}
-
 /** Monotonic queue-entry ids, because a plain index would shift under a button press. */
 let jobSequence = 0
-
-
-
 export interface Job {
   key: string
   text: string
@@ -169,12 +156,19 @@ export class TelegramBridge {
   readonly #attachments: TelegramAttachments
   readonly #mediaSender: TelegramMediaSender
   readonly #infoCommands: TelegramInfoCommands
-  readonly #snoozePending = new Map<string, { chatId: number; userId: number; text: string; createdAt: number }>()
+  readonly #channel?: ChannelIdResolver
+  readonly #feishuResourceClient?: FeishuApiLike
+  readonly #reminderDelivery = new ReminderDelivery({
+    sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+    snooze: (chatId, userId, text, minutes) => this.#reminders.snooze(chatId, userId, text, minutes),
+  })
   #startedAt = Date.now()
   #running = false
   #reconnectTimer?: ReturnType<typeof setTimeout>
   #reconnectDelayMs = RECONNECT_DELAY_MS
-  #servicesStarted = false
+  #coreServicesStarted = false
+  #usageReportStarted = false
+  readonly #announcedStartups = new Set<string>()
   /** Live-overridable via /timezone; the reminder, schedule and usage stores all follow it. */
   #timezone: string
 
@@ -191,16 +185,23 @@ export class TelegramBridge {
     agentInstaller?: AgentCliInstaller,
     ops?: OpsService,
     magpie?: MagpieService,
+    channel?: ChannelIdResolver,
+    feishuResourceClient?: FeishuApiLike,
   ) {
-    if (!cfg.telegram.token) throw new Error("TELEGRAM_BOT_TOKEN 未配置")
     this.#cfg = cfg
     this.#timezone = cfg.reminderTimezone
-    this.#bot = bot ?? new Bot(cfg.telegram.token)
+    // Feishu-only deployments still need a Bot instance because every command
+    // and panel is authored against the Bot API. The placeholder is never
+    // polled: start() skips init/getUpdates when the token is absent and the
+    // transformer intercepts every call aimed at the Feishu namespace.
+    this.#bot = bot ?? createChannelBot(cfg.telegram.token)
     this.#oc = oc
     this.#agents = agents
     this.#store = store
     this.#log = log
     this.#proxies = proxies
+    this.#channel = channel
+    this.#feishuResourceClient = feishuResourceClient
     this.#cc =
       ccswitch ??
       new CcSwitchService({ bin: cfg.ccswitch?.bin, app: cfg.ccswitch?.app ?? "opencode", projectDir: process.cwd() })
@@ -381,8 +382,10 @@ export class TelegramBridge {
       applyLiveEnv: (key, value) => this.#applyLiveEnv(key, value),
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
-      accessPanel: () => this.#personalPanels.accessPanel(),
+      accessPanel: (channel) => this.#personalPanels.accessPanel(undefined, channel),
       timezonePanel: (headline) => this.#personalPanels.timezonePanel(headline),
+      openIdForUser: (userId) => this.#channel?.openIdForUser?.(userId),
+      channel: this.#channel,
     })
     this.#attachments = new TelegramAttachments({
       bot: this.#bot,
@@ -390,6 +393,9 @@ export class TelegramBridge {
       oc: this.#oc,
       maskToken: (text) => this.#maskToken(text),
       log: this.#log,
+      feishuDownload: this.#feishuResourceClient
+        ? (ref, signal) => downloadFeishuAttachment(this.#feishuResourceClient!, ref, this.#cfg.maxInputBytes, signal)
+        : undefined,
     })
     this.#mediaSender = new TelegramMediaSender({
       bot: this.#bot,
@@ -410,6 +416,7 @@ export class TelegramBridge {
       statusText: (chatId, key) => this.#statusText(chatId, key),
       statusKeyboard: () => this.#statusKeyboard(),
       usagePanel: (key) => this.#stats.usagePanel(key),
+      channel: this.#channel,
     })
     this.#ccCommands = new CcCommands(ccHost, this.#cc, this.#models, log)
     const magpieHost: MagpieHost = {
@@ -427,6 +434,11 @@ export class TelegramBridge {
 
   get sharedSchedules(): ScheduleService {
     return this.#schedules
+  }
+
+  /** The shared grammY Bot; the Feishu adapter installs its outbound transformer here. */
+  get bot(): Bot {
+    return this.#bot
   }
 
   get usageStore(): UsageStore {
@@ -478,12 +490,44 @@ export class TelegramBridge {
     return result
   }
 
-  /** First whitelisted chat: the push target for reminders created outside Telegram. */
+  /** First whitelisted chat: the push target for reminders created outside a chat. */
   get ownerChatId(): number | undefined {
-    const first = [...this.#cfg.telegram.allowUsers][0]
-    if (!first) return undefined
-    const parsed = Number(first)
-    return Number.isInteger(parsed) ? parsed : undefined
+    return resolveOwnerChatId(this.#cfg, this.#channel)
+  }
+
+  /** The user identity owning the notification chat; equals chatId for Telegram DMs. */
+  get ownerUserId(): number | undefined {
+    return resolveOwnerUserId(this.#cfg, this.#channel, this.ownerChatId)
+  }
+
+  /** Feishu and Telegram share one command stack; adapters submit synthetic updates here. */
+  async handleUpdate(update: Parameters<Bot["handleUpdate"]>[0]): Promise<void> {
+    if (!this.#cfg.telegram.token) seedFeishuBotInfo(this.#bot)
+    await this.#bot.handleUpdate(update)
+  }
+
+  /** Starts reminders, schedules and the daily report once for whichever transport is up. */
+  startBackgroundServices(): void {
+    this.#startServices()
+  }
+
+  /** Sends the boot ping once per transport/chat, including Feishu-only starts. */
+  async announceStartup(chatId: number | undefined, channel: Channel, username?: string): Promise<void> {
+    if (this.#cfg.startupNotice === false || chatId === undefined) return
+    const key = `${channel}:${chatId}`
+    if (this.#announcedStartups.has(key)) return
+    this.#announcedStartups.add(key)
+    const opencodeOk = await this.#oc.health().catch(() => false)
+    try {
+      const sent = await this.#sendTextMessage(
+        chatId,
+        startupNoticeText({ username, version: appVersion(), opencodeOk, timezone: this.#timezone, channel }),
+      )
+      if (!sent) this.#announcedStartups.delete(key)
+    } catch (err) {
+      this.#announcedStartups.delete(key)
+      this.#log.warn("failed to send the startup notice:", (err as Error).message)
+    }
   }
 
   /**
@@ -499,6 +543,11 @@ export class TelegramBridge {
     this.#bot.catch((err) => {
       this.#log.error("Telegram bot error caught:", err.message)
     })
+
+    if (!this.#cfg.telegram.token) {
+      this.#log.info("Telegram handlers registered (token absent, polling disabled)")
+      return { reconnecting: false }
+    }
 
     if (options.polling === false) {
       this.#log.info("Telegram handlers registered (polling disabled)")
@@ -551,11 +600,18 @@ export class TelegramBridge {
   /** Reminders, schedules and the usage report all deliver into Telegram, so they wait for the
    * first successful connect — and only run once, however many reconnects follow. */
   #startServices(): void {
-    if (this.#servicesStarted) return
-    this.#servicesStarted = true
-    this.#reminders.start()
-    this.#schedules.start()
-    if (this.ownerChatId !== undefined) this.#usageReport.start()
+    if (!this.#coreServicesStarted) {
+      this.#coreServicesStarted = true
+      this.#reminders.start()
+      this.#schedules.start()
+    }
+    // Feishu has no owner chat until its first whitelisted private message
+    // creates the identity mapping. Re-check on every transport event rather
+    // than letting a startup without an owner disable the report forever.
+    if (!this.#usageReportStarted && this.ownerChatId !== undefined) {
+      this.#usageReportStarted = true
+      this.#usageReport.start()
+    }
   }
 
   /** Exponential backoff, unref'd so a pending attempt can never hold the process open. */
@@ -597,15 +653,7 @@ export class TelegramBridge {
    * whitelisted user (the owner chat); STARTUP_NOTICE=0 turns it off.
    */
   async #sendStartupNotice(username?: string): Promise<void> {
-    if (this.#cfg.startupNotice === false) return
-    const owner = this.ownerChatId
-    if (owner === undefined) return
-    const opencodeOk = await this.#oc.health().catch(() => false)
-    try {
-      await this.#sendTextMessage(owner, startupNoticeText({ username, version: appVersion(), opencodeOk, timezone: this.#timezone }))
-    } catch (err) {
-      this.#log.warn("failed to send the startup notice:", (err as Error).message)
-    }
+    await this.announceStartup(this.ownerChatId, "telegram", username)
   }
 
   async stop(): Promise<void> {
@@ -666,13 +714,20 @@ export class TelegramBridge {
 
       const userId = String(from.id)
       if (!this.#isAllowedUser(from.id)) {
-        this.#log.debug(`ignored Telegram message from unauthorized user ${userId} (@${from.username ?? "none"})`)
+        const channel = channelOfChatId(ctx.chat?.id ?? from.id, this.#channel)
+        this.#log.debug(`ignored ${channel} message from unauthorized user ${userId} (@${from.username ?? "none"})`)
         if (ctx.callbackQuery) {
           await ctx.answerCallbackQuery({ text: "你未在白名单中", show_alert: true }).catch(() => {})
         } else {
+          const openId = this.#channel?.openIdForUser?.(from.id)
+          const identity = channel === "feishu" ? `飞书 open_id：\`${openId ?? userId}\`` : `Telegram ID 是：\`${userId}\``
+          const grant =
+            channel === "feishu"
+              ? "请把这个 open_id 发给 Bot 管理员，或把它加入 `.env` 的 `FEISHU_ALLOW_OPEN_IDS`。"
+              : `请把这个 ID 发给 Bot 管理员，让他发送 \`/access add ${userId}\` 即可立即放行。`
           await ctx
             .reply(
-              `⚠️ 你未在白名单中。\n你的 Telegram ID 是：\`${userId}\`\n请把这个 ID 发给 Bot 管理员，让他发送 \`/access add ${userId}\` 即可立即放行。`,
+              `⚠️ 你未在白名单中。\n你的${identity}\n${grant}`,
               {
                 parse_mode: "Markdown",
               },
@@ -691,7 +746,7 @@ export class TelegramBridge {
       if (!text) return
       const chatId = ctx.chat.id
       const userId = ctx.from.id
-      const key = `tg:${chatId}`
+      const key = this.#sessionKey(chatId)
 
       // Control commands bypass the per-chat queue, otherwise they wait for the running task
       const rawCommand = text.split(/\s+/, 1)[0] ?? ""
@@ -842,30 +897,33 @@ export class TelegramBridge {
       })
     })
 
-    // Photos, documents, voice notes and audio files
-    this.#bot.on(["message:photo", "message:document", "message:voice", "message:audio"], async (ctx) => {
-      const chatId = ctx.chat.id
-      const key = `tg:${chatId}`
-      const attachments = this.#collectAttachments(ctx.message)
-      if (attachments.length === 0) return
+    // Photos, documents, voice notes, audio and video files
+    this.#bot.on(
+      ["message:photo", "message:document", "message:voice", "message:audio", "message:video"],
+      async (ctx) => {
+        const chatId = ctx.chat.id
+        const key = this.#sessionKey(chatId)
+        const attachments = this.#collectAttachments(ctx.message)
+        if (attachments.length === 0) return
 
-      const limitMb = Math.round(this.#cfg.maxInputBytes / 1024 / 1024)
-      const tooBig = attachments.find((att) => (att.size ?? 0) > this.#cfg.maxInputBytes)
-      if (tooBig) {
-        await this.#sendTextMessage(chatId, `⚠️ ${tooBig.name} 超过 ${limitMb}MB 上限，无法接收。`)
-        return
-      }
-      if (!(await this.#ensureCapacity(chatId, key))) return
+        const limitMb = Math.round(this.#cfg.maxInputBytes / 1024 / 1024)
+        const tooBig = attachments.find((att) => (att.size ?? 0) > this.#cfg.maxInputBytes)
+        if (tooBig) {
+          await this.#sendTextMessage(chatId, `⚠️ ${tooBig.name} 超过 ${limitMb}MB 上限，无法接收。`)
+          return
+        }
+        if (!(await this.#ensureCapacity(chatId, key))) return
 
-      this.#enqueue({
-        key,
-        text: (ctx.message.caption ?? "").trim(),
-        chatId,
-        userId: ctx.from.id,
-        generation: this.#generation.get(key) ?? 0,
-        attachments,
-      })
-    })
+        this.#enqueue({
+          key,
+          text: (ctx.message.caption ?? "").trim(),
+          chatId,
+          userId: ctx.from.id,
+          generation: this.#generation.get(key) ?? 0,
+          attachments,
+        })
+      },
+    )
 
     // Inline panel buttons
     this.#bot.on("callback_query:data", async (ctx) => {
@@ -875,7 +933,7 @@ export class TelegramBridge {
         await ctx.answerCallbackQuery().catch(() => {})
         return
       }
-      const key = `tg:${chatId}`
+      const key = this.#sessionKey(chatId)
       const answer = async (text?: string): Promise<void> => {
         await ctx.answerCallbackQuery(text ? { text } : undefined).catch(() => {})
       }
@@ -917,7 +975,7 @@ export class TelegramBridge {
 
       const snoozeMatch = /^snooze:([0-9a-f]+):(\d+)$/.exec(data)
       if (snoozeMatch) {
-        await this.#handleSnooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
+        await this.#reminderDelivery.snooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
         return
       }
 
@@ -1165,15 +1223,34 @@ export class TelegramBridge {
           await answer("未知的白名单操作")
           return
         }
-        const result = this.#adminCommands.mutateAccess(false, [id], ctx.from?.id)
+        const channel = channelOfChatId(chatId, this.#channel)
+        const result = this.#adminCommands.mutateAccess(false, [id], ctx.from?.id, channel)
         if (!result.ok) {
           await answer(result.message)
-          await this.#editPanel(ctx, this.#accessPanel())
+          await this.#editPanel(ctx, this.#accessPanel(undefined, channel))
           return
         }
         this.#log.info(`access removed ${id} by ${ctx.from?.id ?? "?"}`)
         await answer(`已移除 ${id}`)
-        await this.#editPanel(ctx, this.#accessPanel(`🗑 已从白名单移除 ${id}，立即生效。`))
+        await this.#editPanel(ctx, this.#accessPanel(`🗑 已从白名单移除 ${id}，立即生效。`, channel))
+        return
+      }
+
+      if (data.startsWith("faccess:")) {
+        const id = data.slice("faccess:del:".length)
+        if (!data.startsWith("faccess:del:") || !FEISHU_OPEN_ID_RE.test(id)) {
+          await answer("未知的飞书白名单操作")
+          return
+        }
+        const result = this.#adminCommands.mutateAccess(false, [id], ctx.from?.id, "feishu")
+        if (!result.ok) {
+          await answer(result.message)
+          await this.#editPanel(ctx, this.#accessPanel(undefined, "feishu"))
+          return
+        }
+        this.#log.info(`Feishu access removed ${id} by ${ctx.from?.id ?? "?"}`)
+        await answer(`已移除 ${id}`)
+        await this.#editPanel(ctx, this.#accessPanel(`🗑 已从飞书白名单移除 ${id}，立即生效。`, "feishu"))
         return
       }
 
@@ -1771,7 +1848,7 @@ export class TelegramBridge {
     const removed =
       pruneChatState(this.#generation, active, CHAT_STATE_LIMIT) +
       pruneChatState(this.#lastPrompts, active, CHAT_STATE_LIMIT) +
-      this.#ccCommands.pruneProviders((chatId) => active(`tg:${chatId}`), CHAT_STATE_LIMIT)
+      this.#ccCommands.pruneProviders((chatId) => active(this.#sessionKey(chatId)), CHAT_STATE_LIMIT)
     if (removed > 0) this.#log.debug(`pruned ${removed} idle chat state entries`)
   }
 
@@ -1831,9 +1908,9 @@ export class TelegramBridge {
     this.#opsCommands.applyLiveEnv(key, value)
   }
 
-  /** The Telegram user whitelist, editable from the chat instead of by editing `.env`. */
-  #accessPanel(headline?: string): Panel {
-    return this.#personalPanels.accessPanel(headline)
+  /** The active channel's whitelist, editable from the chat instead of by editing `.env`. */
+  #accessPanel(headline?: string, channel: Channel = "telegram"): Panel {
+    return this.#personalPanels.accessPanel(headline, channel)
   }
 
   async #handleAccessCommand(chatId: number, userId: number, arg: string): Promise<void> {
@@ -1944,7 +2021,7 @@ export class TelegramBridge {
       case "agents": return this.#agentInstallerPanel()
       case "model": return this.#modelPanel(key)
       case "dir": return this.#dirPanel(key)
-      case "access": return this.#accessPanel()
+      case "access": return this.#accessPanel(undefined, channelOfChatId(chatId, this.#channel))
       case "reminders": {
         const rawPage = Number(argument)
         return this.#remindersPanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
@@ -2031,60 +2108,19 @@ export class TelegramBridge {
   }
 
   #isAllowedUser(userId: number): boolean {
-    if (this.#cfg.telegram.allowAll) return true
-    return this.#cfg.telegram.allowUsers.has(String(userId))
+    return isUserAllowed(this.#cfg, userId, this.#channel)
+  }
+
+  #sessionKey(chatId: number): string {
+    return sessionKeyForChat(chatId, this.#channel)
   }
 
   async #deliverReminder(chatId: number, text: string, reminder?: Reminder): Promise<void> {
-    // Reminder bodies are user text: an unescaped * _ ` [ would fail the Markdown parse
-    // and lose the formatting of the whole message
-    let keyboard: InlineKeyboard | undefined
-    if (reminder && !reminder.repeat && reminder.text.length <= 500) {
-      // One-shot reminders can be re-armed from the delivery message; repeating ones
-      // already have a next occurrence, and long texts would bloat the token cache
-      const token = randomBytes(6).toString("hex")
-      this.#snoozePending.set(token, { chatId, userId: reminder.userId, text: reminder.text, createdAt: Date.now() })
-      this.#pruneSnoozeTokens()
-      keyboard = new InlineKeyboard()
-        .text("⏰ 10分钟", `snooze:${token}:10`)
-        .text("⏰ 1小时", `snooze:${token}:60`)
-        .row()
-        .text("⏰ 明天这个时候", `snooze:${token}:1440`)
-    }
-    const ok = await this.#sendTextMessage(chatId, escapeMarkdown(text), keyboard)
-    if (!ok) throw new Error("Telegram 发送失败")
-  }
-
-  /** Keeps the snooze token cache bounded: 500 entries or 24h, whichever first. */
-  #pruneSnoozeTokens(): void {
-    const cutoff = Date.now() - 24 * 3_600_000
-    for (const [token, pending] of this.#snoozePending) {
-      if (pending.createdAt < cutoff || this.#snoozePending.size > 500) this.#snoozePending.delete(token)
-    }
-  }
-
-  async #handleSnooze(chatId: number, token: string, minutes: number, answer: (text?: string) => Promise<void>): Promise<void> {
-    const pending = this.#snoozePending.get(token)
-    if (!pending || pending.chatId !== chatId) {
-      await answer("该按钮已过期")
-      return
-    }
-    this.#snoozePending.delete(token)
-    try {
-      const reminder = this.#reminders.snooze(chatId, pending.userId, pending.text, minutes)
-      this.#snoozePending.delete(token)
-      await answer("已安排稍后提醒")
-      await this.#sendTextMessage(
-        chatId,
-        `⏰ 好的，${escapeMarkdown(describeRemainingLabel(minutes))}后再提醒你：${escapeMarkdown(clip(reminder.text, 120) ?? "")}`,
-      )
-    } catch (err) {
-      await answer(err instanceof Error ? err.message : "稍后提醒失败")
-    }
+    return this.#reminderDelivery.deliver(chatId, text, reminder)
   }
 
   async #executeScheduled(task: ScheduledTask): Promise<UsageOutcome> {
-    const key = `tg:${task.chatId}`
+    const key = this.#sessionKey(task.chatId)
     const repeat = task.repeat ? `（${describeRepeat(task.repeat)}）` : ""
     this.#log.info(`scheduled task #${task.id} dispatching [${key}] (${scheduleTargetLabel(task, this.#agents.registry)})`)
     await this.#sendTextMessage(

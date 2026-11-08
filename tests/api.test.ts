@@ -1,6 +1,16 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { lstatSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { createServer, type Server } from "node:http"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -48,6 +58,8 @@ interface Harness {
   magpieCalls: string[]
   /** Makes the next cc-switch read fail, for a route that writes first and then re-reads. */
   ccFailNextRead: () => void
+  /** Simulates the owner appearing or changing after the API server has started. */
+  setOwner: (chatId: number, userId?: number) => void
 }
 
 export async function withApi(
@@ -357,6 +369,8 @@ export async function withApi(
   } as unknown as BotConfig
 
   let currentTz = "Asia/Shanghai"
+  let ownerChatId: number | undefined = 42
+  let ownerUserId: number | undefined = 42
   const api = new ApiServer(
     {
       cfg,
@@ -387,7 +401,8 @@ export async function withApi(
       ccswitch,
       magpie: magpie as unknown as import("../src/magpie.js").MagpieService,
       fetchMedia: async (target: string) => Buffer.from(`remote:${target}`),
-      ownerChatId: 42,
+      ownerChatId: () => ownerChatId,
+      ownerUserId: () => ownerUserId,
     },
     TOKEN,
     encKey,
@@ -416,6 +431,10 @@ export async function withApi(
       magpieCalls,
       ccFailNextRead: () => {
         ccFailsOneRead = true
+      },
+      setOwner: (chatId, userId = chatId) => {
+        ownerChatId = chatId
+        ownerUserId = userId
       },
     })
   } finally {
@@ -3372,6 +3391,50 @@ test("api exposes session and pairing info without leaking the token", async () 
     assert.equal(info.api.bind, "127.0.0.1")
     assert.equal(info.api.port, 0)
     assert.equal(info.api.tokenConfigured, true)
+  })
+})
+
+test("api follows an owner learned after startup for info, reminders and attachments", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const readInfo = async (): Promise<{ chatId: number | null; userId: number | null }> => {
+      const res = await fetch(`${h.base}/api/v1/info`, { headers: authHeaders() })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { chatId: number | null; userId: number | null }
+      return { chatId: body.chatId, userId: body.userId }
+    }
+
+    assert.deepEqual(await readInfo(), { chatId: 42, userId: 42 })
+
+    // A Feishu chat and its owner use separate negative numeric namespaces.
+    const feishuChat = -2_000_000_001
+    const feishuUser = -2_000_000_002
+    h.setOwner(feishuChat, feishuUser)
+    assert.deepEqual(await readInfo(), { chatId: feishuChat, userId: feishuUser })
+
+    const created = await fetch(`${h.base}/api/v1/reminders`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ text: "30m 飞书喝水" }),
+    })
+    assert.equal(created.status, 201)
+    const reminder = h.reminders.list(feishuChat)[0]
+    assert.equal(reminder?.userId, feishuUser, "reminder access must use the owner user id")
+    assert.equal(h.reminders.list(42).length, 0, "the old Telegram owner must not receive it")
+
+    const task = await fetch(`${h.base}/api/v1/task`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        text: "检查附件目录",
+        attachments: [{ name: "dynamic-owner.txt", mime: "text/plain", data: Buffer.from("ok").toString("base64") }],
+      }),
+    })
+    assert.equal(task.status, 202)
+    const files = readdirSync(join(h.dataDir, "inbox"))
+    assert.ok(
+      files.some((name) => name.startsWith(`${feishuChat}-`) && name.endsWith("-dynamic-owner.txt")),
+      `attachment should use the live chat id, got ${files.join(", ")}`,
+    )
   })
 })
 
