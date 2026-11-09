@@ -1,6 +1,6 @@
 # 多端 AI 私人助手（Telegram / 飞书 / 安卓 + OpenCode & Agent CLI）
 
-把 Telegram、飞书与安卓 App 接到本地 `opencode serve` 和主流 Agent CLI 上的私人 AI 助手。三个控制端共用同一套命令、会话队列、提醒、定时任务和运维能力。
+把 Telegram、飞书与安卓 App 接到本地 `opencode serve` 和主流 Agent CLI 上的私人 AI 助手。三个控制端共用同一套命令、会话队列、提醒、定时任务和运维能力。Git 部署的安装、运行、更新和卸载统一由 `npm run bot -- <command>` 管理。
 
 ## 控制端与架构
 
@@ -18,7 +18,7 @@ Telegram  ── Bot API 长轮询 ────┐
 
 > 安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [飞书接入](#飞书接入) · [运行](#运行) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
+**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [运行](#运行) · [更新与迁移](#更新与迁移) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
 
 ## 一键安装（推荐）
 
@@ -148,7 +148,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - 重复执行安装脚本是安全的：依赖会重新安装、构建会重新执行，但 `.env` 与 `data/` 会保留
 - 安装目录需要写权限；脚本不会自动使用 `sudo`
 
-安装完成后，在 Telegram 或飞书里给 Bot 发送 `/start`，安卓 App 用向导输出的地址与令牌配对即可开始使用；长期运行建议参考「systemd 常驻（可选）」。从已配置 release 服务端下载正式签名 APK，或在 App「设置 → 应用更新」中在线升级；早期 debug 签名包需先卸载再装正式包。
+安装完成后，在 Telegram 或飞书里给 Bot 发送 `/start`，安卓 App 用向导输出的地址与令牌配对即可开始使用。长期运行建议参考「systemd 常驻（可选）」，后续升级见「更新与迁移」。
 
 ## 功能
 
@@ -186,7 +186,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 ## 快速开始
 
-新用户按以下 5 步即可从零跑通；各步骤细节见后文对应章节。
+新用户按以下 5 步即可从零跑通。首次部署优先使用上方的一键安装；已经克隆仓库时，从第 2 步开始即可。
 
 ### 第 1 步：准备
 
@@ -198,16 +198,13 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 ### 第 2 步：安装与启动
 
 ```bash
-npm install
-npm run setup      # 配置 Telegram、安卓 App 或飞书（可多选）
-npm run build      # 构建 dist/
-npm run bot -- start   # 启动本地 opencode 与 Bot，日志见 data/bot.log
-npm run bot -- status  # 查看 supervisor、release、PID 与日志路径
+./install.sh --start   # 已克隆仓库；新机器用上方 curl 方式获取代码
+npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 ```
 
 首次启动且 `.env` 缺少任何控制端配置时，终端会自动进入控制端选择菜单；也可以随时运行 `npm run setup`。向导支持 Telegram、安卓 App、飞书，多选时按顺序完成各项配置，并在每项完成后立即写入 `.env`；未选中的控制端、其他配置与注释保持不变。详见「[运行](#运行)」与「[首次连接引导](#首次连接引导)」。
 
-也可以直接使用仓库根目录的 `install.sh` 一键完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env`」。完整用法、参数与注意事项见上方「[一键安装（推荐）](#一键安装推荐)」。
+需要手动安装依赖或修改源码时，再使用 `npm ci && npm run build`；安装完成后用 `npm run bot -- start` 启动。完整参数见「[一键安装（推荐）](#一键安装推荐)」。
 
 > 更喜欢容器部署？见「运行 → Docker 部署（可选）」，`docker compose up -d --build` 一条命令拉起全部服务。
 
@@ -234,18 +231,18 @@ npm run bot -- status  # 查看 supervisor、release、PID 与日志路径
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.0`）：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.1`）：
 
 ```bash
-tag=android-v1.1.0                  # 换成实际版本
+tag=android-v1.1.1                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.1.0.apk"
-curl -L -O "$base/agent-bot-v1.1.0.apk.sha256"
-sha256sum -c agent-bot-v1.1.0.apk.sha256
+curl -L -O "$base/agent-bot-v1.1.1.apk"
+curl -L -O "$base/agent-bot-v1.1.1.apk.sha256"
+sha256sum -c agent-bot-v1.1.1.apk.sha256
 ```
 
-- 请使用 Release 中带版本号的最新 APK；不要使用 v1.0.0–v1.0.11 的早期内部构建，这些版本存在明文 HTTP、代理重连、附件内存、加密切换与时间显示等问题，已在当前 Release 修复。
-- `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名，同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留；首次安装需允许「安装未知来源应用」。
+- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.1` 已修复明文 HTTP、代理重连、附件内存、加密切换与时间显示等问题。
+- `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名；同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留。首次安装需允许「安装未知来源应用」。
 - 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
 
@@ -425,15 +422,15 @@ App「设置 → 应用更新」会读取服务器上的 `GET /android/release?v
 
 ```bash
 # 先在 Android Studio / CI 构建并签名，再发布已签名的 APK
-npm run release:android -- --apk /path/to/agent-bot-v1.1.0.apk \
-  --version 1.1.0 --notes "本次更新说明"
+npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
+  --version 1.1.1 --notes "本次更新说明"
 ```
 
 脚本会复制 APK 到 `data/android/releases/`，以实际发布字节计算 SHA-256 和大小，并原子写入 `data/android-release.json`。已在运行的 Bot 无需重启即可看到新清单。GitHub Release 同时附带 `android-release.json`，可下载后放到 `data/android-release.json`，再把 APK 放到清单中的 `android/releases/` 相对路径。
 
 ### 第 5 步：日常维护
 
-基本不用再登服务器：`/ops` 诊断与快捷操作、`/logs` 看日志、`/update` 更新项目、`/restart` 重启、`/env` 改非密钥配置、`/access` 管白名单、`/proxy` 管代理。长期运行建议用 systemd 常驻，见「systemd 常驻（可选）」。
+基本不用再登服务器：`/ops` 诊断与快捷操作、`/logs` 看日志、`/update` 构建新版本、`/restart` 应用并重启、`/env` 改非密钥配置、`/access` 管白名单、`/proxy` 管代理。完整升级流程和回滚方式见「[更新与迁移](#更新与迁移)」。
 
 ## 命令
 
@@ -486,8 +483,8 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.0.apk \
 | `/ops` | 运维中心：诊断、日志、更新、重启、服务与配置 |
 | `/diag` | 查看 Node、Git、OpenCode、cc-switch、磁盘与日志状态 |
 | `/logs [行数]` | 查看 Bot 日志；`/logs opencode [行数]` 查看 OpenCode 日志 |
-| `/update` | 拉取代码、安装依赖并构建（需确认） |
-| `/restart` | 重启 Bot（需确认，systemd 部署会提示改用 systemctl） |
+| `/update` | 备份状态并在独立 release 目录构建新版本，留下 pending（需确认） |
+| `/restart` | 激活 pending 并重启 Bot，失败自动回滚（需确认；systemd 部署请用 `npm run bot -- restart`） |
 | `/service opencode start\|stop\|restart` | 管理由 Bot 托管的 OpenCode 服务 |
 | `/env` / `/env set KEY VALUE` / `/env unset KEY` | 查看或修改非密钥配置，重启后生效 |
 | `/access` | 查看当前渠道的访问白名单（含每个 ID 的移除按钮）与「放行所有用户」的状态；在飞书内自动展示飞书 open_id |
@@ -809,22 +806,21 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `CC_SWITCH_APP` / `CC_SWITCH_BIN`：cc-switch 集成的应用类型（默认 `opencode`，会自动映射为 CLI 的 `open-code`；也接受 `openclaw` → `open-claw`）与二进制路径；留空时依次查找 `./bin/cc-switch` 和 `PATH`。
 - `MAGPIE_BIN` / `MAGPIE_URL`：magpie 模型的 CLI 路径（留空时查找 `./bin/magpie` 和 `PATH`）与本地网关地址（默认 `http://127.0.0.1:3425`）。
 - `UPDATE_CHANNEL` / `UPDATE_BRANCH`：服务端更新通道。`stable`（默认）跟随 `origin/main`，`beta` 跟随 `origin/beta`；`UPDATE_BRANCH` 可覆盖具体远端分支名。release 存在 `data/releases/store/`，current/previous/pending 与最近结果写入 `data/releases/state.json`，默认保留 3 个。
-- `RELEASE_SUPERVISOR` / `RELEASE_SYSTEMD_UNIT`：`apply-release.sh` 的监督方式。systemd 部署用 `systemd` 和实际 unit 名，脚本/裸进程部署保持默认 `auto`；健康超时可用 `RELEASE_HEALTH_TIMEOUT`（秒）和 `RELEASE_HEALTH_INTERVAL`（秒）调整。
+- `RELEASE_HEALTH_TIMEOUT` / `RELEASE_HEALTH_INTERVAL`：启动健康等待的总超时与轮询间隔（秒）。`install --systemd` 生成的 unit 以自身 manifest 决定监督方式；`RELEASE_SUPERVISOR` / `RELEASE_SYSTEMD_UNIT` 仅由旧版 `apply-release.sh` 交接使用。
 - `GROK_API_KEY`：Grok provider 的密钥，`opencode.json` 通过 `{env:GROK_API_KEY}` 读取。
 - `SNIPER_EMAIL` / `SNIPER_PASSWORD`：仅 `scripts/sniper_free_vps.mjs` 使用。
 
 ## 运行
 
 ```bash
-npm install
-npm run cc-switch:install   # 可选：安装 cc-switch CLI 集成
-npm run setup               # 配置至少一个控制端，并可顺带安装 Agent CLI / magpie / cc-switch
-npm run build
-npm run bot -- start        # 启动 Bot（默认同时管理本机 opencode）
-npm run bot -- status   # 查看 supervisor、release、PID 与日志路径
-npm run bot -- doctor   # 只读诊断：环境、配置、进程与健康探针
-npm run bot -- logs bot 100  # 查看最近 100 行日志
+./install.sh                    # 安装、构建并可进入控制端与工具向导
+npm run bot -- start            # 启动 Bot（默认同时管理本机 opencode）
+npm run bot -- status           # 查看 supervisor、release、PID 与日志路径
+npm run bot -- doctor           # 只读诊断：环境、配置、进程与健康探针
+npm run bot -- logs bot 100     # 查看最近 100 行日志
 ```
+
+已经手动配置好 `.env`、依赖和构建产物时，也可以直接 `npm run bot -- start`。需要单独安装 cc-switch 时再运行 `npm run cc-switch:install`。
 
 `npm run bot -- <command>` 是唯一生命周期入口：`install`、`setup`、`status`、`doctor`、`logs`、`start`、`stop`、`restart`、`update`、`uninstall` 共用同一套进程识别、release 选择与健康检查。`npm run serve` 仍保留为手工启动 opencode 的低层命令，但日常部署不需要单独维护两个终端。
 
@@ -881,9 +877,9 @@ npm run bot -- start
 npm run bot -- status
 ```
 
-安装器会生成 `agent-bot.service` 和（本机 OpenCode 时）`agent-bot-opencode.service`，并在 `data/install.json` 记录真实路径。`npm run bot -- restart` 在 systemd 模式下会先激活 pending release，再重启服务并检查健康；失败时自动回滚并重启旧版本。不要再运行旧的 `scripts/restart.sh` 抢进程。
+安装器会生成 `agent-bot.service` 和（本机 OpenCode 时）`agent-bot-opencode.service`，并在 `data/install.json` 记录真实路径。`npm run bot -- restart` 在 systemd 模式下会先激活 pending release，再重启服务并检查健康；失败时自动回滚并重启旧版本。不要在 systemd 服务运行期间直接执行 `npm run bot -- start`，也不要运行旧的 `scripts/restart.sh` 抢进程。
 
-如果使用旧版 unit，`scripts/run-current.sh` 仍可作为 `ExecStart`，它会委托给新的生命周期入口。`deploy/telegram-bot.service` 仅保留为手工部署示例，推荐改用上面的安装命令。
+如果 unit 还是旧版，先在维护窗口停止并禁用旧 unit，再执行 `npm run bot -- install --systemd`（或 `--user-systemd`）让安装器生成受管 unit；它会把 pending 激活、健康检查和自动回滚接进 `npm run bot -- restart`。`scripts/run-current.sh` 只作为 `ExecStart` 的兼容入口，`deploy/telegram-bot.service` 仅保留为手工部署示例。
 
 > `opencode serve` 不会自动读取 `.env`，修改 `opencode.json` 或 agent 文件后需要带环境变量重启：
 > `set -a; . ./.env; set +a; opencode serve --port 4096 --hostname 127.0.0.1`
@@ -899,9 +895,77 @@ npm run bot -- uninstall --yes      # 非交互环境跳过确认
 
 默认卸载不会删除仓库目录、`data/` 或 `.env`，因此之后重新安装仍可继续使用已有会话、提醒与配对密钥。只有显式传入 `--purge-data` 才会删除 `data/` 与 `.env`；删除前会校验 `DATA_DIR` 不是项目根目录、`/` 或项目目录的上级目录。只删除带 `managed by agent-bot` 标记的 launcher 与 systemd unit，手工创建或已被覆盖的文件会拒绝删除并保留。Docker 部署不使用上述 unit 流程，请在宿主机执行 `docker compose down`；是否删除挂载的 `data/` 由你自行决定。
 
+## 更新与迁移
+
+### 服务器更新
+
+通过 `install.sh` 或 `npm run bot -- install` 管理的 Git checkout，使用隔离 release 更新；不要让正在运行的进程直接改写 checkout。以下命令都要在安装目录执行：
+
+```bash
+cd /path/to/agent-bot
+npm run bot -- status          # 先确认 supervisor、current release 与健康状态
+npm run bot -- update          # 备份状态、独立构建、发布门禁，留下 pending
+npm run bot -- restart         # 激活 pending，重启并做启动自检
+
+# 构建与重启一次完成；启动失败会回滚到上一版
+npm run bot -- update --apply
+```
+
+`update` 要求当前 checkout 有可用的 `git` 远端和上游分支，且工作区没有未提交改动；它会先备份状态，再在 `data/releases/store/` 生成新 release，不会修改正在运行的 `dist/`。`restart` 只在启动自检通过后保留新版本；超时或启动失败会切回 previous 并重新启动。更新记录在 `data/releases/state.json`，默认保留 current、previous 与 pending。也可以在 Telegram / 飞书发送 `/update`，完成后再发送 `/restart`；App 抽屉中的「运维中心」提供同样的操作和二次确认。
+
+- **systemd 部署**：使用 `npm run bot -- install --systemd` 或 `--user-systemd` 生成的 unit 时，`npm run bot -- update --apply` 会先激活 release，再重启 unit 并检查健康；不要直接 `systemctl restart` 一个旧的手工 unit 来替代这一步。
+- **旧 unit / 手工进程**：如果 unit 仍执行 `scripts/run-current.sh` 或直接执行 checkout 里的 `dist/index.js`，它不会自动激活 pending。先用新安装器迁移 unit，之后统一用 `npm run bot -- restart`；旧的 `scripts/restart.sh`、`scripts/apply-release.sh` 只保留兼容入口。
+- **Docker 部署**：容器内没有 `.git` 和 systemd，`/update`、隔离 release 与自动回滚不可用。请在宿主机拉取代码后执行 `docker compose up -d --build`，用新镜像重启；`data/` 与 `.env` 仍由挂载卷保留。
+- **更新前备份**：`update` 会先备份可解析的 `data/*.json` 状态；涉及自定义脚本、`opencode.json`、`.opencode/agent/` 或 `bin/` 的改动仍需单独备份。`.env` 与 `data/` 不进入新 release 的 Git 工作区，但复制或修改它们的自定义脚本仍应事前留档。
+
+### 从旧版手动部署迁移
+
+没有 `.git`、没有 `src/bot-cli.ts`、没有 `data/install.json` 或仍在运行旧的 `dist/index.js` 的部署，不能直接运行 `npm run bot -- update`。先在**独立目录**准备新 checkout，完成一次性迁移，再切换服务；同一时间只运行一个旧版或新版实例，否则 Telegram 长轮询与 API 端口会冲突。
+
+```bash
+OLD=/data/workspace/bot                 # 换成旧安装目录
+NEW=/opt/agent-bot                      # 换成新安装目录
+git clone https://github.com/longtimex/agent-bot.git "$NEW"
+cd "$NEW"
+
+backup="$HOME/agent-bot-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+cp -a "$OLD/.env" "$OLD/data" "$backup/"
+
+# 先把旧状态放到新目录，再清掉运行态锁和旧安装清单
+mkdir -p data
+cp "$OLD/.env" .env
+chmod 600 .env
+cp -a "$OLD/data/." data/
+rm -f data/install.json data/bot.lock data/bot.pid data/opencode.pid data/startup-check.json
+# 按需复制自定义配置，不要复制 node_modules/、dist/ 或旧 .git
+test -f "$OLD/opencode.json" && cp "$OLD/opencode.json" opencode.json
+test -d "$OLD/.opencode" && cp -a "$OLD/.opencode/." .opencode/
+
+npm ci
+npm run build
+npm run bot -- doctor                   # 只读检查环境、配置和进程
+```
+
+如果旧实例保留着自己的 systemd unit（例如 `telegram-bot.service`），先不要覆盖或删除它。确认新目录的诊断通过后，在维护窗口内停止旧 unit，再启动新版：
+
+```bash
+sudo systemctl stop <旧-unit名>         # 换成实际 unit，例如 telegram-bot.service
+npm run bot -- start                    # 先用脚本模式验证
+npm run bot -- status
+curl -fsS http://127.0.0.1:3080/api/v1/health   # 仅启用 API 且使用默认端口时
+
+# 验证通过并准备长期常驻时，停止脚本实例后再切换 systemd
+npm run bot -- stop
+npm run bot -- install --systemd
+npm run bot -- start
+```
+
+验证 Telegram / 飞书 `/start`、App 配对和一条真实任务后，再 `sudo systemctl disable <旧-unit名>`。若新版本无法启动，停止新实例、用 `$backup` 里的副本恢复 `.env` 与 `data/`，重新启动旧 unit 即可回退。迁移完成后，后续更新改用 `npm run bot -- update --apply`，不要再使用旧目录里的 `git pull` 或手工覆盖 `dist/`。
+
 ## 聊天运维中心
 
-首次完成克隆、`npm install` 与启动后，Telegram 与飞书都可以在聊天内完成日常运维：
+完成安装与启动后，Telegram 与飞书都可以在聊天内完成日常运维：
 
 ```text
 /ops                               # 运维面板：诊断 + 快捷按钮
@@ -909,7 +973,7 @@ npm run bot -- uninstall --yes      # 非交互环境跳过确认
 /logs 100                          # 最近 100 行 Bot 日志（自动去除 ANSI 与密钥）
 /logs opencode 200                 # 最近 200 行 OpenCode 日志
 /update                            # 确认后隔离构建新 release，留下 pending
-/restart                           # 确认后重启 Bot
+/restart                           # 确认后激活 pending release 并重启
 /service opencode start|stop|restart
 /env                               # 查看可修改的非密钥配置
 /env set LOG_LEVEL debug
@@ -917,19 +981,9 @@ npm run bot -- uninstall --yes      # 非交互环境跳过确认
 /env unset PROXY_TEST_URL
 ```
 
-**项目更新**：`/update` 不再改动正在运行的 checkout。它先在 `data/releases/.staging-*` 中克隆当前仓库、检出 `UPDATE_CHANNEL` / `UPDATE_BRANCH` 指向的远端分支，执行 `npm ci --no-audit --no-fund`、`npm run check:release` 发布门禁与 `npm run build`；全部通过后把构建树原子移动到 `data/releases/store/<id>` 并标记为 pending。任一步失败都会清理临时目录，旧版本继续运行，也不会留下可激活的半成品。
+**项目更新**：`/update` 在隔离目录执行发布门禁与构建，完成后留下 pending；`/restart` 才会切换 current 并做启动自检，失败自动回滚。更新通道、systemd/Docker 差异和迁移步骤见「[更新与迁移](#更新与迁移)」。`/ops` 还可丢弃 pending 或回滚到上一版；任务运行中会要求先停止任务。
 
-**通道与激活**：`UPDATE_CHANNEL=stable` 默认跟随 `origin/main`，`beta` 默认跟随 `origin/beta`；需要其他分支时同时设置 `UPDATE_BRANCH`。点击「应用 pending 并重启」或发送 `/restart` 才会切换 current。重启后 release 监督脚本会等待新进程写出本次启动的自检：启用 API 时同时验证 `/health`，纯 Telegram/飞书部署则要求 `data/startup-check.json` 的 release、时间与 PID 都匹配本次启动；超时或启动失败会自动把 current 切回上一版并重新启动。启动成功保留 current 与 previous（默认共 3 个 release，`data/releases/state.json` 记录指针与最近更新结果），可用 `/ops` 的「丢弃 pending」「回滚到上一版」处理异常。App 对这三个操作都有二次确认；任务运行中，更新、重启、回滚与丢弃 pending 会返回或提示先停止任务。
-
-**systemd 激活**：由 `npm run bot -- install --systemd` 生成的 unit 使用 `dist/bot-cli.js run`，因此 `npm run bot -- restart` 可以完成 pending 激活与健康检查：
-
-```bash
-npm run bot -- update --apply
-```
-
-如果使用旧 unit（`scripts/run-current.sh`），普通 `sudo systemctl restart ...` 只会启动 current，不会激活 pending；请改用 `npm run bot -- restart`。Docker 内没有 `.git`，`/update` 与 release 切换不可用，更新方式只能是重新构建镜像（见 Docker 小节）。长命令（安装依赖、安装 cc-switch）超时时会终止整个进程组，连同 npm 生命周期脚本与下载子进程一起收掉，避免超时后仍有进程继续改写 `node_modules`。
-
-**重启 Bot**：统一使用 `npm run bot -- restart`。脚本模式会按锁文件和 PID 的进程启动时间双重校验后停止旧进程（`npm start` 启动的实例也能通过 lock 识别），再启动新版本并等待本次启动自检；systemd 模式会重启 unit、激活 pending 并在失败时回滚。`scripts/restart.sh` 与 `scripts/apply-release.sh` 仅作为兼容入口。
+**重启 Bot**：脚本模式与 systemd 模式都统一使用 `npm run bot -- restart`；它会激活 pending、等待本次启动自检，并在失败时回滚。不要用旧 unit 的 `systemctl restart` 或 `scripts/restart.sh` 替代。
 
 **OpenCode 服务**：`/service opencode start` 使用当前 `OPENCODE_URL` 的端口与 `--hostname 127.0.0.1` 启动 `opencode serve`，PID 写入 `data/opencode.pid`，日志追加到 `data/opencode.log`（超过 10MB 自动轮转）。Bot 只会停止自己启动的实例；手动启动的 OpenCode 会被识别为“未托管”并拒绝停止/重启。`OPENCODE_URL` 指向非本机地址时也不提供启停管理。
 
