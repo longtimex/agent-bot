@@ -31,6 +31,7 @@
 
 ### 修复
 
+- **CI 的 Node 20 兼容性**：`undici` 从 8.x（要求 Node ≥22.19）降到 7.30.2（支持 Node ≥20.18.1），修复 Node 20 runner 在导入阶段因 zstd API 缺失导致的 11 个测试文件崩溃；`engines`、安装脚本和 README 的 Node 下限同步为 20.18.1，CI 继续覆盖 Node 20/22 并新增 Node 24。诊断测试显式固定 `systemd` 状态，避免 GitHub runner 自身运行 systemd 时误报。
 - **无 API 部署的发布健康检查**：`apply-release.sh` 在启动/重启前记录时间边界；`release-health.mjs` 在 `API_ENABLED=0` 或缺少令牌时改读 `data/startup-check.json`，并要求 release、时间与脚本监督的 PID 都对应本次启动。过期的成功记录、其它 release 或启动失败记录都会被拒绝，Telegram/飞书-only 部署不再因探针失败而每次更新都回滚。
 - **启动自检时序**：成功的 `data/startup-check.json` 现在写在各控制端启动之后，并记录 checkout 状态（release=`checkout`）、引擎与各控制端状态，避免 API 已监听但 Telegram 初始化失败时被误判为健康。
 - **CI 签名核验**：Android 发布工作流使用 `$ANDROID_HOME/build-tools/35.0.0/apksigner`，并把 APK 签名证书 SHA-256 与 `ANDROID_KEY_ALIAS` 对应证书指纹逐字比对；发布清单补上 `size`，与本地发布脚本一致。

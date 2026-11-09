@@ -113,10 +113,10 @@ fi
 
 step "Checking prerequisites..."
 command -v git >/dev/null 2>&1 || fail "git is required"
-command -v node >/dev/null 2>&1 || fail "Node.js >= 20.12 is required (https://nodejs.org)"
+command -v node >/dev/null 2>&1 || fail "Node.js >= 20.18.1 is required (https://nodejs.org)"
 command -v npm >/dev/null 2>&1 || fail "npm is required (it ships with Node.js)"
-node -e 'const [a,b]=process.versions.node.split(".").map(Number); if (a < 20 || (a === 20 && b < 12)) process.exit(1)' \
-  || fail "Node.js >= 20.12 is required (found $(node -v))"
+node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a < 20 || (a === 20 && (b < 18 || (b === 18 && c < 1)))) process.exit(1)' \
+  || fail "Node.js >= 20.18.1 is required (found $(node -v))"
 
 step "Installing into ${install_dir}"
 if [ "$from_checkout" -eq 1 ]; then

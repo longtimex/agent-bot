@@ -68,7 +68,9 @@ test("ops diagnostics reports git, opencode, cc-switch, disk and logs", async ()
         if (command === ccBin) return { code: 0, stdout: "cc-switch 1.2.3\n", stderr: "" }
         return undefined
       },
-      { ccSwitchBin: ccBin, health: async () => true },
+      // CI runners and developer machines may themselves run under systemd.
+      // Pin it so this test covers the diagnostics payload, not the host.
+      { ccSwitchBin: ccBin, health: async () => true, systemd: false },
     )
 
     const diag = await ops.diagnostics()

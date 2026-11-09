@@ -27,7 +27,7 @@ Telegram  ── Bot API 长轮询 ────┐
 ### 前置条件
 
 - Linux / macOS
-- **Node.js ≥ 20.12**、`npm`、`git`
+- **Node.js ≥ 20.18.1**、`npm`、`git`
 - **至少配置一个控制端**（三选一，可同时启用）：
   - Telegram：一个 Bot Token（在 [@BotFather](https://t.me/BotFather) 发送 `/newbot` 获取）
   - 飞书：企业自建应用的 `App ID`、`App Secret` 与至少一个 `open_id` 白名单
@@ -108,7 +108,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 ### 脚本会做什么
 
-1. 检查 `git`、`node`、`npm`，并校验 Node.js ≥ 20.12
+1. 检查 `git`、`node`、`npm`，并校验 Node.js ≥ 20.18.1
 2. 使用当前 checkout，或按 `--repo` / `--branch` 克隆到安装目录
 3. 执行 `npm ci`（没有 lockfile 时执行 `npm install`）
 4. 执行 `npm run build`
@@ -168,7 +168,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 ### 第 1 步：准备
 
-- 一台 Linux / macOS 机器（本机或云服务器均可），已安装 **Node.js ≥ 20.12**（`node -v` 查看）。
+- 一台 Linux / macOS 机器（本机或云服务器均可），已安装 **Node.js ≥ 20.18.1**（`node -v` 查看）。
 - 安装 OpenCode CLI：`npm install -g opencode-ai`；其余 Agent CLI 之后可在聊天里一键安装。
 - 选择控制端：Telegram 在 [@BotFather](https://t.me/BotFather) 发送 `/newbot` 创建 Bot；飞书按「[飞书接入](#飞书接入)」创建企业自建应用；安卓 App 按「[第 4 步](#第-4-步安卓-app可选)」准备手机可达的 API 地址。至少配置一个，也可以同时启用。
 - 可选：准备好模型 API Key（如 `GROK_API_KEY`），稍后填入 `.env`。
