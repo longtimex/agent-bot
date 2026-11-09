@@ -12,6 +12,11 @@ jobs:
   release:
     name: Publish ${{ github.ref_name }}
     runs-on: ubuntu-24.04
+    env:
+      SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE || secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+      SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS || secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD || secrets.ANDROID_RELEASE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
 
@@ -35,30 +40,24 @@ jobs:
           gradle-version: "8.9"
 
       - name: Decode release keystore
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
+          if [[ -z "${SIGNING_KEYSTORE_BASE64:-}" ]]; then
             echo "ANDROID_KEYSTORE_BASE64 is not configured; a signed release cannot be built" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/keystore"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/keystore/release.jks"
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/keystore/release.jks"
           test -s "$RUNNER_TEMP/keystore/release.jks"
 
       - name: Check signing secrets
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          for name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+          for name in SIGNING_KEYSTORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
             if [[ -z "${!name:-}" ]]; then
-              echo "$name is not configured; refusing to publish an unsigned or debug APK" >&2
+              echo "${name#SIGNING_} is not configured; refusing to publish an unsigned or debug APK" >&2
               exit 1
             fi
           done
@@ -92,15 +91,15 @@ jobs:
         working-directory: android
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/keystore/release.jks
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ env.SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ env.SIGNING_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon
 
       - name: Verify APK signature
         env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ env.SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
         shell: bash
         run: |
           set -euo pipefail

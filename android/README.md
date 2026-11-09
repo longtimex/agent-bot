@@ -121,12 +121,12 @@ git tag -a android-v1.1.0 -m "Android v1.1.0"
 git push origin android-v1.1.0
 ```
 
-工作流会先按标签把 `versionName` 写成标签版本（如 `1.1.0`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，再执行 `gradle assembleRelease`。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
+工作流会先按标签把 `versionName` 写成标签版本（如 `1.1.0`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，再执行 `gradle assembleRelease`。它优先读取以下 Secrets（兼容旧命名别名），缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
 
-- `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
-- `ANDROID_KEYSTORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
+- `ANDROID_KEYSTORE_BASE64`（兼容：`ANDROID_KEYSTORE`、`ANDROID_RELEASE_KEYSTORE_BASE64`）：release keystore 的 base64 内容
+- `ANDROID_KEYSTORE_PASSWORD`（兼容：`KEYSTORE_PASSWORD`、`ANDROID_RELEASE_KEYSTORE_PASSWORD`）
+- `ANDROID_KEY_ALIAS`（兼容：`KEY_ALIAS`、`ANDROID_RELEASE_KEY_ALIAS`）
+- `ANDROID_KEY_PASSWORD`（兼容：`KEY_PASSWORD`、`ANDROID_RELEASE_KEY_PASSWORD`）
 
 构建后用 `apksigner verify --print-certs` 校验签名，并把 APK 签名证书的 SHA-256 与 keystore 中指定 alias 的证书指纹逐字比对；证书有效但 alias 不对也会失败。发布资产包含 `agent-bot-vX.Y.Z.apk`、同名 `.sha256` 与 `android-release.json`（版本、versionCode、大小、SHA-256、说明）。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
 
