@@ -17,7 +17,7 @@ Telegram / Feishu / Android App
                          ▼
               服务与领域模块
    apiTasks / apiPersonal / apiCc / engineCall
-   reminders / scheduler / models / ops / proxy …
+   reminders / scheduler / models / ops / release / proxy …
                          │
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
@@ -41,7 +41,15 @@ Telegram / Feishu / Android App
 - `src/apiCc.ts` / `src/apiCcSpecs.ts`：cc-switch 路由与白名单表。
 - `src/engineCall.ts`：OpenCode / Agent CLI 统一调用入口。
 - `src/reminders.ts` / `src/scheduler.ts`：提醒与定时任务。
-- `src/ops.ts`：运维诊断、日志、更新、服务管理。
+- `src/ops.ts`：运维诊断、日志、服务管理与更新编排的入口。
+- `src/releaseManager.ts`：在隔离的 staging checkout 中构建 release，维护 `data/releases/store`、`state.json`、保留策略与 current/previous/pending 指针。
+- `src/updateOrchestrator.ts`：更新生命周期：备份状态 → 构建与门禁 → pending → 取消 pending/回滚；不直接改运行中的 checkout。
+- `src/updateChecker.ts`：`stable` / `beta` 更新目标、只读更新检查与 release 诊断。
+- `src/releaseStatus.ts`：`GET /ops/release` 的轻量版本卡，不触发 git/OpenCode/磁盘探针。
+- `src/release-control.ts`：`scripts/apply-release.sh` 使用的状态 CLI（entry/current-id/activate/rollback/record-ok），保证 shell 不手写 JSON。
+- `src/startupSelfCheck.ts`：启动自检与失败记录；成功记录写在各控制端启动之后，供无 API 部署做发布健康检查。
+- `src/dataMigration.ts`：启动前的数据 schema 快照、迁移标记与保留策略。
+- `src/androidRelease.ts`：Android 更新清单校验、APK 路径边界、SHA-256/大小复核与下载路由。
 - `src/ccswitch.ts` / `src/ccCommands.ts` / `src/ccGuards.ts`：cc-switch 适配与危险命令拦截。
 
 ### 聊天子模块（Telegram / 飞书共用）
@@ -79,6 +87,9 @@ Telegram / Feishu / Android App
 - 行为变化必须带测试；测试放在 `tests/`，优先覆盖边界、失败和并发语义。
 - 不把 APK、构建产物或密钥提交进仓库；`android/releases/` 已在 `.gitignore` 中。
 - 模块体积由 `npm run check:size` 把关，防止重新长成超大文件。
+- 发布构建只写 `data/releases/.staging-*` 与 `data/releases/store/`；运行中的 checkout 与 `dist/` 不得被 `/update` 原地改写。
+- release 健康检查必须绑定本次启动：有 API 时校验 `/health`，无 API 时校验 `data/startup-check.json` 的 release、时间与 PID，不能接受旧成功记录。
+- 切换 `debug` 与正式 release 签名 APK 需要卸载重装，属于 Android 签名身份约束；文档与 UI 必须明确本地 App 数据会丢失。
 
 ## 数据流
 
@@ -100,3 +111,13 @@ Telegram / 飞书消息 / App 任务
 - `CHANGELOG.md`：版本变更
 - `DEEP-100.md`：深度审查台账
 - `android/README.md`：安卓构建与连接
+
+## 发布脚本
+
+| 脚本 | 边界 |
+| --- | --- |
+| `scripts/run-current.sh` | systemd 唯一入口，只选择并 `exec` current release；首次部署回退 checkout 的 `dist/index.js` |
+| `scripts/apply-release.sh` | 激活 pending 或重启 current，健康检查失败回滚；`RELEASE_SUPERVISOR=systemd` 时用 `systemctl`/`systemd-run`，否则管理脚本 PID |
+| `scripts/release-health.mjs` | 发布健康探针；API 可用时用 `/health`，否则要求本次启动的 self-check |
+| `scripts/publish-android-release.mjs` | 发布 App APK、按实际字节计算哈希/大小并原子写清单 |
+| `scripts/check-release.mjs` | 发布门禁（类型、Android 源码、体积、单测） |

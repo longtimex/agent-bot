@@ -24,3 +24,6 @@ services:
       # /cc model add 等会写 opencode.json；想跨镜像重建保留就解开注释
       # （前提：宿主机项目根目录已存在该文件，否则 Docker 会创建同名目录）
       # - ./opencode.json:/app/opencode.json
+      # 容器镜像不包含 .git，也没有 systemd：/update 的隔离 release 构建与
+      # apply-release.sh 不适用于容器。更新方式是在宿主机拉取代码后
+      # `docker compose up -d --build`，以新镜像重启。

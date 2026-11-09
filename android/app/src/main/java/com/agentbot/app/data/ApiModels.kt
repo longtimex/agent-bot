@@ -168,6 +168,75 @@ data class Diagnostics(
     val disk: DiskInfo? = null,
     val memory: MemoryInfo? = null,
     val lastBackupAt: Long = 0,
+    val release: ReleaseInfo? = null,
+    val update: UpdateTarget? = null,
+    val startup: StartupCheck? = null,
+)
+
+/** Managed release pointers on the server, mirrored from `/ops/diag` and `/ops/release`. */
+@Serializable
+data class ReleaseInfo(
+    val label: String = "",
+    val current: String? = null,
+    val previous: String? = null,
+    val pending: String? = null,
+    val lastUpdateAt: String? = null,
+    val lastUpdateStatus: String? = null,
+    val lastUpdateMessage: String? = null,
+)
+
+/** The branch an update follows (`stable` or `beta`). */
+@Serializable
+data class UpdateTarget(
+    val channel: String = "stable",
+    val ref: String = "origin/main",
+)
+
+@Serializable
+data class StartupMigration(
+    val ok: Boolean = true,
+    val fromVersion: String? = null,
+    val toVersion: String? = null,
+    val message: String? = null,
+    val warning: String? = null,
+)
+
+@Serializable
+data class StartupApi(
+    val requested: Boolean = false,
+    val reachable: Boolean? = null,
+    val error: String? = null,
+)
+
+/** Last startup self-check written by the bot; a failure here explains a half-started process. */
+@Serializable
+data class StartupCheck(
+    val at: String? = null,
+    val version: String? = null,
+    val pid: Int? = null,
+    val commit: String? = null,
+    val release: String? = null,
+    val previousRelease: String? = null,
+    val migration: StartupMigration? = null,
+    val api: StartupApi? = null,
+    val engine: String? = null,
+    val failure: String? = null,
+    val notes: List<String> = emptyList(),
+)
+
+/** Server-hosted Android APK metadata; bytes are fetched from the authenticated download URL. */
+@Serializable
+data class AndroidReleaseInfo(
+    val configured: Boolean = false,
+    val versionName: String? = null,
+    val versionCode: Int? = null,
+    val size: Long = 0,
+    val sha256: String? = null,
+    val notes: String = "",
+    val publishedAt: String = "",
+    val downloadUrl: String? = null,
+    val message: String? = null,
+    val updateAvailable: Boolean? = null,
 )
 
 @Serializable
@@ -378,6 +447,9 @@ data class Health(
     val timezone: String? = null,
     val uptimeMs: Long = 0,
     val encryption: Boolean = false,
+    val pid: Int? = null,
+    val commit: String? = null,
+    val release: String? = null,
 )
 
 @Serializable

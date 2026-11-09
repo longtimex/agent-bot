@@ -107,10 +107,12 @@ class ApiClient {
     // 用段判断而非带引号的斜杠字面量，避免 appParity 的路径扫描把辅助函数当成端点。
     private fun encryptionSkipped(path: String): Boolean {
         val segments = path.split('?').first().split('/')
-        // /export is sent as a raw attachment too, so the server never encrypts its body
+        // /export is sent as a raw attachment too, so the server never encrypts its body.
+        // The Android update page serves raw APK bytes for the same reason.
         return segments.contains("events") ||
             segments.contains("media") ||
             segments.contains("export") ||
+            (segments.contains("android") && segments.lastOrNull() == "apk") ||
             segments.lastOrNull() == "backup"
     }
 
@@ -592,6 +594,59 @@ class ApiClient {
         val diag = res["diagnostics"]?.jsonObject ?: throw ApiException(500, "响应缺少 diagnostics 字段")
         return json.decodeFromJsonElement(Diagnostics.serializer(), diag)
     }
+
+    /** Managed release state plus update channel, shown in the ops screen. */
+    suspend fun releaseInfo(connection: Connection): Diagnostics {
+        val res = getBody(connection, "/ops/release")
+        val release = res["release"]?.jsonObject
+        val update = res["update"]?.jsonObject
+        return Diagnostics(
+            release = release?.let { json.decodeFromJsonElement(ReleaseInfo.serializer(), it) },
+            update = update?.let { json.decodeFromJsonElement(UpdateTarget.serializer(), it) },
+            startup = res["startup"]?.jsonObject?.let { json.decodeFromJsonElement(StartupCheck.serializer(), it) },
+        )
+    }
+
+    /** Latest App APK the bot hosts; no bytes are transferred until the user asks to install. */
+    suspend fun androidRelease(connection: Connection, versionCode: Int): AndroidReleaseInfo =
+        json.decodeFromJsonElement(
+            AndroidReleaseInfo.serializer(),
+            getBody(connection, "/android/release?versionCode=$versionCode"),
+        )
+
+    /**
+     * Streams the APK to `dest` through a .part file. Fetching it as one ByteArray would hold
+     * a second full copy in the phone heap, and an interrupted install would need a restart.
+     */
+    suspend fun downloadAndroidRelease(connection: Connection, dest: File, expectedSize: Long = 0): File =
+        withContext(Dispatchers.IO) {
+            if (dest.exists() && (expectedSize <= 0 || dest.length() == expectedSize)) return@withContext dest
+            val part = File(dest.parentFile, "${dest.name}.part")
+            part.parentFile?.mkdirs()
+            part.delete()
+            http.newCall(request(connection, "GET", "/android/release/apk")).execute().use { res ->
+                observeServerClock(res)
+                if (!res.isSuccessful) {
+                    val text = res.body?.string().orEmpty()
+                    throw ApiException(res.code, serverFailure(res.code, text))
+                }
+                val body = res.body ?: throw ApiException(500, "空的 APK 响应")
+                val declared = body.contentLength()
+                if (expectedSize > 0 && declared > 0 && declared != expectedSize) {
+                    throw ApiException(500, "服务器返回的 APK 大小与清单不一致")
+                }
+                body.byteStream().use { input -> part.outputStream().use { output -> input.copyTo(output) } }
+                if (expectedSize > 0 && part.length() != expectedSize) {
+                    part.delete()
+                    throw ApiException(500, "APK 下载不完整（大小与清单不一致）")
+                }
+                if (!part.renameTo(dest)) {
+                    part.delete()
+                    throw ApiException(500, "无法保存 APK")
+                }
+                dest
+            }
+        }
 
     suspend fun opsService(connection: Connection): ServiceStatus {
         val service = getBody(connection, "/ops/service")["service"]?.jsonObject

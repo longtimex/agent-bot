@@ -34,6 +34,35 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
+            echo "ANDROID_KEYSTORE_BASE64 is not configured; a signed release cannot be built" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/keystore/release.jks"
+          test -s "$RUNNER_TEMP/keystore/release.jks"
+
+      - name: Check signing secrets
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "$name is not configured; refusing to publish an unsigned or debug APK" >&2
+              exit 1
+            fi
+          done
+
       # A tag is the release version: stamp it into the APK, because the manifest carries
       # static values. versionCode is major*1000000+minor*1000+patch so it stays monotonic
       # across minor/major bumps (patch+1 would go backwards at 1.1.0) and two versions can
@@ -59,21 +88,68 @@ jobs:
           echo "stamped versionName=${version} versionCode=${code}"
           grep -nE "versionCode|versionName" app/build.gradle.kts
 
-      # The project has no checked-in gradlew and all published APKs use the
-      # debug key, so release tags build the same installable debug artifact.
-      - name: Build APK
+      - name: Build signed release APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/keystore/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
 
-      - name: Prepare release assets
+      - name: Verify APK signature
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#android-v}"
+          apk="android/app/build/outputs/apk/release/app-release.apk"
+          test -s "$apk"
+          apksigner="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -x "$apksigner"
+          "$apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/apk-signature.txt"
+          # apksigner prints the certificate DN, not the keystore alias. Extract the
+          # published APK's signer digest, then ask keytool for the same alias. The
+          # two fingerprints must match: a valid but wrong key must not ship.
+          signer_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-signature.txt" | head -n 1 | tr -d ':' | tr 'A-F' 'a-f')"
+          test -n "$signer_sha256"
+          alias_sha256="$(keytool -list -v -keystore "$RUNNER_TEMP/keystore/release.jks" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" \
+            | sed -n 's/.*SHA256: //p' | head -n 1 | tr -d ':' | tr 'A-F' 'a-f')"
+          test -n "$alias_sha256"
+          test "$signer_sha256" = "$alias_sha256" || {
+            echo "APK signer fingerprint does not match ANDROID_KEY_ALIAS" >&2
+            exit 1
+          }
+
+      - name: Prepare release assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${VERSION#android-v}"
+          IFS=. read -r major minor patch <<< "$version"
+          code=$(( major * 1000000 + minor * 1000 + patch ))
           asset="agent-bot-v${version}.apk"
           mkdir -p "$RUNNER_TEMP/release"
-          cp android/app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/release/$asset"
+          cp android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/release/$asset"
           (cd "$RUNNER_TEMP/release" && sha256sum "$asset" > "$asset.sha256")
+          python3 - "$RUNNER_TEMP/release/android-release.json" "$version" "$code" "$asset" <<'PY'
+          import hashlib, json, pathlib, sys
+          out, version, code, asset = sys.argv[1:]
+          apk = pathlib.Path(out).with_name(asset)
+          data = {
+              "versionName": version,
+              "versionCode": int(code),
+              "apk": f"android/releases/{asset}",
+              "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
+              "size": apk.stat().st_size,
+              "notes": f"Agent Bot Android v{version}（CI 正式签名构建）",
+          }
+          pathlib.Path(out).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          PY
 
       - name: Publish GitHub Release
         env:
@@ -88,11 +164,13 @@ jobs:
             gh release upload "$tag" \
               "$RUNNER_TEMP/release/$asset#$asset" \
               "$RUNNER_TEMP/release/$asset.sha256#$asset.sha256" \
+              "$RUNNER_TEMP/release/android-release.json#android-release.json" \
               --clobber
           else
             gh release create "$tag" \
               "$RUNNER_TEMP/release/$asset#$asset" \
               "$RUNNER_TEMP/release/$asset.sha256#$asset.sha256" \
+              "$RUNNER_TEMP/release/android-release.json#android-release.json" \
               --verify-tag \
               --title "Agent Bot Android v${version}" \
               --notes "Agent Bot Android v${version}. Download ${asset} and verify it against ${asset}.sha256."

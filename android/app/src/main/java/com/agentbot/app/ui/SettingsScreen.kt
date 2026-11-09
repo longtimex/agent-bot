@@ -93,7 +93,7 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             value = baseUrl,
             onValueChange = { baseUrl = it },
             label = { Text("服务器地址") },
-            placeholder = { Text("http://1.2.3.4:3080") },
+            placeholder = { Text("https://bot.example.com") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
@@ -164,5 +164,64 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
         vm.connectionError?.let {
             Text("⚠️ $it", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
         }
+
+        AppUpdateCard(vm)
     }
+}
+
+@Composable
+private fun AppUpdateCard(vm: AppViewModel) {
+    val release = vm.androidRelease
+    val current = vm.appVersionName.ifBlank { vm.appVersionCode.toString() }
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 24.dp)) {
+        Text("应用更新", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "当前版本：$current（${vm.appVersionCode}）",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        if (release?.configured == true) {
+            val latest = release.versionName ?: release.versionCode?.toString() ?: "—"
+            Text(
+                "服务器最新：$latest" + if (release.size > 0) " · ${formatSize(release.size)}" else "",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (release.notes.isNotBlank()) {
+                Text(
+                    release.notes,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        } else if (!release?.message.isNullOrBlank()) {
+            Text(release!!.message!!, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+        }
+        vm.appUpdateError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        }
+        Row(modifier = Modifier.padding(top = 10.dp)) {
+            OutlinedButton(onClick = { vm.refreshAndroidRelease() }) { Text("检查更新") }
+            Button(
+                onClick = { vm.downloadAndInstallAppUpdate() },
+                enabled = vm.appUpdateStage == null && release?.updateAvailable == true,
+                modifier = Modifier.padding(start = 12.dp),
+            ) {
+                Text(vm.appUpdateStage ?: if (release?.updateAvailable == true) "下载并安装" else "已是最新")
+            }
+        }
+        Text(
+            "APK 通过当前连接下载并校验 SHA-256。若从早期 debug 签名包切换到正式签名包，Android 会拒绝覆盖安装：需要先卸载旧版，本机聊天记录与设置会一并清除。",
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+private fun formatSize(bytes: Long): String = when {
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1_024 -> "%.0f KB".format(bytes / 1_024.0)
+    else -> "$bytes B"
 }

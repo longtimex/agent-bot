@@ -4,4 +4,5 @@
     <cache-path name="camera" path="camera/" />
     <cache-path name="voice" path="voice/" />
     <cache-path name="backup" path="backup/" />
+    <cache-path name="updates" path="updates/" />
 </paths>

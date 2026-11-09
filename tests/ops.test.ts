@@ -12,11 +12,12 @@ interface Call {
   args: string[]
   timeoutMs: number
   env: NodeJS.ProcessEnv
+  cwd: string
 }
 
 function makeService(
   dir: string,
-  responses: (command: string, args: string[]) => OpsCommandResult | undefined,
+  responses: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => OpsCommandResult | undefined,
   overrides: Partial<ConstructorParameters<typeof OpsService>[0]> = {},
 ): { ops: OpsService; calls: Call[] } {
   const calls: Call[] = []
@@ -28,8 +29,8 @@ function makeService(
     logPath: join(dir, "data", "bot.log"),
     which: (bin) => `/usr/bin/${bin}`,
     run: async (command, args, options) => {
-      calls.push({ command, args, timeoutMs: options.timeoutMs, env: options.env })
-      return responses(command, args) ?? { code: 0, stdout: "", stderr: "" }
+      calls.push({ command, args, timeoutMs: options.timeoutMs, env: options.env, cwd: options.cwd })
+      return responses(command, args, options) ?? { code: 0, stdout: "", stderr: "" }
     },
     health: async () => false,
     ...overrides,
@@ -149,11 +150,55 @@ test("ops tailLogs reports missing files", () => {
   }
 })
 
+/** Mimics the clone + npm lifecycle enough for ReleaseManager to produce a usable release. */
+function releaseBuildResponder(
+  command: string,
+  args: string[],
+  options: { cwd: string },
+  overrides: { gateCode?: number; buildCode?: number; version?: string } = {},
+): OpsCommandResult | undefined {
+  if (command.endsWith("git") && args[0] === "remote" && args[1] === "get-url") {
+    return { code: 0, stdout: "https://github.com/longtimex/agent-bot.git\n", stderr: "" }
+  }
+  if (command.endsWith("git") && args[0] === "status") return { code: 0, stdout: "", stderr: "" }
+  if (command.endsWith("git") && args[0] === "rev-parse" && args.includes("--abbrev-ref")) {
+    return { code: 0, stdout: "origin/main\n", stderr: "" }
+  }
+  if (command.endsWith("git") && args[0] === "clone") {
+    const workDir = args.at(-1)!
+    mkdirSync(workDir, { recursive: true })
+    writeFileSync(join(workDir, "package-lock.json"), "{}")
+    writeFileSync(join(workDir, "package.json"), JSON.stringify({ version: overrides.version ?? "0.4.0" }))
+    return { code: 0, stdout: "cloned\n", stderr: "" }
+  }
+  if (command.endsWith("git") && args[0] === "fetch") return { code: 0, stdout: "", stderr: "" }
+  if (command.endsWith("git") && args[0] === "checkout") return { code: 0, stdout: "", stderr: "" }
+  if (command.endsWith("git") && args[0] === "rev-parse" && args[1] === "HEAD") {
+    return { code: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "" }
+  }
+  if (command.endsWith("npm") && args[0] === "ci") {
+    mkdirSync(join(options.cwd, "node_modules"), { recursive: true })
+    return { code: 0, stdout: "installed\n", stderr: "" }
+  }
+  if (command.endsWith("npm") && args[0] === "run" && args[1] === "check:release") {
+    return overrides.gateCode
+      ? { code: overrides.gateCode, stdout: "", stderr: "gate failed\n" }
+      : { code: 0, stdout: "gate ok\n", stderr: "" }
+  }
+  if (command.endsWith("npm") && args[0] === "run" && args[1] === "build") {
+    if (overrides.buildCode) return { code: overrides.buildCode, stdout: "", stderr: "tsc failed\n" }
+    mkdirSync(join(options.cwd, "dist"), { recursive: true })
+    writeFileSync(join(options.cwd, "dist", "index.js"), "// built\n")
+    return { code: 0, stdout: "build ok\n", stderr: "" }
+  }
+  return undefined
+}
+
 test("ops update aborts on a dirty worktree", async () => {
   const dir = tempDir()
   try {
     const { ops, calls } = makeService(dir, (command, args) => {
-      if (command === "git" && args[0] === "status") {
+      if (command.endsWith("git") && args[0] === "status") {
         return { code: 0, stdout: " M src/x.ts\n", stderr: "" }
       }
       return undefined
@@ -162,55 +207,59 @@ test("ops update aborts on a dirty worktree", async () => {
     assert.equal(result.ok, false)
     assert.match(result.message, /未提交/)
     assert.equal(calls.some((call) => call.args[0] === "pull"), false)
+    assert.equal(calls.some((call) => call.args[0] === "clone"), false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("ops update runs pull, install and build in order", async () => {
+test("ops update builds an isolated release and leaves it pending", async () => {
   const dir = tempDir()
   try {
-    const { ops, calls } = makeService(dir, (command, args) => {
-      if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" }
-      if (command === "git" && args[0] === "pull") return { code: 0, stdout: "Already up to date.\n", stderr: "" }
-      if (command.endsWith("npm") && args[0] === "install") return { code: 0, stdout: "added 1 package\n", stderr: "" }
-      if (command.endsWith("npm") && args[0] === "run") return { code: 0, stdout: "build ok\n", stderr: "" }
-      return undefined
+    const { ops, calls } = makeService(dir, (command, args, options) => {
+      return releaseBuildResponder(command, args, options)
     })
     const result = await ops.updateProject()
     assert.equal(result.ok, true)
-    assert.match(result.message, /重启/)
-    assert.deepEqual(calls.map((call) => call.args.slice(0, 2)), [
-      ["status", "--porcelain"],
-      ["pull", "--ff-only"],
-      ["install", "--no-audit"],
-      ["run", "build"],
-    ])
-    assert.equal(calls[1]?.args[0], "pull")
-    assert.equal(calls[2]?.args[0], "install")
-    assert.equal(calls[3]?.args[0], "run")
+    assert.match(result.message, /重启 Bot/)
+    assert.match(result.message, /重启 Bot/)
+    const commands = calls.map((call) => `${call.command} ${call.args.join(" ")}`)
+    const clone = calls.find((call) => call.command.endsWith("git") && call.args[0] === "clone")
+    assert.ok(clone)
+    assert.equal(clone.args[3], "https://github.com/longtimex/agent-bot.git")
+    assert.ok(commands.some((entry) => entry.endsWith(" ci --no-audit --no-fund")))
+    assert.ok(commands.some((entry) => entry.endsWith(" run check:release")))
+    assert.ok(commands.some((entry) => entry.endsWith(" run build")))
+    assert.ok(!calls.some((call) => call.args[0] === "pull"), "an update must never pull into the running checkout")
+    const state = ops.releaseState()
+    assert.equal(state.pending?.commit, "abcdef0123456789abcdef0123456789abcdef01")
+    assert.equal(state.pending?.version, "0.4.0")
+    assert.equal(state.current, undefined)
+    assert.ok(state.pending?.path.startsWith(join(dir, "data", "releases", "store")))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test("ops runs install, build and check without the bot's provider credentials", async () => {
+test("ops update and check never expose provider credentials to npm scripts", async () => {
   const dir = tempDir()
   const saved = process.env.OPENAI_API_KEY
   process.env.OPENAI_API_KEY = "sk-credential-for-test"
   try {
-    const { ops, calls } = makeService(dir, () => undefined)
+    const { ops, calls } = makeService(dir, (command, args, options) => {
+      return releaseBuildResponder(command, args, options)
+    })
     assert.equal((await ops.updateProject()).ok, true)
     assert.equal((await ops.runCheck()).ok, true)
 
-    // git and the repo scripts are pulled code: only git keeps the live environment
     const npmCalls = calls.filter((call) => call.command.endsWith("npm"))
-    assert.equal(npmCalls.length, 3)
+    assert.equal(npmCalls.length, 4)
     for (const call of npmCalls) {
       assert.equal(call.env.OPENAI_API_KEY, undefined, `${call.args.join(" ")} must not see provider keys`)
     }
-    const status = calls.find((call) => call.command === "git" && call.args[0] === "status")
-    assert.equal(status?.env.OPENAI_API_KEY, "sk-credential-for-test")
+    const gitCalls = calls.filter((call) => call.command.endsWith("git"))
+    assert.ok(gitCalls.length > 0)
+    for (const call of gitCalls) assert.equal(call.env.OPENAI_API_KEY, "sk-credential-for-test")
   } finally {
     if (saved === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = saved
@@ -218,20 +267,33 @@ test("ops runs install, build and check without the bot's provider credentials",
   }
 })
 
-test("ops update stops when the build fails", async () => {
+test("ops update stops at the release gate without building or activating", async () => {
   const dir = tempDir()
   try {
-    const { ops } = makeService(dir, (command, args) => {
-      if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" }
-      if (command === "git" && args[0] === "pull") return { code: 0, stdout: "", stderr: "" }
-      if (command.endsWith("npm") && args[0] === "install") return { code: 0, stdout: "", stderr: "" }
-      if (command.endsWith("npm") && args[0] === "run") return { code: 2, stdout: "", stderr: "tsc failed\n" }
-      return undefined
+    const { ops, calls } = makeService(dir, (command, args, options) => {
+      return releaseBuildResponder(command, args, options, { gateCode: 2 })
+    })
+    const result = await ops.updateProject()
+    assert.equal(result.ok, false)
+    assert.match(result.message, /门禁/)
+    assert.ok(!calls.some((call) => call.args[0] === "run" && call.args[1] === "build"))
+    assert.equal(ops.releaseState().pending, undefined)
+    assert.equal(ops.releaseState().lastUpdate?.status, "failed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ops update reports a build failure and records no pending release", async () => {
+  const dir = tempDir()
+  try {
+    const { ops } = makeService(dir, (command, args, options) => {
+      return releaseBuildResponder(command, args, options, { buildCode: 2 })
     })
     const result = await ops.updateProject()
     assert.equal(result.ok, false)
     assert.match(result.message, /构建失败/)
-    assert.match(result.steps.at(-1)?.output ?? "", /tsc failed/)
+    assert.equal(ops.releaseState().pending, undefined)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -276,6 +338,53 @@ test("ops restart rejects missing build output", async () => {
     const result = await ops.restartBot()
     assert.equal(result.ok, false)
     assert.match(result.message, /dist\/index\.js/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ops restart accepts a usable managed release when the checkout has no dist", async () => {
+  const dir = tempDir()
+  try {
+    mkdirSync(join(dir, "scripts"), { recursive: true })
+    writeFileSync(join(dir, "scripts", "apply-release.sh"), "#!/usr/bin/env bash\n")
+    const releasePath = join(dir, "data", "releases", "store", "managed")
+    mkdirSync(join(releasePath, "dist"), { recursive: true })
+    writeFileSync(join(releasePath, "dist", "index.js"), "// managed\n")
+    writeFileSync(join(releasePath, "package.json"), JSON.stringify({ version: "0.5.0" }))
+    const statePath = join(dir, "data", "releases", "state.json")
+    mkdirSync(join(dir, "data", "releases"), { recursive: true })
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        current: {
+          id: "managed",
+          commit: "abcdef0123456789abcdef0123456789abcdef01",
+          version: "0.5.0",
+          createdAt: "",
+          path: releasePath,
+        },
+      }),
+    )
+    const { ReleaseManager } = await import("../src/releaseManager.js")
+    const releases = new ReleaseManager({
+      projectDir: dir,
+      dataDir: join(dir, "data"),
+      run: async () => ({ code: 0, stdout: "", stderr: "" }),
+    })
+    const spawns: string[] = []
+    const { ops } = makeService(dir, () => undefined, {
+      systemd: false,
+      releases,
+      spawnDetached: (_command, args) => {
+        spawns.push(args[0] ?? "")
+        return 5150
+      },
+    })
+    const result = await ops.restartBot()
+    assert.equal(result.ok, true, result.message)
+    assert.match(result.message, /5150/)
+    assert.deepEqual(spawns, [join(dir, "scripts", "apply-release.sh")])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

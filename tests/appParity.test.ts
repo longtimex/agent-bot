@@ -8,7 +8,8 @@ import { test } from "node:test"
 import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS } from "../src/help.js"
 import { loadConfig } from "../src/config.js"
 import { pairingQrPayload, resolvePairingUrl } from "../src/api.js"
-import { appModelFields, tsInterfaceMemberFields, tsInterfaceFields, tsUnionFields } from "./support/appModels.js"
+import { signingMaterialIgnored } from "../scripts/check-android-sources.mjs"
+import { appModelFields, tsInterfaceFields, tsInterfaceMemberFields, tsUnionFields } from "./support/appModels.js"
 import { appRequestUrl, normalizeAppBaseUrl } from "./support/appBaseUrl.js"
 import { appClockOffsetFrom, appServerNow } from "./support/appClock.js"
 import { capHistory } from "./support/appHistory.js"
@@ -291,6 +292,27 @@ test("the Android source gate passes against the real tree", () => {
   const res = spawnSync(process.execPath, [ANDROID_CHECKER], { encoding: "utf8" })
   assert.equal(res.status, 0, `${res.stdout ?? ""}${res.stderr ?? ""}`)
   assert.match(`${res.stdout}`, /android sources ok/)
+  assert.deepEqual(signingMaterialIgnored("android/app/src/main/java"), [])
+})
+
+test("the Android source gate refuses release signing material that is not ignored", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agentbot-signing-ignore-"))
+  try {
+    const android = join(dir, "android")
+    const sourceRoot = join(android, "app", "src", "main", "java")
+    mkdirSync(sourceRoot, { recursive: true })
+    writeFileSync(join(android, "app", "build.gradle.kts"), "")
+    writeFileSync(join(dir, ".gitignore"), "")
+    assert.equal(spawnSync("git", ["init", "-q"], { cwd: dir }).status, 0)
+    assert.equal(signingMaterialIgnored(sourceRoot, dir).length, 3, "all three signing paths must be reported when .gitignore is empty")
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ["android/keystore.properties", "android/*.jks", "android/*.keystore", ""].join("\n"),
+    )
+    assert.deepEqual(signingMaterialIgnored(sourceRoot, dir), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 /**

@@ -6,6 +6,9 @@ import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { MagpieService } from "./magpie.js"
 import { ConfigError, hasControlClientEvidence, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
+import { migrateDataDirectory } from "./dataMigration.js"
+import { writeStartupFailure, writeStartupSelfCheck } from "./startupSelfCheck.js"
+import { AndroidReleaseService } from "./androidRelease.js"
 import { createFeishuConnection, createFeishuRuntime, type FeishuRuntime } from "./feishuRuntime.js"
 import { acquireLock } from "./lock.js"
 import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
@@ -79,6 +82,10 @@ async function main(): Promise<void> {
   mkdirSync(cfg.dataDir, { recursive: true })
   mkdirSync(cfg.outboxDir, { recursive: true })
   mkdirSync(cfg.inboxDir, { recursive: true })
+
+  const migration = migrateDataDirectory(cfg.dataDir, log)
+  if (!migration.ok) log.warn(migration.message)
+  if (migration.warning) log.warn(migration.warning)
 
   const releaseLock = acquireLock(resolve(cfg.dataDir, "bot.lock"), log)
   process.once("exit", releaseLock)
@@ -183,6 +190,7 @@ async function main(): Promise<void> {
   )
 
   let apiServer: ApiServer | undefined
+  let apiError: string | undefined
   if (cfg.api.enabled) {
     try {
       apiServer = new ApiServer(
@@ -201,6 +209,7 @@ async function main(): Promise<void> {
           setTimezone: (zone) => tgBridge.setTimezone(zone),
           ops: tgBridge.opsService,
           installer: tgBridge.agentInstaller,
+          androidRelease: new AndroidReleaseService({ projectDir: process.cwd() }),
           proxies,
           aliases: tgBridge.aliasStore,
           ccswitch: tgBridge.ccSwitch,
@@ -222,7 +231,8 @@ async function main(): Promise<void> {
       await apiServer.start()
     } catch (err) {
       apiServer = undefined
-      log.error(`failed to start the HTTP API: ${(err as Error).message} (聊天控制端继续正常运行)`)
+      apiError = (err as Error).message
+      log.error(`failed to start the HTTP API: ${apiError} (聊天控制端继续正常运行)`)
     }
   }
 
@@ -244,6 +254,17 @@ async function main(): Promise<void> {
     await tgBridge.stop().catch(() => {})
     releaseLock()
     setTimeout(() => process.exit(code), 100).unref()
+  }
+
+  // A supervisor reads startup-check.json after the process exits. When a
+  // control surface aborts startup, overwrite the previous successful record
+  // before shutting down so the release health probe cannot accept it.
+  const failStartup = async (reason: string): Promise<void> => {
+    writeStartupFailure(cfg.dataDir, reason, { version: appVersion(), pid: process.pid })
+    await shutdown(reason, 1).catch((fatal: unknown) => {
+      console.error(`shutdown failed: ${fatalText(fatal)}`)
+      process.exit(1)
+    })
   }
 
   try {
@@ -289,7 +310,7 @@ async function main(): Promise<void> {
   } catch (err) {
     log.error((err as Error).message)
     if (!feishu && !apiServer) {
-      await shutdown("startup failure", 1).catch(() => {})
+      await failStartup(`Telegram 启动失败：${(err as Error).message}`)
       return
     }
     log.error("Telegram 启动失败，但飞书/HTTP API 仍可使用")
@@ -301,7 +322,7 @@ async function main(): Promise<void> {
     // supervising nothing when Telegram is absent.
     if (!cfg.telegram.token && !apiServer) {
       log.error("飞书未成功初始化，且没有 Telegram 或 HTTP API 可用，退出以便修复配置")
-      await shutdown("Feishu unavailable and no other control surface", 1).catch(() => {})
+      await failStartup("飞书未成功初始化，且没有 Telegram 或 HTTP API 可用")
       return
     }
   }
@@ -309,8 +330,45 @@ async function main(): Promise<void> {
     // Telegram is down and there is no HTTP API or Feishu to serve: nothing
     // would answer on any channel, so the supervisor's restart is the way back.
     log.error("Telegram 未连接，且飞书与 HTTP API 均不可用，退出以便重启恢复")
-    await shutdown("Telegram unavailable and no other control surface", 1).catch(() => {})
+    await failStartup("Telegram 未连接，且飞书与 HTTP API 均不可用")
     return
+  }
+
+  // A release supervisor reads this after restart. Write it only after the
+  // control transports have been started, not immediately after binding the
+  // API: a hung Telegram init must not look like a successful release. The
+  // release health probe rejects any record older than this launch.
+  try {
+    const state = tgBridge.opsService.releaseState()
+    writeStartupSelfCheck(cfg.dataDir, {
+      at: new Date().toISOString(),
+      version: appVersion(),
+      pid: process.pid,
+      ...(state.current?.commit ? { commit: state.current.commit } : {}),
+      release: state.current?.id ?? "checkout",
+      ...(state.previous ? { previousRelease: state.previous.id } : {}),
+      migration: {
+        ok: migration.ok,
+        ...(migration.fromVersion !== undefined ? { fromVersion: migration.fromVersion } : {}),
+        toVersion: migration.toVersion,
+        message: migration.message,
+        ...(migration.warning ? { warning: migration.warning } : {}),
+      },
+      api: {
+        requested: cfg.api.enabled,
+        reachable: Boolean(apiServer),
+        ...(apiError ? { error: apiError } : {}),
+      },
+      engine: store.getEngine("api:app"),
+      notes: [
+        apiServer ? "HTTP API 已启动" : "HTTP API 未启动（聊天控制端仍可用）",
+        cfg.telegram.token ? (telegramReconnecting ? "Telegram 正在后台重连" : "Telegram 已连接") : "未配置 Telegram",
+        cfg.feishu ? (feishu ? "飞书长连接已启动" : "飞书长连接未初始化") : "未配置飞书",
+        migration.ok ? "数据迁移检查通过" : "数据迁移未完成，详见 migration.message",
+      ],
+    })
+  } catch (err) {
+    log.warn(`failed to write startup self-check: ${(err as Error).message}`)
   }
 
   const onSignal = (signal: string): void => {
@@ -325,6 +383,9 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   // Startup configuration problems already carry user-facing guidance: no stack
-  console.error(err instanceof StartupConfigError ? err.message : fatalText(err))
+  const message = err instanceof StartupConfigError ? err.message : fatalText(err)
+  console.error(message)
+  // The supervisor must not interpret an old successful self-check as this release starting.
+  writeStartupFailure(process.env.DATA_DIR ?? "./data", message, { version: appVersion() })
   process.exit(1)
 })

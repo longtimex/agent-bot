@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- In-app APK updates: the user still has to allow this source in Android settings. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- A self-hosted bot is usually plain http:// on a LAN or a port-forward; Android 9+
          blocks cleartext by default and the ApiClient has no custom trust config. -->

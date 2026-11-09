@@ -7,6 +7,7 @@ export interface OpsRouteDeps {
   ops: OpsService | undefined
   json: (res: ApiRequestContext["res"], status: number, body: unknown) => void
   runOpsAction: (run: () => Promise<OpsResult>) => Promise<Record<string, unknown>>
+  hasActiveTask: () => boolean
 }
 
 /** Returns true when the /ops route handled the request. */
@@ -34,6 +35,24 @@ export async function routeOps(
     deps.json(ctx.res, 200, { result: await ops.checkUpdate() })
     return true
   }
+  if (method === "GET" && id === "release") {
+    if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
+    // This endpoint only needs the release pointers and the last self-check. It is
+    // polled by the App while an update is pending, so skip the full diagnostics
+    // probe (git/opencode/cc-switch/statfs) that `GET /ops/diag` already pays for.
+    if (ops.releaseOverview) {
+      deps.json(ctx.res, 200, await ops.releaseOverview())
+      return true
+    }
+    const diagnostics = await ops.diagnostics()
+    deps.json(ctx.res, 200, {
+      release: diagnostics.release ?? null,
+      update: diagnostics.update ?? null,
+      startup: diagnostics.startup ?? null,
+      lastBackupAt: diagnostics.lastBackupAt ?? 0,
+    })
+    return true
+  }
   if (method === "GET" && id === "backup") {
     if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
     const result = await ops.backupData()
@@ -58,9 +77,20 @@ export async function routeOps(
       restart: () => ops.restartOpencode(),
     }
     let run: (() => Promise<OpsResult>) | undefined
-    if (id === "update") run = () => ops.updateProject()
-    else if (id === "check") run = () => ops.runCheck()
-    else if (id === "restart") run = () => ops.restartBot()
+    if (id === "update") {
+      if (deps.hasActiveTask()) throw new ApiError(409, "当前有任务正在执行，请先停止任务再更新。")
+      run = () => ops.updateProject()
+    } else if (id === "check") run = () => ops.runCheck()
+    else if (id === "restart") {
+      if (deps.hasActiveTask()) throw new ApiError(409, "当前有任务正在执行，请先停止任务再重启。")
+      run = () => ops.restartBot()
+    } else if (id === "rollback") {
+      if (deps.hasActiveTask()) throw new ApiError(409, "当前有任务正在执行，请先停止任务再回滚。")
+      run = async () => ops.rollbackRelease()
+    } else if (id === "cancel-pending") {
+      if (deps.hasActiveTask()) throw new ApiError(409, "当前有任务正在执行，请先停止任务再丢弃 pending。")
+      run = async () => ops.cancelPendingRelease()
+    }
     else if (id === "cc") run = () => ops.installCcSwitch(false)
     else if (id === "cc-update") run = () => ops.installCcSwitch(true)
     else if (id === "service" && action && Object.hasOwn(serviceActions, action)) run = serviceActions[action]

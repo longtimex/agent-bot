@@ -147,6 +147,7 @@ function skipEncryption(path: string): boolean {
     segments.includes("events") ||
     segments.includes("media") ||
     segments.includes("export") ||
+    (segments.includes("android") && segments[segments.length - 1] === "apk") ||
     segments[segments.length - 1] === "backup"
   )
 }
@@ -365,6 +366,11 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "aliases → GET /aliases", method: "GET", path: "/aliases", model: "AliasEntry", at: "aliases[]" },
         { name: "proxies → GET /proxy", method: "GET", path: "/proxy", model: "ProxyList" },
         { name: "diagnostics → GET /ops/diag", method: "GET", path: "/ops/diag", model: "Diagnostics", at: "diagnostics" },
+        { name: "releaseInfo release → GET /ops/release", method: "GET", path: "/ops/release", model: "ReleaseInfo", at: "release" },
+        { name: "releaseInfo update → GET /ops/release", method: "GET", path: "/ops/release", model: "UpdateTarget", at: "update" },
+        { name: "releaseInfo startup → GET /ops/release", method: "GET", path: "/ops/release", model: "StartupCheck", at: "startup" },
+        { name: "androidRelease → GET /android/release", method: "GET", path: "/android/release?versionCode=1000000", model: "AndroidReleaseInfo" },
+        { name: "downloadAndroidRelease → GET /android/release/apk", method: "GET", path: "/android/release/apk", raw: true },
         { name: "opsService → GET /ops/service", method: "GET", path: "/ops/service", model: "ServiceStatus", at: "service" },
         { name: "logs → GET /ops/logs", method: "GET", path: "/ops/logs?source=bot&lines=50", model: "LogTail" },
         { name: "customModels → GET /models/custom", method: "GET", path: "/models/custom", model: "CustomModels" },
@@ -435,6 +441,8 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "removeCustomModel → DELETE /models/custom/:key", method: "DELETE", path: "/models/custom/probek?force=1" },
         { name: "runOps check → POST /ops/check", method: "POST", path: "/ops/check", model: "OpsResult", at: "result" },
         { name: "runOps restart → POST /ops/restart", method: "POST", path: "/ops/restart", model: "OpsResult", at: "result" },
+        { name: "runOps rollback → POST /ops/rollback", method: "POST", path: "/ops/rollback", model: "OpsResult", at: "result" },
+        { name: "runOps cancel-pending → POST /ops/cancel-pending", method: "POST", path: "/ops/cancel-pending", model: "OpsResult", at: "result" },
         { name: "runOps service/start → POST /ops/service/start", method: "POST", path: "/ops/service/start", model: "OpsResult", at: "result" },
         { name: "setConfig → PUT /config/LOG_LEVEL", method: "PUT", path: "/config/LOG_LEVEL", body: { value: "info" }, model: "ConfigResult" },
         { name: "unsetConfig → DELETE /config/LOG_LEVEL", method: "DELETE", path: "/config/LOG_LEVEL", model: "ConfigResult" },

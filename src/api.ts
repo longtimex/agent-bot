@@ -48,6 +48,7 @@ import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
 import { routeOps } from "./apiOpsRoutes.js"
+import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
 import { routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 
@@ -85,6 +86,8 @@ export interface ApiServerOptions {
   ops?: OpsService
   /** Agent CLI installer; enables /agents install/update/uninstall from the app. */
   installer?: AgentCliInstaller
+  /** App self-update feed; absent means the operator did not configure one. */
+  androidRelease?: AndroidReleaseService
   /** Proxy store shared with the bot so enabling a proxy takes effect for outbound downloads. */
   proxies?: ProxyService
   /** Per-chat shortcuts; the app shares the owner chat's list with Telegram. */
@@ -369,14 +372,17 @@ export class ApiServer {
 
     if (resource === "health" && method === "GET") {
       const engine = this.#opts.store.getEngine(this.appKey)
+      const release = this.#opts.ops?.releaseState?.().current
       this.#json(ctx.res, 200, {
         ok: true,
         name: "agent-bot",
         version: this.#opts.version,
+        pid: process.pid,
         uptimeMs: Math.round(process.uptime() * 1000),
         engine,
         timezone: this.#opts.timezone(),
         encryption: this.#encKey !== undefined,
+        ...(release ? { commit: release.commit, release: release.id } : {}),
       })
       return
     }
@@ -569,6 +575,10 @@ export class ApiServer {
 
     if (resource === "ops") {
       if (await routeOps(this.#opsRouteDeps(), ctx, id, action)) return
+    }
+
+    if (resource === "android" && this.#opts.androidRelease) {
+      if (routeAndroidRelease(this.#opts.androidRelease, ctx, id, action, (res, status, body) => this.#json(res, status, body))) return
     }
 
     if (resource === "usage" || resource === "history" || resource === "export") {
@@ -777,6 +787,7 @@ export class ApiServer {
       ops: this.#opts.ops,
       json: (res: ServerResponse, status: number, body: unknown) => this.#json(res, status, body),
       runOpsAction: (run: () => Promise<OpsResult>) => this.#runOpsAction(run),
+      hasActiveTask: () => this.#taskManager.hasActiveTask(),
     }
   }
 

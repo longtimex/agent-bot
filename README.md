@@ -126,7 +126,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - 重复执行安装脚本是安全的：依赖会重新安装、构建会重新执行，但 `.env` 与 `data/` 会保留
 - 安装目录需要写权限；脚本不会自动使用 `sudo`
 
-安装完成后，在 Telegram 或飞书里给 Bot 发送 `/start`，安卓 App 用向导输出的地址与令牌配对即可开始使用；长期运行建议参考「systemd 常驻（可选）」。
+安装完成后，在 Telegram 或飞书里给 Bot 发送 `/start`，安卓 App 用向导输出的地址与令牌配对即可开始使用；长期运行建议参考「systemd 常驻（可选）」。从已配置 release 服务端下载正式签名 APK，或在 App「设置 → 应用更新」中在线升级；早期 debug 签名包需先卸载再装正式包。
 
 ## 功能
 
@@ -211,33 +211,55 @@ npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.0`）：
 
 ```bash
-tag=android-v1.0.2                  # 换成实际版本
+tag=android-v1.1.0                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.0.2.apk"
-curl -L -O "$base/agent-bot-v1.0.2.apk.sha256"
-sha256sum -c agent-bot-v1.0.2.apk.sha256
+curl -L -O "$base/agent-bot-v1.1.0.apk"
+curl -L -O "$base/agent-bot-v1.1.0.apk.sha256"
+sha256sum -c agent-bot-v1.1.0.apk.sha256
 ```
 
 - 请使用 Release 中带版本号的最新 APK；不要使用 v1.0.0–v1.0.11 的早期内部构建，这些版本存在明文 HTTP、代理重连、附件内存、加密切换与时间显示等问题，已在当前 Release 修复。
-- 各版本使用同一个 debug 密钥签名，可直接覆盖安装，已保存的地址、令牌与配对密钥不会丢失；首次安装需允许「安装未知来源应用」。
+- `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名，同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留；首次安装需允许「安装未知来源应用」。
+- 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
 
 #### 从源码构建
 
-要求 JDK 17 与 Android Studio（或 Gradle 8.9+）：
+要求 JDK 17 与 Android Studio（或 Gradle 8.9+）。正式可安装包必须使用 release keystore 签名；没有签名配置时 `assembleRelease` 会产出未签名包，不能作为在线更新包发布：
 
 ```bash
-cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/app-debug.apk
+cd android
+export ANDROID_KEYSTORE_PATH=/absolute/path/to/release.jks
+export ANDROID_KEYSTORE_PASSWORD='...'
+export ANDROID_KEY_ALIAS='...'
+export ANDROID_KEY_PASSWORD='...'
+./gradlew assembleRelease               # 产物：app/build/outputs/apk/release/app-release.apk
 ```
 
 > 仓库未提交 `gradlew` 包装器：用 Android Studio 打开会自动生成，或先执行 `gradle wrapper --gradle-version 8.9`。
 
+也可在 `android/keystore.properties` 写 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`（相对路径以 `android/` 为基准），该文件不得提交。构建后必须用 `apksigner verify --print-certs` 校验；完整参数、CI Secrets 与 `debug → release` 迁移见 [`android/README.md`](android/README.md)。
+
 在 Telegram 或飞书向 Bot 发送 `/api`，在 App「设置」页扫码（或手动填地址与令牌）即可配对，手机与聊天端可同时使用。API 默认只监听 `127.0.0.1:3080`：先在 `.env` 设置 `API_PUBLIC_URL`（手机真能访问的地址，如 `http://192.168.1.10:3080` 或反向代理的 `https://bot.example.com`）并重启，`/api` 的二维码才可扫码直连；公网暴露请按 [`android/README.md`](android/README.md) 配置反向代理 / SSH 隧道 / VPN。
 
 装 APK 之前先用 `npm run smoke:app -- --base http://<服务器地址>:3080 --token <API_TOKEN>`（启用了消息级加密就再加 `--enc <二维码里的 enc 字段>`）把手机会走的顺序跑一遍：连接与版本、十个只读端点、提交对话、附件、SSE 推送、停止自己的任务，逐项打印 ✅/❌ 与失败原因。它只读、只提交自己的任务、只停自己的任务，不会改引擎、工作目录或别人的队列；引擎本身不可用会记为 ⚠️ 提醒而不是失败，因为这一步查的是链路而不是 Agent。这套顺序也已经进了 `npm run check`：测试用桩引擎在随机端口起一个真的 Bot，再把脚本当外部进程跑一遍（16 步、SSE 收到终态、停止命中还在跑的任务都要断言），所以脚本一旦与接口走样，CI 立刻红，不用等到手机上才暴露。
+
+#### App 在线更新
+
+App「设置 → 应用更新」会读取服务器上的 `GET /android/release?versionCode=<当前版本>`，显示最新版本、大小、更新说明与是否有新版；点击「下载并安装」后流式下载 `GET /android/release/apk` 到缓存 `.part` 文件，校验清单中的大小与 SHA-256，再交给 Android 系统安装器。APK 是原始字节，即使开启 `API_ENCRYPTION=1` 也不会套消息级加密；下载仍需要 Bearer Token。更新清单缺失或未配置时，App 只显示提示，不影响服务器更新与聊天。
+
+发布服务器更新包：
+
+```bash
+# 先在 Android Studio / CI 构建并签名，再发布已签名的 APK
+npm run release:android -- --apk /path/to/agent-bot-v1.1.0.apk \
+  --version 1.1.0 --notes "本次更新说明"
+```
+
+脚本会复制 APK 到 `data/android/releases/`，以实际发布字节计算 SHA-256 和大小，并原子写入 `data/android-release.json`。已在运行的 Bot 无需重启即可看到新清单。GitHub Release 同时附带 `android-release.json`，可下载后放到 `data/android-release.json`，再把 APK 放到清单中的 `android/releases/` 相对路径。
 
 ### 第 5 步：日常维护
 
@@ -360,9 +382,11 @@ cd android && ./gradlew assembleDebug   # 产物：app/build/outputs/apk/debug/a
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
 | `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；聊天端的 `/ops` 面板也可发送同一份备份 |
-| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` | 运行检查（npm run check）、更新项目（git pull + 依赖 + 构建）、重启 Bot；同一时间只允许一个运维操作，输出自动脱敏 |
+| `GET /ops/release` | 轻量版本卡：current/pending/previous release、stable/beta 通道、最近更新与启动自检；App 轮询它而不触发完整诊断探针 |
+| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（npm run check）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
 | `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
+| `GET /android/release` · `GET /android/release/apk` | App 更新清单与经 Bearer 鉴权的 APK 原始字节；清单包含版本、大小、SHA-256 与说明，APK 下载不套消息级加密 |
 | `GET /history?limit=` · `DELETE /history` | 任务历史：`limit`（1–50）取最近 N 条，响应同时返回服务端保留的 `total`（最多 50 条），供 App 显示「已显示 N / 共 M 条」 |
 | `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
 | `GET /usage` | 用量统计与近 7 天趋势 |
@@ -520,7 +544,15 @@ bot/
 │   ├── agentCli.ts   通用 Agent CLI 适配层：PATH 检测、子进程、会话与输出解析
 │   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Qwen…）
 │   ├── agentInstaller.ts npm/pip 安装、更新、卸载与 Bot 托管清单
-│   ├── ops.ts        运维：诊断、日志、更新、重启、OpenCode 服务与 .env 编辑
+│   ├── ops.ts        运维：诊断、日志、重启、OpenCode 服务与 .env 编辑
+│   ├── releaseManager.ts 隔离构建、release 存储/state、激活与回滚
+│   ├── updateOrchestrator.ts 备份 → 门禁构建 → pending → 取消/回滚
+│   ├── updateChecker.ts stable/beta 通道、干跑比较与 release 诊断
+│   ├── releaseStatus.ts `/ops/release` 的轻量版本卡
+│   ├── release-control.ts `apply-release.sh` 使用的状态 CLI
+│   ├── startupSelfCheck.ts 启动自检与失败记录
+│   ├── dataMigration.ts 数据 schema 快照与迁移标记
+│   ├── androidRelease.ts App 更新清单与 APK 下载路由
 │   ├── media.ts      [[image:...]] 指令解析、outbox 校验与清理
 │   ├── attachments.ts 入站附件保存、文本内联、inbox 清理
 │   ├── reminders.ts  定时提醒：解析、重复调度、持久化、轮询投递
@@ -534,12 +566,12 @@ bot/
 ├── docs/ARCHITECTURE.md 分层、模块边界与新增能力放置规则
 ├── tests/            单元测试（node:test）
 ├── install.sh        安装脚本：检查环境、克隆/更新、安装依赖、构建、准备 .env
-├── deploy/           systemd 单元示例
-├── scripts/          邮件、X、搜图、免费服务器扫描/抢注、重启、cc-switch 安装与安卓源码检查脚本
+├── deploy/           systemd 单元示例（ExecStart 走 scripts/run-current.sh）
+├── scripts/          邮件、X、搜图、重启、release 应用/健康检查、cc-switch 安装、安卓发布与源码检查脚本
 ├── bin/              可选：`npm run cc-switch:install` 下载的 cc-switch 二进制（已 gitignore）
 ├── .opencode/agent/assistant.md   Bot 的 agent 人设与工具权限
 ├── opencode.json     Provider 与模型配置
-└── data/             会话状态、提醒、定时任务、使用统计、任务历史、自定义模型、Agent CLI 配置、Bot 安装记录、日志、代理配置、outbox 与 inbox 附件
+└── data/             状态与日志、outbox/inbox、releases/（受管版本）、snapshots/（迁移快照）、android/（APK 更新包）
 ```
 
 ## 配置
@@ -601,6 +633,8 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `AGENT_CLI_CONFIG`：自定义 Agent CLI 档案路径，默认 `data/agents.json`；文件不存在时只使用内置档案。
 - `CC_SWITCH_APP` / `CC_SWITCH_BIN`：cc-switch 集成的应用类型（默认 `opencode`，会自动映射为 CLI 的 `open-code`；也接受 `openclaw` → `open-claw`）与二进制路径；留空时依次查找 `./bin/cc-switch` 和 `PATH`。
 - `MAGPIE_BIN` / `MAGPIE_URL`：magpie 模型的 CLI 路径（留空时查找 `./bin/magpie` 和 `PATH`）与本地网关地址（默认 `http://127.0.0.1:3425`）。
+- `UPDATE_CHANNEL` / `UPDATE_BRANCH`：服务端更新通道。`stable`（默认）跟随 `origin/main`，`beta` 跟随 `origin/beta`；`UPDATE_BRANCH` 可覆盖具体远端分支名。release 存在 `data/releases/store/`，current/previous/pending 与最近结果写入 `data/releases/state.json`，默认保留 3 个。
+- `RELEASE_SUPERVISOR` / `RELEASE_SYSTEMD_UNIT`：`apply-release.sh` 的监督方式。systemd 部署用 `systemd` 和实际 unit 名，脚本/裸进程部署保持默认 `auto`；健康超时可用 `RELEASE_HEALTH_TIMEOUT`（秒）和 `RELEASE_HEALTH_INTERVAL`（秒）调整。
 - `GROK_API_KEY`：Grok provider 的密钥，`opencode.json` 通过 `{env:GROK_API_KEY}` 读取。
 - `SNIPER_EMAIL` / `SNIPER_PASSWORD`：仅 `scripts/sniper_free_vps.mjs` 使用。
 
@@ -628,7 +662,7 @@ docker compose logs -f
 - 安卓 App 访问需容器内监听 `0.0.0.0`，compose 已默认注入 `API_BIND=0.0.0.0`（优先于 `.env`），发布端口仍绑定宿主机 `127.0.0.1:3080`。仅使用安卓端时必须同时设置手机可达的 `API_PUBLIC_URL`（如 `http://192.168.1.10:3080` 或反向代理域名），否则通配监听不会被识别为可用的安卓控制端，Bot 会拒绝启动。
 - 飞书按钮回调若要使用，将 `FEISHU_CALLBACK_BIND=0.0.0.0`，并在 compose 增加端口映射（如 `127.0.0.1:3081:3081`），再由宿主机反向代理 HTTPS 域名；仍只用文字命令时保持回调关闭即可。
 - 挂载的 `./data` 属主需与容器内 `node` 用户（uid 1000）一致：`chown -R 1000:1000 data`。
-- 容器内没有 `.git`，`/update` 不可用；更新方式为 `git pull && docker compose up -d --build`。
+- 容器内没有 `.git`，`/update` 和 `data/releases` 的隔离构建不可用；更新方式为宿主机 `git pull && docker compose up -d --build`。容器内的 systemd/启动监督脚本不适用于 Docker；镜像重建后以新镜像启动即为更新。
 
 ### 首次连接引导
 
@@ -682,7 +716,7 @@ journalctl -u telegram-bot -f
 /diag                              # Node、Git、OpenCode、cc-switch、磁盘、内存与日志大小
 /logs 100                          # 最近 100 行 Bot 日志（自动去除 ANSI 与密钥）
 /logs opencode 200                 # 最近 200 行 OpenCode 日志
-/update                            # 确认后执行 git pull + npm install + npm run build
+/update                            # 确认后隔离构建新 release，留下 pending
 /restart                           # 确认后重启 Bot
 /service opencode start|stop|restart
 /env                               # 查看可修改的非密钥配置
@@ -691,7 +725,17 @@ journalctl -u telegram-bot -f
 /env unset PROXY_TEST_URL
 ```
 
-**项目更新**：`/update` 先检查 `git status --porcelain`，工作区有未提交改动会直接中止；随后依次执行 `git pull --ff-only`、`npm install --no-audit --no-fund`、`npm run build`。任一步失败都会停止并保留旧进程，不会自动重启。更新成功后点击面板中的「重启 Bot」或发送 `/restart` 生效。长命令（安装依赖、安装 cc-switch）超时时会终止整个进程组，连同 npm 生命周期脚本与下载子进程一起收掉，避免超时后仍有进程继续改写 `node_modules`。
+**项目更新**：`/update` 不再改动正在运行的 checkout。它先在 `data/releases/.staging-*` 中克隆当前仓库、检出 `UPDATE_CHANNEL` / `UPDATE_BRANCH` 指向的远端分支，执行 `npm ci --no-audit --no-fund`、`npm run check:release` 发布门禁与 `npm run build`；全部通过后把构建树原子移动到 `data/releases/store/<id>` 并标记为 pending。任一步失败都会清理临时目录，旧版本继续运行，也不会留下可激活的半成品。
+
+**通道与激活**：`UPDATE_CHANNEL=stable` 默认跟随 `origin/main`，`beta` 默认跟随 `origin/beta`；需要其他分支时同时设置 `UPDATE_BRANCH`。点击「应用 pending 并重启」或发送 `/restart` 才会切换 current。重启后 release 监督脚本会等待新进程写出本次启动的自检：启用 API 时同时验证 `/health`，纯 Telegram/飞书部署则要求 `data/startup-check.json` 的 release、时间与 PID 都匹配本次启动；超时或启动失败会自动把 current 切回上一版并重新启动。启动成功保留 current 与 previous（默认共 3 个 release，`data/releases/state.json` 记录指针与最近更新结果），可用 `/ops` 的「丢弃 pending」「回滚到上一版」处理异常。App 对这三个操作都有二次确认；任务运行中，更新、重启、回滚与丢弃 pending 会返回或提示先停止任务。
+
+**systemd 激活**：unit 的 `ExecStart` 必须指向 `scripts/run-current.sh`（`deploy/telegram-bot.service` 已如此）。需要让 Bot 自己完成 pending 激活与健康检查时，手动执行：
+
+```bash
+RELEASE_SUPERVISOR=systemd RELEASE_SYSTEMD_UNIT=telegram-bot scripts/apply-release.sh
+```
+
+普通 `sudo systemctl restart telegram-bot` 只启动 `run-current.sh` 选出的 current，不会把 pending 自动变成 current；不需要自动回滚时，可先执行 `node dist/release-control.js activate` 再重启。Docker 内没有 `.git`，`/update` 与 release 切换不可用，更新方式只能是重新构建镜像（见 Docker 小节）。长命令（安装依赖、安装 cc-switch）超时时会终止整个进程组，连同 npm 生命周期脚本与下载子进程一起收掉，避免超时后仍有进程继续改写 `node_modules`。
 
 **重启 Bot**：非 systemd 部署下调用 `scripts/restart.sh`，优先按 `data/bot.pid` 停止旧进程；该文件缺失或失效时（例如用 `npm start` 手动启动的实例）回退到 `data/bot.lock` 中记录的持锁进程，然后再后台启动新进程，期间短暂离线。检测到 systemd（`INVOCATION_ID` / `SYSTEMD_EXEC_PID`）时会拒绝脚本重启，避免与 systemd 争抢单实例锁，并提示改用 `systemctl restart telegram-bot`。
 
@@ -1019,3 +1063,8 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | `scripts/check-size.mjs` | 模块体积门禁：超过预算即失败，防止已拆分的文件重新长成超大文件（`npm run check:size`） |
 | `scripts/install-cc-switch.sh` | 下载 cc-switch CLI 到 `./bin`（`npm run cc-switch:install`） |
 | `scripts/restart.sh` | 构建产物重启 Bot 并维护 `data/bot.pid` |
+| `scripts/run-current.sh` | systemd `ExecStart` 入口：启动 current release；首次部署回退 checkout 的 `dist/index.js` |
+| `scripts/apply-release.sh` | 激活 pending（或重启 current）、启动/重启、健康检查失败自动回滚；支持 `RELEASE_SUPERVISOR=systemd` |
+| `scripts/release-health.mjs` | 发布健康探针：API 可用时走 `/health`，Telegram/飞书-only 时校验本次启动自检的 release/PID/时间 |
+| `scripts/publish-android-release.mjs` | 把已签名 APK 复制到 `data/android/releases/`，按实际字节计算 SHA-256/大小并原子更新清单（`npm run release:android`） |
+| `scripts/check-release.mjs` | 发布门禁：类型检查、安卓源码检查、体积预算与全部单元测试（`npm run check:release`） |

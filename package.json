@@ -1,6 +1,6 @@
 {
   "name": "telegram-opencode-bot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Private multi-client AI assistant for Telegram, Feishu and Android, backed by opencode and mainstream agent CLIs",
@@ -25,7 +25,10 @@
     "serve:proxy": "bash -c 'set -a; [ -f data/proxy.env ] && . data/proxy.env; set +a; exec opencode serve --port 4096 --hostname 127.0.0.1'",
     "restart": "bash scripts/restart.sh",
     "models": "tsx src/model-cli.ts",
-    "cc-switch:install": "bash scripts/install-cc-switch.sh"
+    "cc-switch:install": "bash scripts/install-cc-switch.sh",
+    "check:release": "node scripts/check-release.mjs",
+    "release:control": "node dist/release-control.js",
+    "release:android": "node scripts/publish-android-release.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",

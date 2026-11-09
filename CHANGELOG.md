@@ -2,7 +2,40 @@
 
 本项目的显著变更记录在此文件中。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.0] - 2026-11-08
+
+### 新增
+
+- **独立 release 更新链路**：`/update` 不再在原地 `git pull`，而是在 `data/releases/.staging-*` 中克隆目标分支、执行 `npm ci`、发布门禁与构建；通过后标记为 pending，重启后才激活。启动健康检查失败会自动切回上一版，状态与保留策略写入 `data/releases/state.json`，默认保留 3 个 release。
+- **stable / beta 更新通道**：`UPDATE_CHANNEL=stable|beta` 与 `UPDATE_BRANCH` 决定更新目标；`/ops` 与 App 版本卡显示当前通道和 release 指针。
+- **启动自检与数据快照**：启动时在 `data/startup-check.json` / `startup-checks.jsonl` 记录版本、commit、PID、数据迁移结果和 API 状态；升级前自动备份状态文件，首次启动新 schema 时在 `data/snapshots/` 生成只读快照。
+- **Android 在线更新**：服务端可从 `data/android-release.json` 提供经 Bearer 鉴权的 APK 与 SHA-256；App 设置页显示当前/服务器版本、更新说明和大小，下载时流式写入 `.part`、校验大小与 SHA-256，再交给系统安装器。APK 下载端点跳过消息级加密头，避免二进制被误当 JSON。
+- **正式签名 CI 与发布脚本**：Android 工作流读取 `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`，执行 `assembleRelease` 并用 `apksigner` 验证；缺少 Secrets 会直接失败。新增 `npm run release:android`，把已签名 APK 复制到 `data/android/releases/` 并原子写清单。
+- **systemd 统一入口**：新增 `scripts/run-current.sh`，unit 的 `ExecStart` 始终启动 `data/releases` 中的 current release（首次部署回退 checkout 的 `dist/index.js`）；`RELEASE_SUPERVISOR=systemd` 时由 `apply-release.sh` 激活并重启，健康检查失败自动回滚。
+
+### 变更
+
+- **版本**：服务端 `0.4.0`，Android `1.1.0`（`versionCode 1001000`）。
+- **Android APK 改为 CI 正式签名构建**：`android-v*` 标签执行 `assembleRelease`，发布 `agent-bot-v<版本>.apk`、`.sha256` 与 `android-release.json`；不再发布 debug 签名的 APK。
+- **运维按钮安全**：App 的「应用 pending 并重启」「丢弃 pending」「回滚到上一版」改为先弹出确认框，与 Telegram 的一次性确认语义一致；有运行中任务时服务端仍返回 409。
+- **更新接口**：新增 `GET /ops/release`（轻量 release/启动自检视图）、`POST /ops/rollback`、`POST /ops/cancel-pending`、`GET /android/release` 与 `GET /android/release/apk`；`GET /health` 增加 PID、commit 与 release。
+- **文档**：README 与 android/README 更新为独立 release 构建、systemd 应用流程、Docker 需重建镜像、正式签名迁移与 APK 校验说明；旧的原地 `git pull --ff-only` 更新说明已移除。
+
+### 修复
+
+- 配对加密开启时 `/android/release` 的 JSON 现在走统一响应器，与其它 JSON 端点一样加密并带安全头；APK 原始字节仍保持明文。
+- `apply-release.sh` 在没有 pending 时也会重启 current release，而不是错误地启动 checkout；systemd 下由 Bot 触发的重启使用 `systemd-run`，避免 installer 被自身重启杀死。
+- Android 清单中的 APK 大小若与文件不一致会在加载时拒绝，而不是等到下载后才失败。
+
 ## [未发布]
+
+### 修复
+
+- **无 API 部署的发布健康检查**：`apply-release.sh` 在启动/重启前记录时间边界；`release-health.mjs` 在 `API_ENABLED=0` 或缺少令牌时改读 `data/startup-check.json`，并要求 release、时间与脚本监督的 PID 都对应本次启动。过期的成功记录、其它 release 或启动失败记录都会被拒绝，Telegram/飞书-only 部署不再因探针失败而每次更新都回滚。
+- **启动自检时序**：成功的 `data/startup-check.json` 现在写在各控制端启动之后，并记录 checkout 状态（release=`checkout`）、引擎与各控制端状态，避免 API 已监听但 Telegram 初始化失败时被误判为健康。
+- **CI 签名核验**：Android 发布工作流使用 `$ANDROID_HOME/build-tools/35.0.0/apksigner`，并把 APK 签名证书 SHA-256 与 `ANDROID_KEY_ALIAS` 对应证书指纹逐字比对；发布清单补上 `size`，与本地发布脚本一致。
+- **Gradle keystore 路径**：`android/keystore.properties` 中的相对 `storeFile` 现在以 `android/` 根目录解析，避免被误解析到 `android/app/`。
+- **架构门禁**：`/ops/release` 的轻量视图拆到 `src/releaseStatus.ts`，`release-control.ts` 显式登记为 knip 入口；移除未使用的 release 辅助导出以恢复 knip/lint/体积门禁。
 
 ### 优化
 
@@ -15,7 +48,7 @@
 
 ### 变更
 
-- **Android APK 改为 CI 构建**：`android-v*` 标签现在由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9 后，先按标签把 `versionName` / `versionCode` 写入 `build.gradle.kts`（`versionCode = major*1000000+minor*1000+patch`，跨次版本不会回退），再执行 `assembleDebug`，生成按版本命名的 `agent-bot-v<版本>.apk` 与同名 `.sha256` 并上传 GitHub Release；仓库不再提交 `android/releases/` 下的二进制 APK（新增 `/android/releases/` ignore），避免每次发版给 Git 历史永久增加约 18MB。
+- **Android APK 改为 CI 构建（历史记录，已由 0.4.0 的正式签名发布取代）**：`android-v*` 标签由 GitHub Actions 安装 JDK 17、Android SDK 35 与 Gradle 8.9，按标签写入 `versionName` / `versionCode` 后构建并上传 GitHub Release；仓库不提交 `android/releases/` 下的二进制 APK，避免每次发版给 Git 历史永久增加约 18MB。0.4.0 起改为 `assembleRelease` + 强制 Secrets + `apksigner` 验证，不再发布 debug 签名包。
 - **深度审查台账入库**：`DEEP-100.md` 记录当前 42/100 轮审查进度；早期并行审查的重复轮次编号已在文首说明，后续从第 43 轮继续。
 
 ### 新增

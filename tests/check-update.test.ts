@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -65,27 +65,26 @@ test("checkUpdate lists pending commits when behind upstream", async () => {
     assert.equal(result.ok, true)
     assert.match(result.message, /落后 3 个提交/)
     assert.match(result.message, /a1b2c3d 新功能/)
-    assert.match(result.message, /\/update/)
+    assert.match(result.message, /更新项目/)
   } finally {
     cleanup(ops)
   }
 })
 
-test("checkUpdate fails gracefully without an upstream branch or network", async () => {
-  const noUpstream = makeService((command, args) => {
-    if (command === "git" && args[0] === "rev-parse") return { code: 128, stdout: "", stderr: "no upstream" }
+test("checkUpdate fails gracefully without the configured target or network", async () => {
+  const missingTarget = makeService((command, args) => {
+    if (command === "git" && args[0] === "rev-parse") return { code: 128, stdout: "", stderr: "unknown revision" }
     return undefined
   })
   try {
-    const result = await noUpstream.ops.checkUpdate()
+    const result = await missingTarget.ops.checkUpdate()
     assert.equal(result.ok, false)
-    assert.match(result.message, /上游分支/)
+    assert.match(result.message, /目标分支/)
   } finally {
-    cleanup(noUpstream.ops)
+    cleanup(missingTarget.ops)
   }
 
   const offline = makeService((command, args) => {
-    if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "origin/main\n", stderr: "" }
     if (command === "git" && args[0] === "fetch") return { code: 128, stdout: "", stderr: "Could not resolve host" }
     return undefined
   })
@@ -106,6 +105,86 @@ test("checkUpdate reports a missing git binary", async () => {
     assert.match(result.message, /未找到 git/)
   } finally {
     cleanup(ops)
+  }
+})
+
+test("checkUpdate offers a pending release instead of proposing a second build", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-check-update-pending-"))
+  try {
+    const statePath = join(dir, "release-state.json")
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        pending: {
+          id: "20260101-abc",
+          commit: "abc123456789",
+          version: "0.4.0",
+          createdAt: "",
+          path: join(dir, "release"),
+        },
+      }),
+    )
+    const { ReleaseManager } = await import("../src/releaseManager.js")
+    const releases = new ReleaseManager({
+      projectDir: dir,
+      dataDir: dir,
+      statePath,
+      run: async () => ({ code: 0, stdout: "", stderr: "" }),
+    })
+    const { ops } = makeService((command, args) => {
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "origin/main\n", stderr: "" }
+      if (command === "git" && args[0] === "rev-list") return { code: 0, stdout: "2\n", stderr: "" }
+      return undefined
+    }, { releases })
+    const result = await ops.checkUpdate()
+    assert.equal(result.ok, true)
+    assert.match(result.message, /等待应用/)
+    assert.doesNotMatch(result.message, /点击「⬆️ 更新项目」/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("checkUpdate compares against the running release commit, not checkout HEAD", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-check-update-commit-"))
+  try {
+    const releasePath = join(dir, "release")
+    mkdirSync(join(releasePath, "dist"), { recursive: true })
+    writeFileSync(join(releasePath, "dist", "index.js"), "// built\n")
+    const statePath = join(dir, "release-state.json")
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        current: {
+          id: "20260101-aaa",
+          commit: "aaabbbccc",
+          version: "0.4.0",
+          createdAt: "",
+          path: releasePath,
+        },
+      }),
+    )
+    const { ReleaseManager } = await import("../src/releaseManager.js")
+    const releases = new ReleaseManager({
+      projectDir: dir,
+      dataDir: dir,
+      statePath,
+      run: async () => ({ code: 0, stdout: "", stderr: "" }),
+    })
+    let compared = ""
+    const { ops } = makeService((command, args) => {
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "origin/main\n", stderr: "" }
+      if (command === "git" && args[0] === "rev-list") {
+        compared = args[2] ?? ""
+        return { code: 0, stdout: "0\n", stderr: "" }
+      }
+      return undefined
+    }, { releases })
+    const result = await ops.checkUpdate()
+    assert.equal(result.ok, true)
+    assert.equal(compared, "aaabbbccc..origin/main")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 

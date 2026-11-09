@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -13,8 +16,43 @@ android {
         applicationId = "com.agentbot.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1000002
-        versionName = "1.0.2"
+        versionCode = 1001000
+        versionName = "1.1.0"
+    }
+
+    // Release signing is supplied by CI (or a local keystore.properties file).
+    // Debug builds keep their own key, which is why the two cannot overwrite
+    // each other: switching a phone from a debug APK to this release APK needs
+    // an uninstall first and loses local App settings.
+    val keystoreProperties = Properties().apply {
+        val file = rootProject.file("keystore.properties")
+        if (file.exists()) FileInputStream(file).use { load(it) }
+    }
+    fun signingValue(env: String, key: String): String? =
+        System.getenv(env)?.takeIf { it.isNotBlank() } ?: keystoreProperties.getProperty(key)?.takeIf { it.isNotBlank() }
+
+    val releaseStoreFile = signingValue("ANDROID_KEYSTORE_PATH", "storeFile")
+    val releaseStorePassword = signingValue("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+    val releaseKeyAlias = signingValue("ANDROID_KEY_ALIAS", "keyAlias")
+    val releaseKeyPassword = signingValue("ANDROID_KEY_PASSWORD", "keyPassword")
+    val releaseSigningConfigured =
+        listOf(releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { it != null }
+
+    // `file(...)` in an app module resolves against android/app, but operators
+    // naturally write a path relative to android/ (the directory holding
+    // keystore.properties). Resolve relative paths against the root project;
+    // absolute paths from CI remain untouched.
+    val releaseStore = releaseStoreFile?.let { rootProject.file(it) }
+
+    signingConfigs {
+        if (releaseSigningConfigured && releaseStore != null) {
+            create("release") {
+                storeFile = releaseStore
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -22,6 +60,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseSigningConfigured && releaseStore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

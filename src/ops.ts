@@ -26,6 +26,11 @@ import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import { rotateLogIfNeeded } from "./logger.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
+import { ReleaseManager, type ReleaseState } from "./releaseManager.js"
+import { buildReleaseDiagnostics, resolveUpdateTarget, UpdateChecker, type ReleaseDiagnostics } from "./updateChecker.js"
+import { UpdateOrchestrator } from "./updateOrchestrator.js"
+import { readStartupSelfCheck, type StartupSelfCheck } from "./startupSelfCheck.js"
+import { buildReleaseOverview, type ReleaseOverview } from "./releaseStatus.js"
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024
@@ -72,6 +77,12 @@ export interface OpsDiagnostics {
   memory: { freeBytes: number; totalBytes: number }
   /** Epoch ms of the newest archive in data/backups/, undefined when never backed up. */
   lastBackupAt?: number
+  /** Managed release state; absent on a plain checkout before the first update. */
+  release?: ReleaseDiagnostics
+  /** Update channel/fork target this installation follows. */
+  update?: { channel: string; ref: string }
+  /** Last startup self-check; undefined before the first successful/failed start. */
+  startup?: StartupSelfCheck
 }
 
 export interface OpsLogResult {
@@ -111,7 +122,7 @@ export interface OpsServiceOptions {
   run?: (
     command: string,
     args: string[],
-    options: { env: NodeJS.ProcessEnv; timeoutMs: number },
+    options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
   ) => Promise<OpsCommandResult>
   spawnDetached?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => number | undefined
   spawnService?: (
@@ -124,6 +135,8 @@ export interface OpsServiceOptions {
   sleep?: (ms: number) => Promise<void>
   systemd?: boolean
   nodeVersion?: string
+  /** Release directory manager; defaults to data/releases beside the checkout. */
+  releases?: ReleaseManager
 }
 
 interface EnvRule {
@@ -343,6 +356,9 @@ export class OpsService {
   readonly #systemd: boolean
   readonly #nodeVersion: string
   readonly #log?: Logger
+  readonly #releases: ReleaseManager
+  readonly #updates: UpdateOrchestrator
+  readonly #updateChecker: UpdateChecker
 
   constructor(options: OpsServiceOptions, logger?: Logger) {
     this.#projectDir = resolve(options.projectDir)
@@ -369,6 +385,43 @@ export class OpsService {
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)))
     this.#systemd = options.systemd ?? Boolean(process.env.INVOCATION_ID || process.env.SYSTEMD_EXEC_PID)
     this.#nodeVersion = options.nodeVersion ?? process.version
+    this.#releases =
+      options.releases ??
+      new ReleaseManager({
+        projectDir: this.#projectDir,
+        dataDir: this.#dataDir,
+        run: (command, args, options) => this.#runCommandIn(options.cwd, command, args, options.timeoutMs, options.env),
+        which: this.#which,
+        env: process.env,
+      })
+    this.#updateChecker = new UpdateChecker({
+      run: (command, args, timeoutMs) => this.#runCommand(command, args, timeoutMs),
+      which: this.#which,
+      releaseState: () => this.releaseState(),
+    })
+    this.#updates = new UpdateOrchestrator({
+      projectDir: this.#projectDir,
+      releases: this.#releases,
+      releaseState: () => this.releaseState(),
+      backup: () => this.backupData(),
+      updateTarget: () => this.updateTarget(),
+      releaseVersion: () => this.#gitVersionFallback(),
+      hasGit: () => Boolean(this.#which("git")),
+      hasNpm: () => Boolean(this.#which("npm")),
+    })
+  }
+
+  releaseState(): ReleaseState {
+    return this.#releases.readState()
+  }
+
+  #gitVersionFallback(): string {
+    try {
+      const pkg = JSON.parse(readFileSync(join(this.#projectDir, "package.json"), "utf8")) as { version?: string }
+      return pkg.version || "dev"
+    } catch {
+      return "dev"
+    }
   }
 
   get logPath(): string {
@@ -397,6 +450,7 @@ export class OpsService {
     } catch {
       disk = undefined
     }
+    const startup = readStartupSelfCheck(this.#dataDir)
     return {
       node: this.#nodeVersion,
       platform: `${process.platform} ${process.arch}`,
@@ -413,6 +467,8 @@ export class OpsService {
       memory: { freeBytes: freemem(), totalBytes: totalmem() },
       // 恒为数字（0 = 从未备份）：编码器会丢弃 undefined,而 App 模型按必填解码
       lastBackupAt: this.#lastBackupAt() ?? 0,
+      ...this.#releaseDiagnostics(),
+      ...(startup ? { startup } : {}),
     }
   }
 
@@ -484,97 +540,41 @@ export class OpsService {
     }
   }
 
-  async checkUpdate(): Promise<OpsResult> {
-    if (!this.#which("git")) return { ok: false, message: "未找到 git，无法检查更新。", steps: [] }
-    const steps: OpsStep[] = []
-
-    const upstream = await this.#runCommand(
-      "git",
-      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-      15_000,
-    )
-    steps.push(this.#step("读取上游分支", upstream))
-    if (upstream.code !== 0) {
-      return { ok: false, message: "当前分支没有配置上游分支，无法在线比较，可手动执行 git pull。", steps }
-    }
-    const target = stripAnsi(upstream.stdout).trim() || "上游分支"
-
-    const fetch = await this.#runCommand("git", ["fetch", "--quiet", "origin"], 60_000)
-    steps.push(this.#step("git fetch origin", fetch))
-    if (fetch.code !== 0) {
-      return { ok: false, message: "无法连接远端仓库（网络问题或仓库不可达），请稍后再试。", steps }
-    }
-
-    const behind = await this.#runCommand("git", ["rev-list", "--count", `HEAD..${target}`], 15_000)
-    steps.push(this.#step("比较提交数", behind))
-    const count = Number.parseInt(stripAnsi(behind.stdout).trim(), 10)
-    if (!Number.isFinite(count)) {
-      return { ok: false, message: "无法读取远端提交数，请稍后再试。", steps }
-    }
-    if (count === 0) {
-      return { ok: true, message: `✅ 已是最新：本地与 ${target} 一致。`, steps }
-    }
-    const log = await this.#runCommand("git", ["log", "--oneline", "-5", `HEAD..${target}`], 15_000)
-    const sample = stripAnsi(log.stdout || log.stderr).trim()
-    return {
-      ok: true,
-      message: `⬇️ 落后 ${count} 个提交（${target}）${sample ? `：\n${sample}` : ""}。\n点击「⬆️ 更新项目」或发送 /update 拉取。`,
-      steps,
-    }
+  updateTarget(): { channel: string; ref: string } {
+    return resolveUpdateTarget()
   }
 
-  async updateProject(): Promise<OpsResult> {
-    if (!this.#which("git")) return { ok: false, message: "未找到 git，无法更新项目。", steps: [] }
-    const steps: OpsStep[] = []
+  /** Dry-run update check: fetch upstream and count new commits; changes nothing locally. */
+  checkUpdate(): Promise<OpsResult> {
+    return this.#updateChecker.check()
+  }
 
-    const status = await this.#runCommand("git", ["status", "--porcelain"], 60_000)
-    steps.push(this.#step("检查工作区", status))
-    if (status.code !== 0) {
-      return { ok: false, message: "无法读取 git 状态，已中止更新。", steps }
-    }
-    if (stripAnsi(status.stdout).trim()) {
-      return {
-        ok: false,
-        message: "工作区有未提交的改动，已中止更新。请先提交或暂存改动后再试。",
-        steps,
-      }
-    }
+  updateProject(): Promise<OpsResult> {
+    return this.#updates.updateProject()
+  }
 
-    const pull = await this.#runCommand("git", ["pull", "--ff-only"], 5 * 60_000)
-    steps.push(this.#step("git pull --ff-only", pull))
-    if (pull.code !== 0) {
-      return {
-        ok: false,
-        message: "git pull 失败（可能存在本地提交或网络问题），已停止后续步骤，Bot 仍在运行旧版本。",
-        steps,
-      }
-    }
+  cancelPendingRelease(): OpsResult {
+    return this.#updates.cancelPending()
+  }
 
-    const npm = this.#which("npm")
-    if (!npm) return { ok: false, message: "未找到 npm，无法安装依赖。", steps }
+  rollbackRelease(): OpsResult {
+    return this.#updates.rollback()
+  }
 
-    const install = await this.#runCommand(
-      npm,
-      ["install", "--no-audit", "--no-fund"],
-      10 * 60_000,
-      this.#installerEnv(),
+  #releaseDiagnostics(): Pick<OpsDiagnostics, "release" | "update"> {
+    return buildReleaseDiagnostics(this.releaseState(), this.updateTarget())
+  }
+
+  /**
+   * Cheap payload for the App's release card; avoids the full diagnostics probes.
+   */
+  releaseOverview(): ReleaseOverview {
+    return buildReleaseOverview(
+      this.releaseState(),
+      this.updateTarget(),
+      readStartupSelfCheck(this.#dataDir),
+      this.#lastBackupAt() ?? 0,
     )
-    steps.push(this.#step("npm install", install))
-    if (install.code !== 0) {
-      return { ok: false, message: "依赖安装失败，已停止构建，Bot 仍在运行旧版本。", steps }
-    }
-
-    const build = await this.#runCommand(npm, ["run", "build"], 10 * 60_000, this.#installerEnv())
-    steps.push(this.#step("npm run build", build))
-    if (build.code !== 0) {
-      return { ok: false, message: "构建失败，Bot 仍在运行旧版本。请根据输出修复后重试。", steps }
-    }
-
-    return {
-      ok: true,
-      message: "项目已更新并完成构建。发送 /restart 或点击下方按钮重启 Bot 使新代码生效。",
-      steps,
-    }
   }
 
   async runCheck(): Promise<OpsResult> {
@@ -598,18 +598,30 @@ export class OpsService {
       return {
         ok: false,
         message:
-          "当前 Bot 由 systemd 管理，已拒绝使用脚本重启，避免与 systemd 争抢实例锁。\n请执行 `sudo systemctl restart telegram-bot`（或你的服务名）。",
+          "当前 Bot 由 systemd 管理，已拒绝使用脚本重启，避免与 systemd 争抢实例锁。\n" +
+          "请执行 `sudo systemctl restart telegram-bot`（或你的服务名）；新 release 会在启动时生效，健康检查失败时请手动切回上一版。",
         steps: [],
       }
     }
-    const script = join(this.#projectDir, "scripts", "restart.sh")
-    if (!existsSync(script)) return { ok: false, message: "未找到 scripts/restart.sh，无法重启。", steps: [] }
-    if (!existsSync(join(this.#projectDir, "dist", "index.js"))) {
-      return { ok: false, message: "未找到 dist/index.js，请先运行构建（/ops 中的「运行检查」或 /update）。", steps: [] }
+    const applyScript = join(this.#projectDir, "scripts", "apply-release.sh")
+    const restartScript = join(this.#projectDir, "scripts", "restart.sh")
+    const script = existsSync(applyScript) ? applyScript : restartScript
+    if (!existsSync(script)) return { ok: false, message: "未找到 scripts/restart.sh 或 scripts/apply-release.sh，无法重启。", steps: [] }
+    // An update is activated from data/releases/store, so the checkout's dist/index.js
+    // may be absent or older than the running release. Accept either a usable current
+    // release or, for a plain checkout, the built dist entrypoint.
+    if (!this.#releases.currentEntry() && !existsSync(join(this.#projectDir, "dist", "index.js"))) {
+      return { ok: false, message: "未找到可启动的 release 或 dist/index.js，请先运行构建（/ops 中的「运行检查」或 /update）。", steps: [] }
     }
     const pid = this.#spawnDetached("bash", [script])
     if (!pid) return { ok: false, message: "重启进程启动失败，请检查脚本权限与 Node 环境。", steps: [] }
-    return { ok: true, message: `已触发重启（脚本 PID ${pid}），Bot 将在数秒内重新连接。`, steps: [] }
+    return {
+      ok: true,
+      message:
+        `已触发重启（脚本 PID ${pid}），Bot 将在数秒内重新连接。` +
+        (existsSync(applyScript) ? "新版本启动后会做健康检查，失败会自动回滚。" : ""),
+      steps: [],
+    }
   }
 
   async opencodeStatus(): Promise<{ reachable: boolean; managed: boolean; pid?: number; url: string }> {
@@ -1090,13 +1102,23 @@ export class OpsService {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     env: NodeJS.ProcessEnv = this.#env(),
   ): Promise<OpsCommandResult> {
-    if (this.#runOverride) return this.#runOverride(command, args, { env, timeoutMs })
+    return this.#runCommandIn(this.#projectDir, command, args, timeoutMs, env)
+  }
+
+  #runCommandIn(
+    cwd: string,
+    command: string,
+    args: string[],
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    env: NodeJS.ProcessEnv = this.#env(),
+  ): Promise<OpsCommandResult> {
+    if (this.#runOverride) return this.#runOverride(command, args, { cwd, env, timeoutMs })
     return new Promise((resolvePromise) => {
       // detached puts npm/bash in its own process group, so a timeout stops the lifecycle
       // scripts and downloads it started instead of leaving them mutating node_modules
       // while a retry runs. Output is capped like everywhere else, not rejected.
       const child = spawn(command, args, {
-        cwd: this.#projectDir,
+        cwd,
         env,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],

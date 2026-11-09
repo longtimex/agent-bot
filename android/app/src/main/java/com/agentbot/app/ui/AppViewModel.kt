@@ -8,14 +8,19 @@ import androidx.lifecycle.viewModelScope
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.AgentActionResult
 import com.agentbot.app.data.AccessResult
 import com.agentbot.app.data.AliasEntry
 import com.agentbot.app.data.AgentInfo
+import com.agentbot.app.data.AndroidReleaseInfo
 import com.agentbot.app.data.ApiClient
+import com.agentbot.app.data.ApiException
 import com.agentbot.app.data.AttachmentLimits
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.LocalStore
@@ -25,7 +30,6 @@ import com.agentbot.app.data.MediaCache
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.Peer
 import com.agentbot.app.data.ProxyInfo
-import com.agentbot.app.data.ApiException
 import com.agentbot.app.data.BotCommand
 import com.agentbot.app.data.AgentBinding
 import com.agentbot.app.data.CcExecCommand
@@ -50,8 +54,10 @@ import com.agentbot.app.data.Reminder
 import com.agentbot.app.data.Schedule
 import com.agentbot.app.data.SentAttachment
 import com.agentbot.app.data.ServerInfo
+import com.agentbot.app.data.ReleaseInfo
 import com.agentbot.app.data.ServiceStatus
 import com.agentbot.app.data.Session
+import com.agentbot.app.data.StartupCheck
 import com.agentbot.app.data.SettingsRepository
 import com.agentbot.app.data.Status
 import com.agentbot.app.data.Task
@@ -71,6 +77,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -358,6 +365,40 @@ class AppViewModel(
     var opsResult by mutableStateOf<OpsResult?>(null)
         private set
 
+    /** Managed release state and update channel, loaded alongside diagnostics. */
+    var releaseInfo by mutableStateOf<ReleaseInfo?>(null)
+        private set
+
+    /** Startup self-check from data/startup-check.json, when the server exposes it. */
+    var startupCheck by mutableStateOf<StartupCheck?>(null)
+        private set
+
+    /** Installed App version, read from the package manager rather than BuildConfig. */
+    private val packageInfo: android.content.pm.PackageInfo? = runCatching {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+    }.getOrNull()
+
+    val appVersionName: String = packageInfo?.versionName ?: ""
+
+    val appVersionCode: Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo?.longVersionCode ?: 0L
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo?.versionCode?.toLong() ?: 0L
+        }
+
+    /** Latest APK advertised by the bot; null until /android/release answers. */
+    var androidRelease by mutableStateOf<AndroidReleaseInfo?>(null)
+        private set
+
+    /** "downloading" / "verifying" / "installing" while the App update is in flight. */
+    var appUpdateStage by mutableStateOf<String?>(null)
+        private set
+
+    var appUpdateError by mutableStateOf<String?>(null)
+        private set
+
     /** Label of the running ops action (update/build can take minutes). */
     var opsActionBusy by mutableStateOf<String?>(null)
         private set
@@ -602,6 +643,7 @@ class AppViewModel(
                 refreshLogs()
                 refreshOpsService()
             }
+            Screen.Settings -> refreshAndroidRelease()
             Screen.Proxy -> refreshProxies()
             Screen.Aliases -> refreshAliases()
             Screen.Access -> refreshAccess()
@@ -713,9 +755,15 @@ class AppViewModel(
             Screen.Help -> silent { helpView = api.help(conn()) }
             Screen.Ops -> if (opsActionBusy == null) {
                 silent { diagnostics = api.diagnostics(conn()) }
+                silent {
+                    val release = api.releaseInfo(conn())
+                    releaseInfo = release.release
+                    startupCheck = release.startup
+                }
                 silent { serviceStatus = api.opsService(conn()) }
                 silent { logTail = api.logs(conn(), logSource, logLines) }
             }
+            Screen.Settings -> silent { androidRelease = api.androidRelease(conn(), appVersionCode.toInt()) }
             else -> Unit
         }
     }
@@ -1975,12 +2023,111 @@ class AppViewModel(
             opsBusy = true
             try {
                 diagnostics = api.diagnostics(conn())
+                val release = api.releaseInfo(conn())
+                releaseInfo = release.release
+                startupCheck = release.startup
             } catch (err: Exception) {
                 connectionError = "加载诊断失败：${err.message}"
             } finally {
                 opsBusy = false
             }
         }
+    }
+
+    fun refreshAndroidRelease() {
+        viewModelScope.launch {
+            appUpdateError = null
+            try {
+                androidRelease = api.androidRelease(conn(), appVersionCode.toInt())
+            } catch (err: Exception) {
+                appUpdateError = "检查更新失败：${err.message}"
+            }
+        }
+    }
+
+    /**
+     * Downloads, verifies and opens the system installer. A debug build and a release build
+     * carry different signatures, so replacing one with the other requires an uninstall and
+     * loses this phone's local settings; the server never hides that constraint.
+     */
+    fun downloadAndInstallAppUpdate() {
+        if (appUpdateStage != null) return
+        val release = androidRelease ?: return
+        val versionCode = release.versionCode ?: return
+        val sha256 = release.sha256?.lowercase()
+        if (!release.configured || sha256 == null || !Regex("^[0-9a-f]{64}$").matches(sha256)) {
+            appUpdateError = "服务器没有提供可校验的 APK 清单"
+            return
+        }
+        if (versionCode <= appVersionCode) {
+            appUpdateError = "当前已是最新版本（${appVersionName.ifBlank { appVersionCode.toString() }}）"
+            return
+        }
+        viewModelScope.launch {
+            appUpdateError = null
+            appUpdateStage = "下载中"
+            try {
+                val dir = File(appContext.cacheDir, "updates")
+                dir.mkdirs()
+                val apk = File(dir, "agent-bot-v${release.versionName ?: versionCode}.apk")
+                // Always fetch a newly published build; a cached file with the same name
+                // could belong to a previous manifest with a different checksum.
+                if (apk.exists()) apk.delete()
+                val downloaded = api.downloadAndroidRelease(conn(), apk, release.size)
+                appUpdateStage = "校验中"
+                val actual = withContext(Dispatchers.IO) { sha256Of(downloaded) }
+                if (actual != sha256) {
+                    downloaded.delete()
+                    throw ApiException(0, "APK 校验失败：SHA-256 与清单不一致，已删除下载文件")
+                }
+                // Manifest size is optional (0 means unknown), but an APK produced by the
+                // release pipeline is never empty. Refuse a zero-byte cache hit too, otherwise
+                // a failed earlier download could reach the installer without a hash mismatch.
+                if (downloaded.length() <= 0) {
+                    downloaded.delete()
+                    throw ApiException(0, "APK 下载为空，已删除文件")
+                }
+                appUpdateStage = "安装中"
+                openInstaller(downloaded)
+            } catch (err: ActivityNotFoundException) {
+                appUpdateError = "没有可用的 APK 安装器，请允许浏览器/文件管理器安装应用"
+            } catch (err: Exception) {
+                appUpdateError = "应用更新失败：${err.message}"
+            } finally {
+                appUpdateStage = null
+            }
+        }
+    }
+
+    private fun sha256Of(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun openInstaller(apk: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !appContext.packageManager.canRequestPackageInstalls()
+        ) {
+            appUpdateError = "请先允许本应用安装未知来源应用，返回设置页后再次点击「下载并安装」"
+            val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${appContext.packageName}"))
+            settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            appContext.startActivity(settings)
+            return
+        }
+        val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", apk)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        appContext.startActivity(intent)
     }
 
     fun refreshOpsService() {

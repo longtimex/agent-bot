@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.ApiFormat
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.OpsResult
+import com.agentbot.app.data.StartupCheck
 import com.agentbot.app.ui.theme.TextSecondary
 
 private val LOG_LINE_CHOICES = listOf(80, 200, 400)
@@ -95,6 +96,7 @@ fun OpsScreen(vm: AppViewModel) {
             item { OpsActionsCard(vm) { path, label -> pending = path to label } }
             vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.pid, status.url) { path, label -> pending = path to label } } }
             vm.opsResult?.let { result -> item { OpsResultCard(result, vm::clearOpsResult) } }
+            ReleaseCard(vm) { path, label -> pending = path to label }
             val diag = vm.diagnostics
             if (diag != null) {
                 item { DiagnosticsCard(diag) }
@@ -108,13 +110,20 @@ fun OpsScreen(vm: AppViewModel) {
                 }
             }
             item { LogCard(vm) }
+            vm.startupCheck?.let { check -> item { StartupCard(check) } }
         }
     }
 
     pending?.let { (path, label) ->
         val (body, confirm) = when (path) {
-            "update" -> "将执行 git pull --ff-only、npm install 与 npm run build；工作区有未提交改动时会中止。" to "更新"
-            "restart" -> "将重启 Bot 进程，连接会短暂中断；重启完成后会自动恢复。" to "重启"
+            "update" -> "将在独立目录克隆当前分支、安装依赖并运行发布门禁；不会改动正在运行的 checkout。完成后还需重启 Bot 应用。" to "更新"
+            "restart" -> if (vm.releaseInfo?.pending != null) {
+                "将激活预构建版本并重启 Bot。连接会短暂中断；新版本健康检查失败会自动回滚。" to "应用并重启"
+            } else {
+                "将重启 Bot 进程，连接会短暂中断；重启完成后会自动恢复。" to "重启"
+            }
+            "cancel-pending" -> "将丢弃等待应用的预构建版本；当前运行的版本不受影响。" to "丢弃"
+            "rollback" -> "将把当前 release 指针切到上一版。还需重启 Bot 使其生效，原版本会保留以便再次回滚。" to "回滚"
             "service/stop" -> "只会停止由 Bot 启动的 OpenCode（通过 data/opencode.pid 识别）。" to "停止"
             "service/restart" -> "将重启由 Bot 托管的 OpenCode 服务。" to "重启"
             else -> "确定执行该操作？" to "执行"
@@ -229,6 +238,61 @@ private fun OpsResultCard(result: OpsResult, onClose: () -> Unit) {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ReleaseCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
+    val release = vm.releaseInfo
+    val update = vm.diagnostics?.update ?: null
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("版本与更新", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp))
+            InfoRow("当前 release", release?.label?.takeIf { it.isNotBlank() } ?: "checkout")
+            release?.current?.let { InfoRow("Current ID", it) }
+            release?.pending?.let { InfoRow("Pending", it) }
+            release?.previous?.let { InfoRow("上一版", it) }
+            update?.let { InfoRow("更新通道", "${it.channel} · ${it.ref}") }
+            if (release?.lastUpdateStatus != null) {
+                InfoRow(
+                    "最近更新",
+                    "${release.lastUpdateStatus}${release.lastUpdateAt?.let { " · $it" } ?: ""}" +
+                        (release.lastUpdateMessage?.let { "\n$it" } ?: ""),
+                )
+            }
+            if (release?.pending != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
+                    TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("restart", "应用 pending 并重启") }) {
+                        Text("应用 pending 并重启")
+                    }
+                    TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("cancel-pending", "丢弃 pending") }) {
+                        Text("丢弃 pending")
+                    }
+                }
+            }
+            if (release?.previous != null && release.pending == null) {
+                TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("rollback", "回滚版本") }) {
+                    Text("回滚到上一版")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartupCard(check: StartupCheck) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("启动自检", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp))
+            InfoRow("时间", check.at ?: "—")
+            InfoRow("版本", listOfNotNull(check.version, check.commit?.take(8), check.release).joinToString(" · "))
+            InfoRow("PID", check.pid?.toString() ?: "—")
+            check.migration?.let { InfoRow("数据迁移", if (it.ok) "通过" else "失败：${it.message ?: ""}") }
+            if (!check.failure.isNullOrBlank()) {
+                Text(check.failure, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            if (check.notes.isNotEmpty()) InfoRow("说明", check.notes.joinToString("\n"))
         }
     }
 }

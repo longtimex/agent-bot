@@ -24,7 +24,7 @@
  * Exits non-zero and prints file:line for the first problem in each file.
  */
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { spawnSync } from "node:child_process"
 import { pathToFileURL } from "node:url"
 
@@ -157,6 +157,7 @@ function main(argv) {
   const files = walk(root)
   if (!skipManifest) {
     for (const problem of swallowedByGitignore(root, files)) problems.push(problem)
+    for (const problem of signingMaterialIgnored(root)) problems.push(problem)
   }
   for (const file of files) {
     const source = readFileSync(file, "utf8")
@@ -438,6 +439,32 @@ function swallowedByGitignore(root, files) {
     console.warn(`note: ${file} is not committed yet`)
   }
   return problems
+}
+
+/**
+ * Signing material must never be committed. The docs tell operators to create
+ * android/keystore.properties and may place a .jks next to it; a missing ignore rule would
+ * put the release private key and its password in the repository.
+ */
+export function signingMaterialIgnored(root, cwd = process.cwd()) {
+  const candidates = ["keystore.properties", "release.jks", "release.keystore"]
+  // `root` is the Kotlin source root (.../android/app/src/main/java). Walk up until the
+  // directory holding build.gradle.kts, instead of guessing a fixed number of levels.
+  let androidDir = root
+  while (!existsSync(join(androidDir, "app", "build.gradle.kts")) && androidDir !== dirname(androidDir)) {
+    androidDir = dirname(androidDir)
+  }
+  if (!existsSync(join(androidDir, "app", "build.gradle.kts"))) return []
+  const probes = candidates.map((name) => join(androidDir, name))
+  const relativeProbes = probes.map((probe) => relative(cwd, probe))
+  // --no-index asks the ignore rules even for paths that do not exist yet, which is
+  // exactly the state before a developer creates the keystore.
+  const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, input: relativeProbes.join("\n"), encoding: "utf8" })
+  if (result.error || result.status === 128) return []
+  const ignored = new Set((result.stdout ?? "").split("\n").filter(Boolean))
+  return probes.flatMap((probe, index) =>
+    ignored.has(relativeProbes[index]) ? [] : [`${probe} is not ignored by .gitignore; release signing material must never be committed`],
+  )
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) process.exit(main(process.argv.slice(2)))

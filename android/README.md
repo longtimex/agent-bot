@@ -45,16 +45,34 @@ Telegram 与飞书控制方式不受影响——App 通过 bot 进程内置的 H
 
 ## 构建与安装
 
-要求：Android Studio（Ladybug 或更新）或命令行 Gradle 8.9+、JDK 17。
+要求：Android Studio（Ladybug 或更新）或命令行 Gradle 8.9+、JDK 17，以及一个稳定的 release keystore。正式发布禁止使用 debug 密钥。
 
 ```bash
 cd android
-./gradlew assembleDebug          # 产物: app/build/outputs/apk/debug/app-debug.apk
-# 或在 Android Studio 中 Open 本目录后直接 Run
+export ANDROID_KEYSTORE_PATH=/absolute/path/to/release.jks
+export ANDROID_KEYSTORE_PASSWORD='...'
+export ANDROID_KEY_ALIAS='...'
+export ANDROID_KEY_PASSWORD='...'
+./gradlew assembleRelease        # 产物: app/build/outputs/apk/release/app-release.apk
+$ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs \
+  app/build/outputs/apk/release/app-release.apk
 ```
 
 > 仓库未提交 `gradlew` 二进制包装器；用 Android Studio 打开会自动生成，或先执行
 > `gradle wrapper --gradle-version 8.9` 生成后再构建。
+
+也可以把签名信息写到 `android/keystore.properties`（不得提交）：
+
+```properties
+storeFile=/absolute/path/to/release.jks
+storePassword=...
+keyAlias=...
+keyPassword=...
+```
+
+`storeFile` 使用绝对路径最稳妥；相对路径以 `android/` 为基准。只有四项都配置时 Gradle 才会启用 release 签名；缺少任一项会得到未签名 APK，`npm run release:android` 仍可复制它，但 Android 不会安装。发布前必须让 `apksigner verify` 通过，并确认输出证书与团队约定的 release 证书一致。
+
+> **debug → release 迁移**：debug 构建使用本机自动生成的 debug 密钥，与正式 release 密钥不是同一签名身份，Android 会拒绝覆盖安装。必须先在手机上卸载早期 debug APK，再安装正式签名 APK；卸载会清除 App 本地聊天记录、草稿、设置与配对信息，需要重新扫码配对。之后只要一直使用同一个 release keystore，就可以直接覆盖升级并保留本地数据。若更换 release keystore，同样必须先卸载。
 
 > 本仓库的 CI 环境没有 Android SDK，编译不了 Kotlin。仓库根目录的 `npm run check` 因此先跑
 > `npm run check:android`（`scripts/check-android-sources.mjs`：必需源文件是否缺失、是否被
@@ -92,35 +110,62 @@ cd android
 > 代理自己的时钟坏了）；`ChatScreen` 之外显示时长的三个界面（`ListScreens`/`SessionScreen`/
 > `StatusScreen`）不许出现 `System.currentTimeMillis()`——「已运行 X 秒」「最近活动 X 前」减的是
 > 服务器写下的时间戳，拿手机自己的时钟去减，手机慢一小时就永远显示「已运行 0 秒」，看着像卡死。
-> 它不能替代 `./gradlew assembleDebug`，改动 App 代码后仍需在本地编译一次。
+> 它不能替代 `./gradlew assembleRelease`，改动 App 代码后仍需在本地或 CI 用真实 Android 工具链编译、签名并验证一次。
 
 ### 打标签发布（GitHub Actions）
 
 推送匹配 `android-v*` 的标签即触发 `.github/workflows/android-release.yml`：
 
 ```bash
-git tag -a android-v1.0.2 -m "Android v1.0.2"
-git push origin android-v1.0.2
+git tag -a android-v1.1.0 -m "Android v1.1.0"
+git push origin android-v1.1.0
 ```
 
-工作流会先按标签把 `versionName` 写成标签版本（如 `1.0.2`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode` 再编译，因此每次标签产物都带着对应版本号；构建完成后创建/更新同名 Release，附上 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
+工作流会先按标签把 `versionName` 写成标签版本（如 `1.1.0`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，再执行 `gradle assembleRelease`。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
+
+- `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+构建后用 `apksigner verify --print-certs` 校验签名，并把 APK 签名证书的 SHA-256 与 keystore 中指定 alias 的证书指纹逐字比对；证书有效但 alias 不对也会失败。发布资产包含 `agent-bot-vX.Y.Z.apk`、同名 `.sha256` 与 `android-release.json`（版本、versionCode、大小、SHA-256、说明）。标签名必须是三段数字（`android-vX.Y.Z`），否则该步骤会直接失败并提示。
 
 ### 直接安装现成的 APK
 
 不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`：
 
 ```bash
-# 把 <tag> 换成实际版本，例如 android-v1.0.2
-tag=android-v1.0.2
+# 把 <tag> 换成实际版本，例如 android-v1.1.0
+tag=android-v1.1.0
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -o agent-bot-v1.0.2.apk "$base/agent-bot-v1.0.2.apk"
-curl -L -o agent-bot-v1.0.2.apk.sha256 "$base/agent-bot-v1.0.2.apk.sha256"
-sha256sum -c agent-bot-v1.0.2.apk.sha256
+curl -L -o agent-bot-v1.1.0.apk "$base/agent-bot-v1.1.0.apk"
+curl -L -o agent-bot-v1.1.0.apk.sha256 "$base/agent-bot-v1.1.0.apk.sha256"
+sha256sum -c agent-bot-v1.1.0.apk.sha256
 ```
 
-用 debug 密钥（`CN=Android Debug`）签名，因此需要在手机上允许「安装未知来源应用」。各版本
-release 都用同一个 debug 密钥签名，直接覆盖安装即可升级，已保存的地址/令牌/配对密钥不会丢，
-不需要先卸载；minSdk 26 走 APK Signature Scheme v2，v1 缺失不影响安装。
+当前 Release 由 CI 正式签名，因此需要在手机上允许「安装未知来源应用」。同一 release keystore
+签名的后续版本可以直接覆盖升级，已保存的地址、令牌与配对密钥会保留；早期 debug 包切到正式包
+必须先卸载，且会丢失本地 App 数据（见上文迁移说明）。minSdk 26 走 APK Signature Scheme v2。
+
+### 服务器内在线更新
+
+App 的「设置 → 应用更新」会请求 `GET /android/release?versionCode=<当前版本>`，显示服务器上的最新版本、大小、更新说明与 `updateAvailable`。点击「下载并安装」后：
+
+1. 以 Bearer Token 流式下载 `GET /android/release/apk` 到 `cache/updates/*.part`；
+2. 先检查 `Content-Length` 与清单大小，再对落盘文件计算 SHA-256；
+3. 大小或 SHA-256 不一致时删除下载文件并拒绝安装；
+4. 通过 `FileProvider` 交给 Android 系统安装器，并在 Android 8+ 引导开启「安装未知来源应用」。
+
+APK 是原始二进制，`API_ENCRYPTION=1` 时也不会套消息级加密头；其余 JSON 清单仍走统一加密与安全响应头。更新清单缺失时只显示「服务器尚未配置更新」，不影响聊天。
+
+在服务器发布已签名 APK：
+
+```bash
+npm run release:android -- --apk /path/to/agent-bot-v1.1.0.apk \
+  --version 1.1.0 --notes "修复若干问题"
+```
+
+脚本复制 APK 到 `data/android/releases/`，对**实际发布副本**计算 SHA-256 与大小，并原子写 `data/android-release.json`；运行中的 Bot 下一次读取即可看到，无需重启。也可以把 GitHub Release 中的 `android-release.json` 下载到 `data/android-release.json`，并按其中 `apk` 相对路径放置 APK。清单拒绝绝对路径、`..` 与越界符号链接；大小或哈希与文件不一致时服务端返回错误而不是发一个损坏包。
 
 ## 连接服务器
 

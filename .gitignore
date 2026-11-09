@@ -11,6 +11,9 @@ bin/
 # Android toolchain output. Anchored: an unanchored `build/` would also match
 # source directories, and `local.properties` carries this machine's SDK path.
 android/local.properties
+android/keystore.properties
+android/*.jks
+android/*.keystore
 android/.gradle/
 android/.kotlin/
 android/build/

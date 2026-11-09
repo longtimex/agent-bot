@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
   lstatSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import { dirname, join } from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { ApiServer, resolveApiToken, CC_EXEC_COMMANDS, CC_VIEWS } from "../src/api.js"
+import { AndroidReleaseService } from "../src/androidRelease.js"
 import { ccBlockedReason, ccConfirmPlan } from "../src/ccGuards.js"
 import { AgentCliRegistry } from "../src/agentCli.js"
 import type { AgentCliInstaller } from "../src/agentInstaller.js"
@@ -56,6 +58,7 @@ interface Harness {
   installs: string[]
   ccCalls: string[]
   magpieCalls: string[]
+  releaseActions: string[]
   /** Makes the next cc-switch read fail, for a route that writes first and then re-reads. */
   ccFailNextRead: () => void
   /** Simulates the owner appearing or changing after the API server has started. */
@@ -133,7 +136,66 @@ export async function withApi(
     envPath: join(dir, "proxy.env"),
     tester: async () => {},
   })
+  const releaseActions: string[] = []
   const ops = {
+    releaseState: () => ({
+      current: {
+        id: "20261108-120000-abc",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        version: "0.4.0",
+        createdAt: "2026-11-08T12:00:00.000Z",
+        path: join(dir, "data", "releases", "store", "20261108-120000-abc"),
+      },
+      previous: {
+        id: "20261107-120000-def",
+        commit: "89abcdef0123456789abcdef0123456789abcdef",
+        version: "0.3.0",
+        createdAt: "2026-11-07T12:00:00.000Z",
+        path: join(dir, "data", "releases", "store", "20261107-120000-def"),
+      },
+      pending: undefined,
+      lastUpdate: {
+        at: "2026-11-08T12:00:00.000Z",
+        from: "89abcdef",
+        to: "01234567",
+        status: "ok" as const,
+        message: "新版本已通过健康检查。",
+        report: { steps: [] },
+      },
+    }),
+    releaseLabel: () => "01234567 v0.4.0",
+    releaseOverview: () => ({
+      release: {
+        label: "01234567 v0.4.0",
+        current: "20261108-120000-abc",
+        previous: "20261107-120000-def",
+        lastUpdateAt: "2026-11-08T12:00:00.000Z",
+        lastUpdateStatus: "ok",
+        lastUpdateMessage: "新版本已通过健康检查。",
+      },
+      update: { channel: "stable", ref: "origin/main" },
+      startup: {
+        at: "2026-11-08T12:00:00.000Z",
+        version: "0.4.0",
+        pid: process.pid,
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        release: "20261108-120000-abc",
+        previousRelease: "20261107-120000-def",
+        migration: { ok: true, fromVersion: "1", toVersion: "1", message: "数据 schema 已是最新（v1）。" },
+        api: { requested: true, reachable: true },
+        engine: "claude",
+        notes: ["HTTP API 已启动", "数据迁移检查通过"],
+      },
+      lastBackupAt: 0,
+    }),
+    cancelPendingRelease: () => {
+      releaseActions.push("cancel-pending")
+      return { ok: false, message: "没有等待应用的预构建版本。", steps: [] }
+    },
+    rollbackRelease: () => {
+      releaseActions.push("rollback")
+      return { ok: false, message: "没有可回滚的上一版 release。", steps: [] }
+    },
     diagnostics: async () => ({
       node: process.version,
       platform: "linux x64",
@@ -146,6 +208,27 @@ export async function withApi(
       opencodeLog: { path: join(dir, "opencode.log"), bytes: 0 },
       memory: { freeBytes: 1, totalBytes: 2 },
       lastBackupAt: 0,
+      release: {
+        label: "01234567 v0.4.0",
+        current: "20261108-120000-abc",
+        previous: "20261107-120000-def",
+        lastUpdateAt: "2026-11-08T12:00:00.000Z",
+        lastUpdateStatus: "ok",
+        lastUpdateMessage: "新版本已通过健康检查。",
+      },
+      update: { channel: "stable", ref: "origin/main" },
+      startup: {
+        at: "2026-11-08T12:00:00.000Z",
+        version: "0.4.0",
+        pid: process.pid,
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        release: "20261108-120000-abc",
+        previousRelease: "20261107-120000-def",
+        migration: { ok: true, fromVersion: "1", toVersion: "1", message: "数据 schema 已是最新（v1）。" },
+        api: { requested: true, reachable: true },
+        engine: "claude",
+        notes: ["HTTP API 已启动", "数据迁移检查通过"],
+      },
     }),
     tailLogs: (source: string, lines: number) => ({
       ok: true,
@@ -160,12 +243,18 @@ export async function withApi(
       message: "检查通过。",
       steps: [{ label: "npm run check", ok: true, code: 0, output: "ok" }],
     }),
-    updateProject: async () => ({
-      ok: false,
-      message: "工作区有未提交的改动，已中止更新。",
-      steps: [{ label: "检查工作区", ok: true, code: 0, output: " M src/api.ts" }],
-    }),
-    restartBot: async () => ({ ok: true, message: "已触发重启。", steps: [] }),
+    updateProject: async () => {
+      releaseActions.push("update")
+      return {
+        ok: false,
+        message: "工作区有未提交的改动，已中止更新。",
+        steps: [{ label: "检查工作区", ok: true, code: 0, output: " M src/api.ts" }],
+      }
+    },
+    restartBot: async () => {
+      releaseActions.push("restart")
+      return { ok: true, message: "已触发重启。", steps: [] }
+    },
     startOpencode: async () => ({ ok: true, message: "OpenCode 已启动。", steps: [] }),
     stopOpencode: async () => ({ ok: true, message: "OpenCode 已停止。", steps: [] }),
     restartOpencode: async () => ({ ok: true, message: "OpenCode 已重启。", steps: [] }),
@@ -203,6 +292,19 @@ export async function withApi(
   } as unknown as OpsService
   const installs: string[] = []
   const ccCalls: string[] = []
+  const apkBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, ...Buffer.from("agent-bot-test-apk")])
+  const androidDir = join(dir, "data", "android", "releases")
+  mkdirSync(androidDir, { recursive: true })
+  writeFileSync(join(androidDir, "agent-bot-v1.1.0.apk"), apkBytes)
+  writeFileSync(join(dir, "data", "android-release.json"), JSON.stringify({
+    versionName: "1.1.0",
+    versionCode: 1_001_000,
+    apk: "android/releases/agent-bot-v1.1.0.apk",
+    sha256: createHash("sha256").update(apkBytes).digest("hex"),
+    size: apkBytes.length,
+    notes: "测试更新",
+    publishedAt: "2026-11-08T00:00:00Z",
+  }))
   let ccFailsOneRead = false
   const ccswitch = {
     available: true,
@@ -398,6 +500,7 @@ export async function withApi(
       },
       ops,
       installer,
+      androidRelease: new AndroidReleaseService({ projectDir: dir }),
       ccswitch,
       magpie: magpie as unknown as import("../src/magpie.js").MagpieService,
       fetchMedia: async (target: string) => Buffer.from(`remote:${target}`),
@@ -429,6 +532,7 @@ export async function withApi(
       installs,
       ccCalls,
       magpieCalls,
+      releaseActions,
       ccFailNextRead: () => {
         ccFailsOneRead = true
       },
@@ -4069,6 +4173,37 @@ test("POST /new and /model refuse to run while a task is active", async () => {
           const payload = (await res.json()) as { error?: string }
           assert.match(payload.error ?? "", /任务执行中/)
         }
+      } finally {
+        release?.()
+      }
+    },
+  )
+})
+
+test("ops update, restart, rollback and cancel-pending refuse to run while a task is active", async () => {
+  let release: (() => void) | undefined
+  await withApi(
+    async (_key, _engine, text) => {
+      if (!text.includes("挂起运维")) return "ok"
+      return new Promise<string>((resolve) => {
+        release = () => resolve("回复：挂起运维")
+      })
+    },
+    async (h) => {
+      const submitted = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "挂起运维任务" }),
+      })
+      assert.equal(submitted.status, 202)
+      try {
+        for (const action of ["update", "restart", "rollback", "cancel-pending"]) {
+          const res = await fetch(`${h.base}/api/v1/ops/${action}`, { method: "POST", headers: authHeaders() })
+          assert.equal(res.status, 409, `POST /ops/${action} must refuse while a task is active`)
+          const payload = (await res.json()) as { error?: string }
+          assert.match(payload.error ?? "", /任务正在执行/)
+        }
+        assert.deepEqual(h.releaseActions, [], "a refused ops action must not mutate release state")
       } finally {
         release?.()
       }

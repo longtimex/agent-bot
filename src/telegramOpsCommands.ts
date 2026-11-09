@@ -81,6 +81,13 @@ export class TelegramOpsCommands {
       ? `${formatBytes(diag.disk.freeBytes)} 可用 / ${formatBytes(diag.disk.totalBytes)}`
       : "未知"
     const memory = `${formatBytes(diag.memory.freeBytes)} 可用 / ${formatBytes(diag.memory.totalBytes)}`
+    const release = diag.release
+      ? `${escapeMarkdown(diag.release.label)}${diag.release.pending ? " · 待应用 " + escapeMarkdown(diag.release.pending) : ""}`
+      : "checkout（尚未受管更新）"
+    const update = diag.update ? `${escapeMarkdown(diag.update.channel)} · ${escapeMarkdown(diag.update.ref)}` : "—"
+    const startup = diag.startup
+      ? `${diag.startup.at ?? "?"} · ${diag.startup.failure ? `失败：${escapeMarkdown(diag.startup.failure)}` : "通过"}`
+      : "尚无记录"
     return (
       `🩺 *系统诊断*\n\n` +
       `• Node：${escapeMarkdown(diag.node)}（${escapeMarkdown(diag.platform)}）\n` +
@@ -95,6 +102,9 @@ export class TelegramOpsCommands {
       `• OpenCode 日志：${formatBytes(diag.opencodeLog.bytes)}\n` +
       `• 磁盘：${disk}\n` +
       `• 内存：${memory}\n` +
+      `• 当前 release：${release}\n` +
+      `• 更新通道：${update}\n` +
+      `• 启动自检：${startup}\n` +
       `• 最近备份：${diag.lastBackupAt ? `${formatDateTime(diag.lastBackupAt, this.#deps.timezone())}（📦 备份数据）` : "尚未备份"}`
     )
   }
@@ -317,6 +327,10 @@ export class TelegramOpsCommands {
         void this.runOpsAction(chatId, "重启 Bot", () => this.#deps.ops.restartBot())
         return
       case "update":
+        if (this.#deps.runningSince.size > 0) {
+          await this.#deps.sendText(chatId, blockedByTasks)
+          return
+        }
         void this.runOpsAction(chatId, "更新项目", () => this.#deps.ops.updateProject())
         return
       case "cc-install":
@@ -430,11 +444,11 @@ export class TelegramOpsCommands {
       chatId,
       "update",
       "⬆️ *确认更新项目？*\n\n将依次执行：\n" +
-        "1. `git status --porcelain`：工作区有未提交改动会直接中止\n" +
-        "2. `git pull --ff-only`\n" +
-        "3. `npm install --no-audit --no-fund`\n" +
-        "4. `npm run build`\n\n" +
-        "更新不会自动重启，完成后可点击「重启 Bot」。\n\n_5 分钟内有效，点击确认后执行。_",
+        "1. 自动备份 `data/*.json` 状态\n" +
+        "2. 在独立 release 目录执行 `npm ci` 与 `npm run check:release`\n" +
+        "3. 构建 `dist/` 并记录可回滚版本\n\n" +
+        "旧版本会一直运行到重启；当前目录不会被原地改动。完成后点击「重启 Bot」应用。\n" +
+        "新版本启动失败会自动回滚到上一版。\n\n_5 分钟内有效，点击确认后执行。_",
     )
   }
 

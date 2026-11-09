@@ -18,7 +18,6 @@ function modelsSource(): string {
   }
   return cached
 }
-
 /** Every `@Serializable data class` the App can decode a response into. */
 export function appModelNames(): string[] {
   return [...modelsSource().matchAll(/(?:^|\n) *data class ([A-Za-z_][A-Za-z0-9_]*)\(/g)].map((match) => match[1]!)
