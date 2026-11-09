@@ -96,7 +96,7 @@ fun OpsScreen(vm: AppViewModel) {
             item { OpsActionsCard(vm) { path, label -> pending = path to label } }
             vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.pid, status.url) { path, label -> pending = path to label } } }
             vm.opsResult?.let { result -> item { OpsResultCard(result, vm::clearOpsResult) } }
-            ReleaseCard(vm) { path, label -> pending = path to label }
+            item { ReleaseCard(vm) { path, label -> pending = path to label } }
             val diag = vm.diagnostics
             if (diag != null) {
                 item { DiagnosticsCard(diag) }
