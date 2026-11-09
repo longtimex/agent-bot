@@ -1,11 +1,14 @@
 package com.agentbot.app
 
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -115,6 +118,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // targetSdk 35 draws edge-to-edge on Android 15 whether the app asks or not. Opt in
+        // explicitly on older releases too, then let Scaffold apply the system-bar insets.
+        // The app is always dark, so force light system-bar icons instead of letting the
+        // system's day/night setting choose unreadable dark icons on a light-theme phone.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         openChatFromIntent(intent)
         handleShareIntent(intent)
         setContent {
@@ -154,7 +165,15 @@ class MainActivity : ComponentActivity() {
                                     scope.launch { drawerState.close() }
                                     vm.navigate(it)
                                 },
-                                onNewChat = { vm.newChat() },
+                                onNewChat = {
+                                    vm.newChat()
+                                    scope.launch { drawerState.close() }
+                                    vm.navigate(Screen.Chat)
+                                },
+                                newChatEnabled = !vm.hasLiveTask,
+                                connected = vm.session != null && vm.connectionError == null,
+                                sessionLabel = vm.session?.engineLabel,
+                                queueCount = vm.queue.size,
                             )
                         },
                     ) {

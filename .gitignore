@@ -7,6 +7,7 @@ dist/
 *.log
 .DS_Store
 bin/
+deploy/generated/
 
 # Android toolchain output. Anchored: an unanchored `build/` would also match
 # source directories, and `local.properties` carries this machine's SDK path.

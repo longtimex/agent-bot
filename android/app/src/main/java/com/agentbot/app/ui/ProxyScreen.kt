@@ -37,23 +37,24 @@ fun ProxyScreen(vm: AppViewModel) {
     var adding by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("网络代理", style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = { adding = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("添加", modifier = Modifier.padding(start = 4.dp))
-                }
-                TextButton(onClick = vm::refreshProxies) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+        ScreenHeader(
+            title = "网络代理",
+            subtitle = "管理 Bot 的出站代理",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row {
+                    TextButton(onClick = { adding = true }) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("添加", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(onClick = vm::refreshProxies) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
-        }
+        )
 
         Text(
             "仅 Bot 下载媒体时走代理；Telegram 与本地 OpenCode 流量保持直连。",

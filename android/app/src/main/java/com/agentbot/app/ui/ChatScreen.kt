@@ -18,8 +18,9 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Image as ComposeImage
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -51,15 +52,18 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
@@ -69,6 +73,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -99,6 +104,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -108,6 +115,8 @@ import androidx.core.content.FileProvider
 import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.TaskMedia
+import com.agentbot.app.ui.theme.AccentSoft
+import com.agentbot.app.ui.theme.Border
 import com.agentbot.app.ui.theme.BubbleUser
 import com.agentbot.app.ui.theme.OkGreen
 import com.agentbot.app.ui.theme.TextSecondary
@@ -225,6 +234,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
                 searching = !searching
                 if (!searching) query = ""
             },
+            onSuggestion = { suggestion -> vm.updateDraft(suggestion) },
         )
 
         if (searching) {
@@ -238,8 +248,6 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
             )
         }
 
-        if (vm.messages.isEmpty()) EmptyChat(sessionLabel = vm.session?.engineLabel)
-
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (searching) {
                 SearchResults(
@@ -251,6 +259,13 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
                         searching = false
                         query = ""
                     },
+                )
+            } else if (vm.messages.isEmpty()) {
+                EmptyChat(
+                    sessionLabel = vm.session?.engineLabel,
+                    connected = vm.session != null && vm.connectionError == null,
+                    onSuggestion = { suggestion -> vm.updateDraft(suggestion) },
+                    onOpenSettings = { vm.navigate(Screen.Settings) },
                 )
             } else {
                 LazyColumn(
@@ -310,12 +325,19 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
 }
 
 @Composable
-private fun ChatTopBar(vm: AppViewModel, onOpenDrawer: () -> Unit, searching: Boolean, onToggleSearch: () -> Unit) {
+private fun ChatTopBar(
+    vm: AppViewModel,
+    onOpenDrawer: () -> Unit,
+    searching: Boolean,
+    onToggleSearch: () -> Unit,
+    onSuggestion: (String) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.background) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 6.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onOpenDrawer) {
@@ -323,7 +345,7 @@ private fun ChatTopBar(vm: AppViewModel, onOpenDrawer: () -> Unit, searching: Bo
                     Icons.Filled.Menu,
                     contentDescription = "菜单",
                     tint = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(21.dp),
                 )
             }
             ModelChip(vm)
@@ -340,21 +362,74 @@ private fun ChatTopBar(vm: AppViewModel, onOpenDrawer: () -> Unit, searching: Bo
                     modifier = Modifier.size(20.dp),
                 )
             }
-            IconButton(onClick = { vm.navigate(Screen.Session) }) {
-                Icon(
-                    Icons.Filled.Tune,
-                    contentDescription = "会话设置",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            IconButton(onClick = { vm.navigate(Screen.Queue) }) {
-                Icon(
-                    Icons.Filled.List,
-                    contentDescription = "任务队列",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(20.dp),
-                )
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "更多操作",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("任务队列") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.List, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = {
+                            menuOpen = false
+                            vm.navigate(Screen.Queue)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("会话设置") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = {
+                            menuOpen = false
+                            vm.navigate(Screen.Session)
+                        },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("运行状态") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = {
+                            menuOpen = false
+                            vm.navigate(Screen.Status)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("设置") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = {
+                            menuOpen = false
+                            vm.navigate(Screen.Settings)
+                        },
+                    )
+                    if (vm.messages.isEmpty()) {
+                        HorizontalDivider()
+                        listOf(
+                            "总结一下我今天的任务进展",
+                            "查看服务器当前状态并给出建议",
+                            "帮我写一个自动化脚本",
+                        ).forEach { suggestion ->
+                            DropdownMenuItem(
+                                text = { Text(suggestion, maxLines = 1) },
+                                onClick = {
+                                    menuOpen = false
+                                    onSuggestion(suggestion)
+                                },
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -504,10 +579,13 @@ private fun ModelChip(vm: AppViewModel) {
 /** Green/red status dot; tapping it opens the settings page when things are broken. */
 @Composable
 private fun ConnectionDot(connected: Boolean, onNavigate: () -> Unit) {
+    val state = if (connected) "已连接" else "未连接"
     Box(
         modifier = Modifier
-            .size(32.dp)
-            .clickable(onClick = onNavigate),
+            .size(40.dp)
+            .clip(CircleShape)
+            .semantics { contentDescription = "$state，点击打开连接设置" }
+            .clickable(onClickLabel = "打开连接设置", onClick = onNavigate),
         contentAlignment = Alignment.Center,
     ) {
         Box(
@@ -520,21 +598,91 @@ private fun ConnectionDot(connected: Boolean, onNavigate: () -> Unit) {
 }
 
 @Composable
-private fun EmptyChat(sessionLabel: String?) {
+private fun EmptyChat(
+    sessionLabel: String?,
+    connected: Boolean,
+    onSuggestion: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 72.dp),
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        Text("⚡", style = MaterialTheme.typography.displayMedium)
-        Text("Agent Bot", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+        Surface(
+            modifier = Modifier.size(64.dp),
+            shape = MaterialTheme.shapes.large,
+            color = AccentSoft,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text("⚡", fontSize = 30.sp)
+            }
+        }
         Text(
-            sessionLabel?.let { "当前引擎：$it" } ?: "连接服务器后即可开始对话",
+            "今天想让 Agent 做什么？",
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(top = 14.dp),
+        )
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            StatusPill(
+                text = if (connected) "已连接" else "未连接",
+                tone = if (connected) StatusTone.Success else StatusTone.Error,
+            )
+            StatusPill(
+                text = sessionLabel?.takeIf { it.isNotBlank() } ?: "默认引擎",
+                tone = StatusTone.Neutral,
+            )
+        }
+        Text(
+            if (connected) "发消息开始任务，或从下面选一个常用入口。" else "先完成配对，再开始对话。",
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
-            modifier = Modifier.padding(top = 6.dp),
+            modifier = Modifier.padding(top = 12.dp),
         )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf(
+                "总结一下我今天的任务进展",
+                "查看服务器当前状态并给出建议",
+                "帮我写一个自动化脚本",
+            ).forEach { suggestion ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSuggestion(suggestion) },
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.7f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            suggestion,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text("填入", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    }
+                }
+            }
+            if (!connected) {
+                TextButton(onClick = onOpenSettings) { Text("去设置连接") }
+            }
+        }
     }
 }
 
@@ -575,11 +723,18 @@ private fun ChatBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> U
         if (isUser) {
             Box(
                 modifier = Modifier
-                    .widthIn(max = 300.dp)
+                    .widthIn(max = 320.dp)
                     .copyOnLongPress(clipboard, context, message.text)
-                    .clip(RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
+                    .clip(RoundedCornerShape(18.dp, 6.dp, 18.dp, 18.dp))
                     .background(BubbleUser)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .then(
+                        Modifier.border(
+                            1.dp,
+                            Border.copy(alpha = 0.55f),
+                            RoundedCornerShape(18.dp, 6.dp, 18.dp, 18.dp),
+                        ),
+                    )
+                    .padding(horizontal = 15.dp, vertical = 11.dp),
             ) {
                 Column {
                     if (message.text.isNotBlank()) {
@@ -624,9 +779,9 @@ private fun ChatBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> U
                     if (message.at > 0) {
                         Text(
                             AppViewModel.formatTime(message.at),
-                            fontSize = 10.sp,
-                            color = TextSecondary,
-                            modifier = Modifier.align(Alignment.End).padding(top = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary.copy(alpha = 0.8f),
+                            modifier = Modifier.align(Alignment.End).padding(top = 5.dp),
                         )
                     }
                 }
@@ -648,62 +803,122 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
             copied = false
         }
     }
-    Column(modifier = Modifier.widthIn(max = 340.dp)) {
-        SelectionContainer {
-            Column {
-                when {
-                    status == "queued" || status == "running" -> RunningLine(vm, message)
-                    status == "failed" -> {
-                        Text(
-                            message.text.ifEmpty { "任务失败" },
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    status == "cancelled" -> Text("已停止", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
-                    else -> MarkdownText(message.text)
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Surface(
+            modifier = Modifier.size(28.dp),
+            shape = CircleShape,
+            color = AccentSoft,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text("⚡", fontSize = 14.sp)
+            }
+        }
+        Column(modifier = Modifier.widthIn(max = 340.dp)) {
+            Row(
+                modifier = Modifier.padding(start = 2.dp, bottom = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Agent",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                when (status) {
+                    "failed" -> StatusPill(
+                        "失败",
+                        tone = StatusTone.Error,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                    "cancelled" -> StatusPill(
+                        "已停止",
+                        tone = StatusTone.Warning,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
                 }
             }
-        }
-        if (onRetry != null && (status == "failed" || status == "cancelled")) {
-            TextButton(onClick = onRetry) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text(if (status == "cancelled") "重新执行" else "重试", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
-        if (message.media.isNotEmpty() && message.taskId != null) {
-            AssistantMedia(vm, message.taskId, message.media)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-            Text(
-                AppViewModel.formatTime(message.at),
-                color = TextSecondary.copy(alpha = 0.6f),
-                style = MaterialTheme.typography.labelMedium,
-            )
-            if (message.text.isNotBlank()) {
-                Row(
-                    modifier = Modifier
-                        .padding(start = 6.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable {
-                            clipboard.setText(AnnotatedString(message.text))
-                            copied = true
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(6.dp, 18.dp, 18.dp, 18.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.55f)),
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+                    SelectionContainer {
+                        Column {
+                            when {
+                                status == "queued" || status == "running" -> RunningLine(vm, message)
+                                status == "failed" -> {
+                                    Text(
+                                        message.text.ifEmpty { "任务失败" },
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                                status == "cancelled" -> Text(
+                                    "已停止",
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                else -> MarkdownText(message.text)
+                            }
                         }
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
-                        contentDescription = "复制回复",
-                        tint = if (copied) MaterialTheme.colorScheme.primary else TextSecondary.copy(alpha = 0.6f),
-                        modifier = Modifier.size(12.dp),
-                    )
-                    Text(
-                        if (copied) "已复制" else "复制",
-                        color = if (copied) MaterialTheme.colorScheme.primary else TextSecondary.copy(alpha = 0.6f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(start = 3.dp),
-                    )
+                    }
+                    if (message.media.isNotEmpty() && message.taskId != null) {
+                        AssistantMedia(vm, message.taskId, message.media)
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 2.dp, top = 5.dp),
+            ) {
+                Text(
+                    AppViewModel.formatTime(message.at),
+                    color = TextSecondary.copy(alpha = 0.78f),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (message.text.isNotBlank()) {
+                    Row(
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .clickable {
+                                clipboard.setText(AnnotatedString(message.text))
+                                copied = true
+                            }
+                            .padding(horizontal = 5.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            if (copied) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                            contentDescription = "复制回复",
+                            tint = if (copied) MaterialTheme.colorScheme.primary else TextSecondary.copy(alpha = 0.78f),
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            if (copied) "已复制" else "复制",
+                            color = if (copied) MaterialTheme.colorScheme.primary else TextSecondary.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 3.dp),
+                        )
+                    }
+                }
+                if (onRetry != null && (status == "failed" || status == "cancelled")) {
+                    TextButton(
+                        onClick = onRetry,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.heightIn(min = 28.dp),
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Text(
+                            if (status == "cancelled") "重新执行" else "重试",
+                            modifier = Modifier.padding(start = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
                 }
             }
         }
@@ -752,7 +967,7 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
     LaunchedEffect(key) { vm.loadMediaImage(taskId, media) }
     if (bitmap != null) {
         val image = bitmap.asImageBitmap()
-        Image(
+        ComposeImage(
             bitmap = image,
             contentDescription = media.name.ifEmpty { media.label },
             contentScale = ContentScale.Fit,
@@ -907,7 +1122,7 @@ private fun AttachmentChip(att: PendingAttachment, onRemove: () -> Unit) {
         ) {
             val preview = thumb
             when {
-                preview != null -> Image(
+                preview != null -> ComposeImage(
                     bitmap = preview,
                     contentDescription = att.name,
                     contentScale = ContentScale.Crop,
@@ -1211,19 +1426,26 @@ private fun ChatInputBar(
             if (suggestions.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = MaterialTheme.shapes.medium,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.8f)),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp)
                         .heightIn(max = 260.dp),
                 ) {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            "命令",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 2.dp),
+                        )
                         suggestions.forEach { command ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { runCommand(command) }
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
@@ -1235,6 +1457,8 @@ private fun ChatInputBar(
                                     command.desc,
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.padding(start = 12.dp),
                                 )
                             }
@@ -1294,11 +1518,19 @@ private fun ChatInputBar(
                     )
                 }
             }
-            Row(
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = MaterialTheme.shapes.large,
+                border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.8f)),
                 modifier = Modifier
                     .fillMaxWidth()
                     .imePadding()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
+            ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
                 Box {
@@ -1351,11 +1583,11 @@ private fun ChatInputBar(
                     modifier = Modifier.weight(1f),
                     enabled = !recording,
                     placeholder = { Text("发送消息，或输入 / 执行命令…", color = TextSecondary) },
-                    shape = RoundedCornerShape(24.dp),
+                    shape = RoundedCornerShape(20.dp),
                     maxLines = 5,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.surfaceVariant,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                        unfocusedBorderColor = Border.copy(alpha = 0.75f),
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface,
                     ),
@@ -1389,6 +1621,7 @@ private fun ChatInputBar(
                         )
                     }
                 }
+            }
             }
             if (enginePicker) {
                 val defaultEngine = vm.session?.engine

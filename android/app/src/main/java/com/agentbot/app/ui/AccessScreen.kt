@@ -37,23 +37,24 @@ fun AccessScreen(vm: AppViewModel) {
     var pendingRemove by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("访问白名单", style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = { adding = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("添加", modifier = Modifier.padding(start = 4.dp))
-                }
-                TextButton(onClick = vm::refreshAccess) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+        ScreenHeader(
+            title = "访问白名单",
+            subtitle = "控制谁可以驱动云端 Bot",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row {
+                    TextButton(onClick = { adding = true }) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("添加", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(onClick = vm::refreshAccess) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
-        }
+        )
 
         Text(
             "让对方给 Bot 发送 /start：被拒回复里会显示数字 ID。改动写入 .env 并立即生效；不能移除自己或清空白名单。",

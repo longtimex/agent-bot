@@ -8,8 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,14 +23,24 @@ fun StatusScreen(vm: AppViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
+            .padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("运行状态", style = MaterialTheme.typography.titleLarge)
+        ScreenHeader(
+            title = "运行状态",
+            subtitle = "服务健康、连接信息与今日用量",
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                StatusPill(
+                    text = if (vm.health?.ok == true) "在线" else "离线",
+                    tone = if (vm.health?.ok == true) StatusTone.Success else StatusTone.Warning,
+                )
+            },
+        )
 
         val status = vm.status
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppCard {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (status == null) {
                     Text("加载中…", color = TextSecondary)
                 } else {
@@ -62,9 +70,9 @@ fun StatusScreen(vm: AppViewModel) {
 
         val info = vm.serverInfo
         if (info != null) {
-            Text("连接信息", style = MaterialTheme.typography.titleMedium)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SectionLabel("连接信息")
+            AppCard {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     StatusLine("服务器", vm.serverUrl)
                     StatusLine("API 监听", "${info.api.bind}:${info.api.port}" + if (info.api.enabled) "" else "（未启用）")
                     StatusLine("引擎", info.engineLabel ?: info.engine ?: "-")
@@ -80,9 +88,9 @@ fun StatusScreen(vm: AppViewModel) {
 
         val usage = vm.usage
         if (usage != null) {
-            Text("使用统计", style = MaterialTheme.typography.titleMedium)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SectionLabel("使用统计")
+            AppCard {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     StatusLine("累计任务", "${usage.tasks} 次")
                     val rate = if (usage.tasks > 0) usage.ok * 100 / usage.tasks else 0
                     StatusLine("成功率", "$rate%")
@@ -105,9 +113,9 @@ fun StatusScreen(vm: AppViewModel) {
             }
 
             if (vm.trend.isNotEmpty()) {
-                Text("近 7 天", style = MaterialTheme.typography.titleMedium)
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionLabel("近 7 天")
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         val max = vm.trend.maxOfOrNull { it.tasks }?.coerceAtLeast(1) ?: 1
                         vm.trend.forEach { day ->
                             Column {
@@ -138,11 +146,11 @@ fun StatusScreen(vm: AppViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
-                Text("每日报告", style = MaterialTheme.typography.titleMedium)
+                SectionLabel("每日报告")
                 androidx.compose.material3.TextButton(onClick = { vm.shareReport() }) { Text("📤 分享") }
             }
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppCard {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     StatusLine("日期", report.day)
                     val totals = report.totals
                     StatusLine("今日任务", "${totals.tasks} 次（成功 ${totals.ok} · 失败 ${totals.failed} · 取消 ${totals.cancelled}）")

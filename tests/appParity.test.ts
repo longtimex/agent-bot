@@ -316,6 +316,52 @@ test("the Android source gate refuses release signing material that is not ignor
 })
 
 /**
+ * The drawer is the App's full map. Grouping is cosmetic, but dropping a route while rearranging
+ * it silently removes a page: the screen is still in MainActivity, yet no way to reach it. The
+ * chat bar also regressed into a row of six icons, so keep the secondary actions in the overflow.
+ */
+test("the drawer keeps every screen reachable and the chat bar stays uncluttered", () => {
+  const drawer = readFileSync(`${UI_DIR}/AppDrawer.kt`, "utf8")
+  const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
+  const routes = [
+    "History", "Reminders", "Schedules", "Session", "Queue", "Agents", "Ops", "Proxy",
+    "Aliases", "Access", "Models", "Cc", "Magpie", "Hermes", "Config", "Status", "Help", "Settings",
+  ]
+  assert.deepEqual(
+    routes.filter((route) => !drawer.includes(`Screen.${route}`)),
+    [],
+    "a drawer route disappeared during the regrouping",
+  )
+  assert.ok(drawer.includes('DrawerSection("对话")'), "the drawer needs named groups, not a flat list")
+  assert.ok(chat.includes("Icons.Filled.MoreVert"), "secondary chat actions belong in an overflow menu")
+  const topBar = /private fun ChatTopBar\([\s\S]*?\n}\n/.exec(chat)?.[0]
+  assert.ok(topBar, "ChatTopBar must stay one function")
+  const iconButtons = (topBar.match(/IconButton\(/g) ?? []).length
+  assert.ok(iconButtons <= 4, `ChatTopBar has ${iconButtons} icon buttons; keep the header to menu/model/status/search/overflow`)
+  assert.ok(topBar.includes("Screen.Session") && topBar.includes("Screen.Queue"), "overflow must keep session settings and queue")
+
+  // The shared visual system is the base of the newer screens; losing it would not fail the
+  // Kotlin bracket gate (the screens would still be valid), but would quietly flatten the UI.
+  const shared = readFileSync(`${UI_DIR}/UiComponents.kt`, "utf8")
+  for (const component of ["ScreenHeader", "SectionLabel", "AppCard", "StatusPill", "EmptyState"]) {
+    assert.ok(shared.includes(`fun ${component}(`), `UiComponents.kt must keep ${component}`)
+  }
+  for (const screen of ["SettingsScreen.kt", "StatusScreen.kt", "ListScreens.kt", "HelpScreen.kt"]) {
+    const source = readFileSync(`${UI_DIR}/${screen}`, "utf8")
+    assert.ok(source.includes("ScreenHeader("), `${screen} must use the shared page header`)
+  }
+  const titled = [
+    "SessionScreen.kt", "AgentsScreen.kt", "ModelsScreen.kt", "CcScreen.kt", "MagpieScreen.kt",
+    "HermesScreen.kt", "ConfigScreen.kt", "AccessScreen.kt", "ProxyScreen.kt", "OpsScreen.kt",
+  ]
+  for (const screen of titled) {
+    const source = readFileSync(`${UI_DIR}/${screen}`, "utf8")
+    assert.ok(source.includes("ScreenHeader("), `${screen} must use the shared page header`)
+    assert.ok(!/Text\("[^"]+", style = MaterialTheme\.typography\.titleLarge\)/.test(source), `${screen} still has a detached page title`)
+  }
+})
+
+/**
  * Pairing is the App's first network moment and both sides type it by hand: the bot writes
  * `{url, token, enc}` into a QR, the settings screen reads those names back. A rename on either
  * side still scans "fine" and leaves the App with a blank address, so the two key lists are tied.
@@ -331,6 +377,38 @@ test("the pairing QR carries exactly the keys the App's scanner reads", () => {
   assert.deepEqual(Object.keys(pairingQrPayload("http://192.168.1.10:3080", "tok")).sort(), ["token", "url"])
   assert.deepEqual(Object.keys(pairingQrPayload("http://192.168.1.10:3080", "tok", key)).sort(), ["enc", "token", "url"])
 })
+
+test("scanning a pairing QR fills the form instead of saving an unreviewed address", () => {
+  const scanner = readFileSync(SETTINGS_SOURCE, "utf8")
+  const handler = /val scanner = rememberLauncherForActivityResult[\s\S]*?\n    }\n/.exec(scanner)?.[0]
+  assert.ok(handler, "the QR result handler must stay a single block in SettingsScreen.kt")
+  assert.ok(handler.includes("baseUrl = ApiFormat.normalizeBaseUrl(scannedUrl)"), "the scanned URL must fill the field")
+  assert.ok(handler.includes("token = scannedToken"), "the scanned token must fill the field")
+  assert.ok(!handler.includes("vm.saveConnection"), "a scan must not save before the user checks the address")
+})
+
+test("a failed pairing probe leaves the saved connection untouched", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const save = /suspend fun saveConnection[\s\S]*?\n    }\n/.exec(viewModel)?.[0]
+  assert.ok(save, "saveConnection must stay a suspend function in AppViewModel.kt")
+  const writes = save.indexOf("settings.baseUrl = candidate.baseUrl")
+  const healthProbe = save.indexOf("api.health(candidate)")
+  const sessionProbe = save.indexOf("api.session(candidate)")
+  assert.ok(writes >= 0 && healthProbe >= 0 && sessionProbe >= 0, "saveConnection must probe before writing settings")
+  assert.ok(writes > healthProbe && writes > sessionProbe, "the settings write must come after both health and session succeed")
+  const failure = /catch \(err: Exception\) \{[\s\S]*?Result\.failure\(err\)/.exec(save)?.[0]
+  assert.ok(failure, "saveConnection must keep an explicit failure path")
+  assert.ok(!/\b(?:health|session)\s*=\s*null\b/.test(failure), "a failed probe must not wipe the live state of the saved connection")
+})
+
+test("the settings screen previews the real API path and warns about phone loopback", () => {
+  const scanner = readFileSync(SETTINGS_SOURCE, "utf8")
+  const client = readFileSync(CLIENT_SOURCE, "utf8")
+  assert.ok(scanner.includes("ApiFormat.apiUrl(normalized)"), "the settings field must preview /api/v1")
+  assert.ok(scanner.includes("ApiFormat.connectionWarning(normalized)"), "the settings field must explain unreachable addresses")
+  assert.ok(client.includes('host == "localhost" || host == "127.0.0.1"'), "loopback detection must cover localhost and 127.0.0.1")
+})
+
 
 /**
  * The App appends `/api/v1` to whatever it is given, so an address without a host — the shape the

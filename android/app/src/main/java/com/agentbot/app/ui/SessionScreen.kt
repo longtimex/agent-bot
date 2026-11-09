@@ -82,7 +82,11 @@ fun SessionScreen(vm: AppViewModel) {
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("会话设置", style = MaterialTheme.typography.titleLarge)
+        ScreenHeader(
+            title = "会话设置",
+            subtitle = "引擎、上下文、时区与对端会话",
+            onBack = { vm.navigate(Screen.Chat) },
+        )
 
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(
@@ -400,29 +404,30 @@ fun QueueScreen(vm: AppViewModel) {
         }
     }
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("任务队列", style = MaterialTheme.typography.titleLarge)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (vm.queue.isNotEmpty()) {
-                    TextButton(onClick = { confirmClear = true }) {
-                        Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text(
-                            "清空排队",
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(start = 4.dp),
-                        )
+        ScreenHeader(
+            title = "任务队列",
+            subtitle = "排队、执行中与最近完成的任务",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (vm.queue.isNotEmpty()) {
+                        TextButton(onClick = { confirmClear = true }) {
+                            Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Text(
+                                "清空",
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(start = 4.dp),
+                            )
+                        }
+                    }
+                    TextButton(onClick = vm::refreshQueue) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
                     }
                 }
-                TextButton(onClick = vm::refreshQueue) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
             }
-        }
+        )
 
         if (vm.queue.isEmpty() && vm.recentTasks.isEmpty()) {
             Column(

@@ -29,6 +29,12 @@ export interface SetupResult {
   }
   /** Values written to `.env`, so an in-process first-run wizard can apply them immediately. */
   updates?: Record<string, string>
+  /** Optional tool setup stage; only the explicit `npm run setup` entry point enables it. */
+  tools?: {
+    ok: boolean
+    installed: string[]
+    failed: string[]
+  }
   reason?: string
 }
 
@@ -40,6 +46,8 @@ export interface SetupDeps {
   fetch: typeof fetch
   envPath: string
   detectTimeoutMs?: number
+  /** Runs the Agent CLI / magpie / cc-switch stage after the client configuration succeeds. */
+  setupTools?: () => Promise<{ ok: boolean; installed: string[]; failed: string[] }>
 }
 
 interface BotInfo {
@@ -751,6 +759,7 @@ export async function runClientSetup(deps: SetupDeps): Promise<SetupResult> {
   deps.print("")
   deps.print(`✅ 已完成控制端：${completed.map((client) => CLIENT_LABELS[client]).join("、")}`)
   deps.print("后续可在安装目录随时运行 npm run clients，添加或修改其他控制端。")
+  const tools = deps.setupTools ? await deps.setupTools() : undefined
   return {
     ok: true,
     clients: completed,
@@ -759,13 +768,51 @@ export async function runClientSetup(deps: SetupDeps): Promise<SetupResult> {
     users: telegram?.users,
     botUsername: telegram?.botUsername,
     api: android?.api,
+    ...(tools ? { tools } : {}),
   }
 }
 
-export async function setupFromCli(): Promise<SetupResult> {
+export interface SetupCliOptions {
+  /** `install` offers tools after the client stage; `check` only detects; `off` skips it. */
+  tools?: SetupToolMode
+}
+
+export type SetupToolMode = "install" | "check" | "off"
+
+/** `npm run setup` installs tools by default; the first-run and clients-only entry points opt out. */
+export function parseSetupToolMode(args: string[]): SetupToolMode {
+  if (args.includes("--clients-only") || args.includes("--no-tools")) return "off"
+  if (args.includes("--check-tools")) return "check"
+  return "install"
+}
+
+export async function setupFromCli(options: SetupCliOptions = {}): Promise<SetupResult> {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    process.stdout.write(
+      [
+        "Usage: npm run setup -- [--check-tools | --no-tools]",
+        "       npm run clients",
+        "",
+        "npm run setup    configure control clients, then detect and offer Agent CLI / magpie / cc-switch",
+        "npm run clients  configure control clients only; keep the current optional tools unchanged",
+        "",
+        "  --check-tools  detect optional tools after client setup, but do not install them",
+        "  --no-tools     skip the optional tool stage entirely",
+      ].join("\n") + "\n",
+    )
+    return { ok: true, reason: "help" }
+  }
   if (!canRunSetup()) {
     throw new Error("当前环境不是交互式终端，无法运行连接向导。请在终端中运行 npm run setup 或 npm run clients。")
   }
+  const toolMode = options.tools ?? "off"
+  const setupTools = toolMode !== "off"
+    ? async () => {
+        const { runToolWizard } = await import("./install-tools-cli.js")
+        const result = await runToolWizard({ interactive: true, allowExternal: toolMode === "install" })
+        return { ok: result.ok, installed: result.installed, failed: result.failed }
+      }
+    : undefined
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
     return await runClientSetup({
@@ -773,6 +820,7 @@ export async function setupFromCli(): Promise<SetupResult> {
       print: (line = "") => process.stdout.write(`${line}\n`),
       fetch: globalThis.fetch.bind(globalThis),
       envPath: resolve(".env"),
+      ...(setupTools ? { setupTools } : {}),
     })
   } finally {
     rl.close()

@@ -73,17 +73,18 @@ fun AgentsScreen(vm: AppViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("引擎管理", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = vm::refreshAgents) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("刷新", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
+        ScreenHeader(
+            title = "引擎管理",
+            subtitle = "检测、安装与切换 Agent CLI",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                TextButton(onClick = vm::refreshAgents) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            },
+        )
 
         // Telegram's /agent panel names the current engine, so the management page does too
         Text(

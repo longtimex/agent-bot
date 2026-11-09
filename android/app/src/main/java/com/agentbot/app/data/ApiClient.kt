@@ -19,6 +19,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.net.URI
+import javax.net.ssl.SSLException
 import java.util.concurrent.TimeUnit
 
 /** A request the server answered with a non-2xx status; message carries the API error text. */
@@ -35,6 +41,23 @@ class NotConfiguredException : Exception("尚未配置服务器地址与令牌")
  * `err.message` verbatim.
  */
 private const val UNAUTHORIZED_HINT = "访问令牌已失效，请在「设置」重新填写或扫码配对"
+
+/**
+ * OkHttp's exceptions name classes and hostnames, which is useful in a crash report and useless
+ * on a pairing screen. The three failures a tunnel setup actually produces each get an action:
+ * the tunnel stopped or the address/port is wrong, DNS does not resolve, or TLS was intercepted.
+ */
+private fun networkHint(err: IOException): String = when (err) {
+    is UnknownHostException ->
+        "无法解析服务器地址。请核对隧道域名/IP；Instabox 端口发布或 Cloudflare 临时隧道的地址每次重建可能变化。"
+    is SocketTimeoutException ->
+        "连接超时。确认 Bot 与隧道仍在运行、端口指向正确，并检查手机网络。"
+    is ConnectException ->
+        "无法连接服务器。请确认 API 已启动、隧道/端口发布仍在运行，且 API_PUBLIC_URL 与当前隧道地址一致。"
+    is SSLException ->
+        "HTTPS 证书校验失败。请检查反向代理证书与系统时间；临时调试可改用 Tailscale 内网 HTTP，公网不要关闭证书校验。"
+    else -> "网络连接失败：${err.message ?: err.javaClass.simpleName}"
+}
 
 /**
  * Shown when the stored pairing key cannot be used at all. Copying the key out of Telegram's
@@ -192,8 +215,16 @@ class ApiClient {
         return builder.build()
     }
 
+    /** Keeps the exception type (polling treats IOException as transient) but replaces its text. */
+    private fun openCall(request: Request, client: OkHttpClient = http): okhttp3.Response =
+        try {
+            client.newCall(request).execute()
+        } catch (err: IOException) {
+            throw IOException(networkHint(err), err)
+        }
+
     private suspend fun execute(request: Request, client: OkHttpClient = http): String = withContext(Dispatchers.IO) {
-        client.newCall(request).execute().use { res ->
+        openCall(request, client).use { res ->
             observeServerClock(res)
             val text = res.body?.string().orEmpty()
             // 错误响应同样可能是密文（服务端对所有 JSON 应答一视同仁），先还原再提取消息
@@ -357,8 +388,7 @@ class ApiClient {
      */
     suspend fun streamTask(connection: Connection, id: String, onEvent: suspend (Task) -> Unit): Unit =
         withContext(Dispatchers.IO) {
-            val call = http.newCall(request(connection, "GET", "/task/$id/events"))
-            call.execute().use { res ->
+            openCall(request(connection, "GET", "/task/$id/events")).use { res ->
                 if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
                 // A task that had already settled when the request arrived answers with one
                 // plain JSON snapshot instead of a stream (src/api.ts), so read that too.
@@ -441,7 +471,7 @@ class ApiClient {
      */
     suspend fun taskMediaTo(connection: Connection, taskId: String, index: Int, dest: File): File =
         withContext(Dispatchers.IO) {
-            http.newCall(request(connection, "GET", "/task/$taskId/media/$index")).execute().use { res ->
+            openCall(request(connection, "GET", "/task/$taskId/media/$index")).use { res ->
                 if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
                 val input = res.body?.byteStream() ?: throw ApiException(500, "空的媒体响应")
                 // A distinct scratch name per call: the bubble's thumbnail and an explicit tap can
@@ -624,7 +654,7 @@ class ApiClient {
             val part = File(dest.parentFile, "${dest.name}.part")
             part.parentFile?.mkdirs()
             part.delete()
-            http.newCall(request(connection, "GET", "/android/release/apk")).execute().use { res ->
+            openCall(request(connection, "GET", "/android/release/apk")).use { res ->
                 observeServerClock(res)
                 if (!res.isSuccessful) {
                     val text = res.body?.string().orEmpty()
@@ -976,7 +1006,7 @@ class ApiClient {
     /** Fetches the history export document (markdown or json) as raw text. */
     suspend fun exportHistory(connection: Connection, format: String = "markdown"): String =
         withContext(Dispatchers.IO) {
-            http.newCall(request(connection, "GET", "/export?format=$format")).execute().use { res ->
+            openCall(request(connection, "GET", "/export?format=$format")).use { res ->
                 val text = res.body?.string().orEmpty()
                 if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, text))
                 text
@@ -996,7 +1026,7 @@ class ApiClient {
     /** Downloads the gzipped data backup produced by GET /ops/backup. */
     suspend fun backupData(connection: Connection): ByteArray =
         withContext(Dispatchers.IO) {
-            http.newCall(request(connection, "GET", "/ops/backup")).execute().use { res ->
+            openCall(request(connection, "GET", "/ops/backup")).use { res ->
                 val bytes = res.body?.bytes() ?: ByteArray(0)
                 if (!res.isSuccessful) {
                     throw ApiException(res.code, serverFailure(res.code, bytes.decodeToString()))
@@ -1093,6 +1123,43 @@ object ApiFormat {
     }
 
     private val HOST_WITH_PATH: Regex = Regex("https?://[^/]+(/[^/]+)*$")
+
+    /** The endpoint every request actually hits, shown under the field so a subpath typo is visible. */
+    fun apiUrl(baseUrl: String): String = "${normalizeBaseUrl(baseUrl).trimEnd('/')}/api/v1"
+
+    /**
+     * Catches the pairing mistakes that make an address unreachable before the request leaves the
+     * phone. `127.0.0.1` on a phone is the phone itself, not the Instabox VM, and public plain HTTP
+     * sends both content and the Bearer token in clear text. Returns null when there is nothing to
+     * warn about.
+     */
+    fun connectionWarning(baseUrl: String): String? {
+        val url = normalizeBaseUrl(baseUrl)
+        if (url.isBlank()) return null
+        val uri = runCatching { URI(url) }.getOrNull() ?: return "地址格式无效，请填写 http(s)://主机[:端口][/子路径]。"
+        val host = uri.host?.removeSurrounding("[", "]")?.lowercase() ?: return "地址缺少主机名。"
+        if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0") {
+            return "这是手机自己的回环地址，不是云电脑。请填 Instabox 端口发布/隧道地址，或改用 USB adb reverse。"
+        }
+        if (uri.scheme != "https" && !isPrivateHost(host) && !host.endsWith(".local") && host != "localhost") {
+            return "公网 HTTP 会明文传输令牌和对话，建议使用 Instabox HTTPS 端口发布、反向代理或 Tailscale；若坚持 HTTP 请开启 API_ENCRYPTION=1。"
+        }
+        return null
+    }
+
+    private fun isPrivateHost(host: String): Boolean {
+        val octets = host.split('.').mapNotNull { it.toIntOrNull() }
+        if (octets.size == 4 && octets.all { it in 0..255 }) {
+            return octets[0] == 10 ||
+                (octets[0] == 172 && octets[1] in 16..31) ||
+                (octets[0] == 192 && octets[1] == 168) ||
+                (octets[0] == 169 && octets[1] == 254) ||
+                (octets[0] == 100 && octets[1] in 64..127) ||
+                octets[0] == 127
+        }
+        // A domain such as fdns.example.com starts with "fd" too; only IPv6 literals have ':'.
+        return host.contains(':') && (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:"))
+    }
 
     fun epochMsToUtcString(ms: Long): String =
         java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)

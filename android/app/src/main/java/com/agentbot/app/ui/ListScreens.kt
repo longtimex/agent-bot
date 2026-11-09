@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -16,9 +17,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -101,69 +107,92 @@ private fun rememberClock(vm: AppViewModel): Long {
 fun HistoryScreen(vm: AppViewModel) {
     var selected by remember { mutableStateOf<HistoryEntry?>(null) }
     val clipboard = LocalClipboardManager.current
+    var exporting by remember { mutableStateOf(false) }
+    var actionsOpen by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    // Telegram's /export accepts md or json, so the sheet offers both
+    fun share(format: String) {
+        if (exporting) return
+        exporting = true
+        scope.launch {
+            runCatching { vm.historyExport(format) }
+                .onSuccess { text ->
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = if (format == "json") "application/json" else "text/markdown"
+                        putExtra(android.content.Intent.EXTRA_TITLE, "Agent Bot 任务历史")
+                        putExtra(android.content.Intent.EXTRA_TEXT, text)
+                    }
+                    context.startActivity(
+                        android.content.Intent.createChooser(send, "分享任务历史"),
+                    )
+                }
+                .onFailure { vm.connectionError = "导出失败：${it.message}" }
+            exporting = false
+        }
+    }
+    // A `/export json` typed in the chat box arrives here
+    LaunchedEffect(vm.exportRequested) {
+        vm.exportRequested?.let {
+            vm.clearExportRequest()
+            share(it)
+        }
+    }
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("任务历史", style = MaterialTheme.typography.titleLarge)
-            Row {
-                var exporting by remember { mutableStateOf(false) }
-                var exportMenu by remember { mutableStateOf(false) }
-                val context = androidx.compose.ui.platform.LocalContext.current
-                val scope = androidx.compose.runtime.rememberCoroutineScope()
-                // Telegram's /export accepts md or json, so the sheet offers both
-                fun share(format: String) {
-                    if (exporting) return
-                    exporting = true
-                    scope.launch {
-                        runCatching { vm.historyExport(format) }
-                            .onSuccess { text ->
-                                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                    type = if (format == "json") "application/json" else "text/markdown"
-                                    putExtra(android.content.Intent.EXTRA_TITLE, "Agent Bot 任务历史")
-                                    putExtra(android.content.Intent.EXTRA_TEXT, text)
-                                }
-                                context.startActivity(
-                                    android.content.Intent.createChooser(send, "分享任务历史"),
-                                )
-                            }
-                            .onFailure { vm.connectionError = "导出失败：${it.message}" }
-                        exporting = false
-                    }
-                }
-                // A `/export json` typed in the chat box arrives here
-                LaunchedEffect(vm.exportRequested) {
-                    vm.exportRequested?.let {
-                        vm.clearExportRequest()
-                        share(it)
-                    }
-                }
+        ScreenHeader(
+            title = "任务历史",
+            subtitle = "查看执行结果，按天归档",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
                 Box {
-                    TextButton(onClick = { exportMenu = true }, enabled = !exporting) {
-                        Text(if (exporting) "导出中…" else "分享")
+                    IconButton(onClick = { actionsOpen = true }, enabled = !exporting) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "历史操作",
+                            tint = TextSecondary,
+                        )
                     }
-                    DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
+                    DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text("Markdown（默认）") },
+                            text = { Text("分享 Markdown") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.IosShare, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
                             onClick = {
-                                exportMenu = false
+                                actionsOpen = false
                                 share("markdown")
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("JSON") },
+                            text = { Text("分享 JSON") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.IosShare, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
                             onClick = {
-                                exportMenu = false
+                                actionsOpen = false
                                 share("json")
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("清空历史", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Filled.Delete,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            },
+                            onClick = {
+                                actionsOpen = false
+                                vm.clearHistory()
                             },
                         )
                     }
                 }
-                TextButton(onClick = { vm.clearHistory() }) { Text("清空", color = MaterialTheme.colorScheme.error) }
-            }
-        }
+            },
+        )
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 // Same window choice Telegram offers through `/history <条数>`
@@ -190,7 +219,11 @@ fun HistoryScreen(vm: AppViewModel) {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("还没有任务记录", color = TextSecondary, style = MaterialTheme.typography.bodyLarge)
+                EmptyState(
+                    icon = Icons.Filled.History,
+                    title = "还没有任务记录",
+                    message = "在聊天页发出第一条任务后，完成记录会显示在这里。",
+                )
             }
             return@Column
         }
@@ -272,10 +305,11 @@ fun RemindersScreen(vm: AppViewModel) {
     var snoozeTarget by remember { mutableStateOf<com.agentbot.app.data.Reminder?>(null) }
     val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Text(
-            "提醒",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+        ScreenHeader(
+            title = "提醒",
+            subtitle = "到点由服务器推送，不依赖 App 在线",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            onBack = { vm.navigate(Screen.Chat) },
         )
         if (vm.reminders.isEmpty()) {
             Column(
@@ -283,7 +317,11 @@ fun RemindersScreen(vm: AppViewModel) {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("还没有提醒。点右下角 + 创建。", color = TextSecondary, style = MaterialTheme.typography.bodyLarge)
+                EmptyState(
+                    icon = Icons.Filled.Notifications,
+                    title = "还没有提醒",
+                    message = "点右下角 + 创建，支持 30m、明早 8 点等自然时间。",
+                )
             }
         } else {
             LazyColumn(
@@ -363,13 +401,14 @@ fun SchedulesScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
     val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Text(
-            "定时 AI 任务",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+        ScreenHeader(
+            title = "定时 AI 任务",
+            subtitle = "按计划自动执行，结果推送到 Telegram",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            onBack = { vm.navigate(Screen.Chat) },
         )
         Text(
-            "「▶️ 运行」立即执行一次，不影响原定时间；结果会发送到 Telegram。",
+            "「▶️ 运行」立即执行一次，不影响原定时间。",
             color = TextSecondary,
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.padding(horizontal = 20.dp),
@@ -380,7 +419,11 @@ fun SchedulesScreen(vm: AppViewModel) {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("还没有定时任务。点右下角 + 创建。", color = TextSecondary, style = MaterialTheme.typography.bodyLarge)
+                EmptyState(
+                    icon = Icons.Filled.Schedule,
+                    title = "还没有定时任务",
+                    message = "点右下角 + 创建，让 Agent 按计划自动执行并推送结果。",
+                )
             }
         } else {
             LazyColumn(

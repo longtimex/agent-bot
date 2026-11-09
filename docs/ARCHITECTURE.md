@@ -46,7 +46,12 @@ Telegram / Feishu / Android App
 - `src/updateOrchestrator.ts`：更新生命周期：备份状态 → 构建与门禁 → pending → 取消 pending/回滚；不直接改运行中的 checkout。
 - `src/updateChecker.ts`：`stable` / `beta` 更新目标、只读更新检查与 release 诊断。
 - `src/releaseStatus.ts`：`GET /ops/release` 的轻量版本卡，不触发 git/OpenCode/磁盘探针。
-- `src/release-control.ts`：`scripts/apply-release.sh` 使用的状态 CLI（entry/current-id/activate/rollback/record-ok），保证 shell 不手写 JSON。
+- `src/release-control.ts`：兼容的 release 状态 CLI（entry/current-id/activate/rollback/record-ok）；新的生命周期入口不再依赖 shell 拼状态。
+- `src/bot-cli.ts`：统一生命周期编排入口。`install/setup/status/doctor/logs/run/start/stop/restart/update/opencode/uninstall` 都从这里进入，避免 npm 脚本、systemd unit、聊天运维各走一套逻辑。
+- `src/runtime.ts`：运行时事实来源：supervisor 检测、PID/锁身份、current release 入口、安装清单、日志路径与健康探针。PID 记录同时保存进程启动时间，避免系统复用 PID 后误杀无关进程。
+- `src/release-restart.ts`：systemd 发布切换：激活 pending、重启 unit、等待本次启动健康检查，失败时回滚并重启旧版本，结果写入 `data/releases/state.json`。
+- `src/lifecycle-options.ts`：生命周期命令的共享参数解析；未知参数留给 `setup` 等子命令。
+- `src/lifecycle-files.ts`：只删除带 `managed by agent-bot` 标记的 launcher/unit，并提供 `DATA_DIR` 删除边界校验（拒绝 `/`、项目根本身及项目目录的上级）。
 - `src/startupSelfCheck.ts`：启动自检与失败记录；成功记录写在各控制端启动之后，供无 API 部署做发布健康检查。
 - `src/dataMigration.ts`：启动前的数据 schema 快照、迁移标记与保留策略。
 - `src/androidRelease.ts`：Android 更新清单校验、APK 路径边界、SHA-256/大小复核与下载路由。
@@ -116,8 +121,11 @@ Telegram / 飞书消息 / App 任务
 
 | 脚本 | 边界 |
 | --- | --- |
-| `scripts/run-current.sh` | systemd 唯一入口，只选择并 `exec` current release；首次部署回退 checkout 的 `dist/index.js` |
-| `scripts/apply-release.sh` | 激活 pending 或重启 current，健康检查失败回滚；`RELEASE_SUPERVISOR=systemd` 时用 `systemctl`/`systemd-run`，否则管理脚本 PID |
+| `scripts/run-current.sh` | 兼容入口，委托 `bot-cli run`；优先使用 current release 的构建，首次部署回退 checkout 的 `dist/index.js` |
+| `scripts/apply-release.sh` | 兼容入口，委托 `bot-cli restart`（含 pending 激活、健康检查与回滚） |
+| `scripts/restart.sh` | 兼容入口，委托 `bot-cli restart`；与 `npm run bot -- restart` 共用同一实现 |
+| `src/bot-cli.ts` | 生命周期唯一编排入口；`install/start/stop/restart/update/uninstall` 与 systemd/script supervisor 共用进程识别和健康检查 |
+| `src/release-restart.ts` | systemd 发布切换与回滚；成功/失败结果写入 release state |
 | `scripts/release-health.mjs` | 发布健康探针；API 可用时用 `/health`，否则要求本次启动的 self-check |
 | `scripts/publish-android-release.mjs` | 发布 App APK、按实际字节计算哈希/大小并原子写清单 |
 | `scripts/check-release.mjs` | 发布门禁（类型、Android 源码、体积、单测） |

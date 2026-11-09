@@ -45,23 +45,24 @@ fun MagpieScreen(vm: AppViewModel) {
     val overview = vm.magpie
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("magpie 网关", style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = { running = true }) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("执行命令", modifier = Modifier.padding(start = 4.dp))
-                }
-                TextButton(onClick = vm::refreshMagpie) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+        ScreenHeader(
+            title = "magpie 网关",
+            subtitle = "模型网关状态与服务器命令",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row {
+                    TextButton(onClick = { running = true }) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("执行", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(onClick = vm::refreshMagpie) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
-        }
+        )
 
         if (vm.magpieBusy) {
             LinearProgressIndicator(

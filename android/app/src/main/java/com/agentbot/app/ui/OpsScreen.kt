@@ -58,21 +58,22 @@ fun OpsScreen(vm: AppViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("运维中心", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = {
-                vm.refreshDiagnostics()
-                vm.refreshLogs()
-                vm.refreshOpsService()
-            }) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("刷新", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
+        ScreenHeader(
+            title = "运维中心",
+            subtitle = "诊断、日志、服务与发布管理",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                TextButton(onClick = {
+                    vm.refreshDiagnostics()
+                    vm.refreshLogs()
+                    vm.refreshOpsService()
+                }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            },
+        )
 
         if (vm.opsBusy || busyLabel != null) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {

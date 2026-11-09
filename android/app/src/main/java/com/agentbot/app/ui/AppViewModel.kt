@@ -656,19 +656,37 @@ class AppViewModel(
             Screen.Help -> refreshHelp()
             else -> Unit
         }
-        // 未配置连接时导航不再发出注定失败的请求:设置页保存后 saveConnection 会触发
+        // 未配置连接时导航不再发出注定失败的请求；设置页会在验证成功后建立会话。
         if (session == null && configured) refreshSession()
     }
 
-    fun saveConnection(baseUrl: String, token: String, encKey: String? = null) {
-        settings.baseUrl = baseUrl
-        settings.token = token
-        settings.encKey = encKey.orEmpty()
-        configured = settings.connection() != null
-        session = null
-        health = null
-        refreshSession()
-        navigate(Screen.Chat)
+    /**
+     * Probes the typed pairing before replacing what is saved. A wrong tunnel address must fail
+     * in front of the fields that need fixing and must not clobber a working old connection; only
+     * after health and session both answer does the repository change and the chat open.
+     */
+    suspend fun saveConnection(baseUrl: String, token: String, encKey: String? = null): Result<Unit> {
+        val candidate = Connection(baseUrl.trim(), token.trim(), encKey?.trim()?.ifBlank { null })
+        return try {
+            val probedHealth = api.health(candidate)
+            val probedSession = api.session(candidate)
+            settings.baseUrl = candidate.baseUrl
+            settings.token = candidate.token
+            settings.encKey = candidate.encKey.orEmpty()
+            configured = true
+            health = probedHealth
+            session = probedSession
+            connectionError = null
+            screen = Screen.Chat
+            Result.success(Unit)
+        } catch (err: CancellationException) {
+            throw err
+        } catch (err: Exception) {
+            // The saved repository and the live health/session state belong to the old pairing;
+            // a typo in a new address must not make a working connection look offline.
+            connectionError = if (err is NotConfiguredException) err.message else "连接失败：${err.message}"
+            Result.failure(err)
+        }
     }
 
     private fun conn(): Connection = settings.connection() ?: throw NotConfiguredException()
@@ -2330,22 +2348,25 @@ class AppViewModel(
     }
 
     fun newChat() {
-        // The list is wiped before the call, so a live task's bubble would vanish with it —
-        // and the server refuses the reset while one runs anyway (409, like Telegram's button).
+        // The server refuses a reset while a task runs (409, like Telegram's button); checking
+        // here avoids a pointless request and gives the user the same actionable message.
         if (hasLiveTask) {
             toast = "任务执行中，请先停止当前任务再开启新会话"
             return
         }
-        messages = emptyList()
-        mediaImages = emptyMap()
-        mediaErrors = emptySet()
-        // Trailing history writes are the only writer of the stored chat, so the reset goes
-        // through them too: calling clearMessages here could be overtaken by an in-flight
-        // snapshot and bring the old bubbles back on the next launch.
-        persistMessages()
         guarded("新会话") {
             api.newSession(conn())
             session = api.session(conn())
+            // Only clear the local transcript after the server accepted the reset. Clearing first
+            // left the user staring at an empty chat when the request failed, while the server still
+            // held the old context.
+            messages = emptyList()
+            mediaImages = emptyMap()
+            mediaErrors = emptySet()
+            // Trailing history writes are the only writer of the stored chat, so the reset goes
+            // through them too: calling clearMessages here could be overtaken by an in-flight
+            // snapshot and bring the old bubbles back on the next launch.
+            persistMessages()
             toast = "已开启新会话"
         }
     }

@@ -18,11 +18,13 @@ Telegram  ── Bot API 长轮询 ────┐
 
 > 安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [飞书接入](#飞书接入) · [运行](#运行) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
+**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [飞书接入](#飞书接入) · [运行](#运行) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
 
 ## 一键安装（推荐）
 
-`install.sh` 会完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env` → 配置控制端」，适合新服务器首次部署，也适合本地已经克隆仓库后直接安装。交互式终端中可以选择 Telegram、安卓 App、飞书中的一个或多个；安装完成后也可随时运行 `npm run clients` 增补其他控制端。
+`install.sh` 会完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env` → 配置控制端 → 检测/安装可选工具」，适合新服务器首次部署，也适合本地已经克隆仓库后直接安装。交互式终端中可以选择 Telegram、安卓 App、飞书中的一个或多个，随后按编号安装 Agent CLI、magpie 和 cc-switch；安装完成后也可随时运行 `npm run clients` 增补其他控制端。
+
+安装过程中还会自动检测 Claude Code、Codex、Gemini、Qwen 等 Agent CLI，以及 magpie 和 cc-switch。交互终端会列出未安装项，可按编号多选安装；非交互安装只做检测，不会在无人值守时下载第三方二进制。之后可随时运行 `npm run setup:tools` 重新检测或安装。
 
 ### 前置条件
 
@@ -33,6 +35,7 @@ Telegram  ── Bot API 长轮询 ────┐
   - 飞书：企业自建应用的 `App ID`、`App Secret` 与至少一个 `open_id` 白名单
   - 安卓 App：手机可达的 API 地址（局域网 IP、反向代理域名、SSH 隧道或 VPN），以及一个 API Token
 - 可选：`opencode` CLI。脚本默认会尝试 `npm install -g opencode-ai`，失败时只提示，不阻断安装
+- 可选：Agent CLI、magpie、cc-switch。安装时会检测并询问；工具安装失败只提示，不阻断 Bot 部署
 
 ### 方式一：新机器一键克隆安装
 
@@ -44,12 +47,13 @@ curl -fsSL https://raw.githubusercontent.com/longtimex/agent-bot/main/install.sh
 
 ```bash
 cd ~/.agent-bot
-npm run setup      # 选择 Telegram / 安卓 App / 飞书，可多选
-npm run serve      # 终端 1：启动 opencode（127.0.0.1:4096）
-npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
+npm run setup      # 选择控制端，然后选择要安装的 Agent CLI / magpie / cc-switch
+npm run bot -- start   # 启动 Bot（默认同时启动本机 opencode），日志见 data/bot.log
 ```
 
-> `curl | sh` 的 stdin 不是终端，脚本不会自动进入配置向导；安装后执行一次 `npm run setup` 即可。已有某个控制端时，`npm run clients` 可继续添加其他控制端，不会覆盖已有配置。
+生命周期统一由 `npm run bot -- <command>` 管理。旧命令 `npm run restart`、`scripts/restart.sh` 与 `scripts/apply-release.sh` 仍然可用，但都委托到同一个实现。
+
+> `curl | sh` 的 stdin 不是终端，脚本不会自动进入配置向导；安装后执行一次 `npm run setup` 即可。已有某个控制端时，`npm run clients` 可继续添加其他控制端，不会覆盖已有配置，也不会进入工具安装。
 
 ### 方式二：已经克隆仓库
 
@@ -67,7 +71,7 @@ cd agent-bot
 ./install.sh --dir /opt/agent-bot --start
 ```
 
-`--start` 会在安装成功后执行 `npm run restart`。如果还没有配置任何可用的控制端，脚本会拒绝启动，并提示先运行 `npm run setup`。
+`--start` 会在安装成功后执行 `npm run bot -- start`。如果还没有配置任何可用的控制端，脚本会拒绝启动，并提示先运行 `npm run setup`。
 
 ### 常用参数
 
@@ -79,7 +83,17 @@ cd agent-bot
 --no-opencode      不安装 opencode CLI
 --setup            即使已有控制端，也打开配置向导（增补/修改）
 --no-setup         不运行控制端配置向导
+--tools            检测并询问安装 Agent CLI / magpie / cc-switch
+--check-tools      只检测 Agent CLI / magpie / cc-switch，不安装
+--no-tools         跳过工具检测与安装
 --start            安装完成后启动 Bot
+--systemd          生成并启用 systemd 系统服务（Bot + 本机 OpenCode）
+--user-systemd     生成并启用当前用户的 systemd 服务
+--skip-deps        复用已安装的 node_modules
+--skip-build       复用已有 dist/ 构建产物
+--uninstall        停止服务并删除 launcher/unit，保留 data 与 .env
+--purge-data       与 --uninstall 一起使用：同时删除 data/ 与 .env
+--yes              卸载时跳过确认
 --dry-run          只打印将执行的步骤，不修改文件
 -h, --help         查看帮助
 ```
@@ -91,7 +105,12 @@ AGENT_BOT_DIR
 AGENT_BOT_REPO
 AGENT_BOT_BRANCH
 AGENT_BOT_OPENCODE=0
-AGENT_BOT_SETUP=0     # 跳过向导；设为 1 可强制打开
+AGENT_BOT_SETUP=0     # 跳过控制端向导；设为 1 可强制打开
+AGENT_BOT_TOOLS=auto  # auto / check / 1 / 0；非交互环境默认 check
+AGENT_BOT_SYSTEMD=0    # 0 / 1 / user；等价于 --systemd 或 --user-systemd
+AGENT_BOT_START=0      # 设为 1 等价于 --start
+AGENT_BOT_SKIP_DEPS=0  # 设为 1 等价于 --skip-deps
+AGENT_BOT_SKIP_BUILD=0 # 设为 1 等价于 --skip-build
 ```
 
 例如安装到自定义目录并跳过 opencode：
@@ -115,8 +134,11 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 5. 创建 `data/`、`data/inbox/`、`data/outbox/`
 6. 缺少 `.env` 时从 `.env.example` 生成，并设置为 `600` 权限
 7. 可选安装 `opencode-ai`
-8. 交互式终端下执行 `npm run setup`，可多选 Telegram / 安卓 App / 飞书；已有控制端时可继续添加
-9. 可选执行 `npm run restart`
+8. 使用 `--systemd` / `--user-systemd` 时生成并启用 Bot 与 OpenCode unit
+9. 使用 `--uninstall` 时进入安全卸载流程
+10. 自动检测 Agent CLI、magpie、cc-switch；交互终端按编号选择安装，非交互环境只检测
+11. 交互式终端下执行 `npm run setup`，配置 Telegram / 安卓 App / 飞书，然后选择安装 Agent CLI / magpie / cc-switch；已有控制端时可继续添加
+12. 可选执行 `npm run bot -- start`
 
 ### 安全与幂等说明
 
@@ -177,9 +199,10 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 ```bash
 npm install
-npm run serve      # 终端 1：启动 opencode 无头服务（127.0.0.1:4096）
-npm run build      # 终端 2：构建
-npm run restart    # 终端 2：后台启动 Bot，日志见 data/bot.log
+npm run setup      # 配置 Telegram、安卓 App 或飞书（可多选）
+npm run build      # 构建 dist/
+npm run bot -- start   # 启动本地 opencode 与 Bot，日志见 data/bot.log
+npm run bot -- status  # 查看 supervisor、release、PID 与日志路径
 ```
 
 首次启动且 `.env` 缺少任何控制端配置时，终端会自动进入控制端选择菜单；也可以随时运行 `npm run setup`。向导支持 Telegram、安卓 App、飞书，多选时按顺序完成各项配置，并在每项完成后立即写入 `.env`；未选中的控制端、其他配置与注释保持不变。详见「[运行](#运行)」与「[首次连接引导](#首次连接引导)」。
@@ -243,9 +266,156 @@ export ANDROID_KEY_PASSWORD='...'
 
 也可在 `android/keystore.properties` 写 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`（相对路径以 `android/` 为基准），该文件不得提交。构建后必须用 `apksigner verify --print-certs` 校验；完整参数、CI Secrets 与 `debug → release` 迁移见 [`android/README.md`](android/README.md)。
 
+#### 配对手机
+
 在 Telegram 或飞书向 Bot 发送 `/api`，在 App「设置」页扫码（或手动填地址与令牌）即可配对，手机与聊天端可同时使用。API 默认只监听 `127.0.0.1:3080`：先在 `.env` 设置 `API_PUBLIC_URL`（手机真能访问的地址，如 `http://192.168.1.10:3080` 或反向代理的 `https://bot.example.com`）并重启，`/api` 的二维码才可扫码直连；公网暴露请按 [`android/README.md`](android/README.md) 配置反向代理 / SSH 隧道 / VPN。
 
 装 APK 之前先用 `npm run smoke:app -- --base http://<服务器地址>:3080 --token <API_TOKEN>`（启用了消息级加密就再加 `--enc <二维码里的 enc 字段>`）把手机会走的顺序跑一遍：连接与版本、十个只读端点、提交对话、附件、SSE 推送、停止自己的任务，逐项打印 ✅/❌ 与失败原因。它只读、只提交自己的任务、只停自己的任务，不会改引擎、工作目录或别人的队列；引擎本身不可用会记为 ⚠️ 提醒而不是失败，因为这一步查的是链路而不是 Agent。这套顺序也已经进了 `npm run check`：测试用桩引擎在随机端口起一个真的 Bot，再把脚本当外部进程跑一遍（16 步、SSE 收到终态、停止命中还在跑的任务都要断言），所以脚本一旦与接口走样，CI 立刻红，不用等到手机上才暴露。
+
+#### Instabox 云电脑部署安卓连接示例
+
+下面以 Instabox 的 Linux 云电脑为例，从空机器一直走到手机上能聊天。核心原则只有一条：**云电脑上的 `127.0.0.1:3080` 只属于云电脑本身，手机必须通过一个手机可达的 HTTPS 地址才能访问它。** 先在 Instabox 的终端执行 `cat ~/MACHINE.md`，确认机器没有公网入站端口，并查看它是否提供端口发布能力。
+
+##### 1. 在 Instabox 上安装 Bot
+
+```bash
+cd /data/workspace/project/agent-bot   # 换成你的实际目录
+npm ci
+npm run build
+```
+
+先不要启动只配置了安卓端的 Bot：此时还没有手机可达的 `API_PUBLIC_URL`，Bot 会拒绝启动。先做第 2 步拿到入口地址，再写配置并首次启动。
+
+##### 2. 选一种手机可达的入口
+
+先拿到手机能访问的地址，再把地址交给 Bot；否则 Bot 没有可发布的配对地址。
+
+| 方案 | 适合场景 | 地址形式 | 注意 |
+| --- | --- | --- | --- |
+| **Instabox 端口发布（首选）** | 当前这台 Instabox 支持 `instabox-port` | `https://<端口>-<机器ID>.instabox.tech` | 最简单；公开端口对互联网开放，必须保留 Bearer Token，建议开启消息加密 |
+| **Cloudflare 临时隧道** | Instabox 没有端口发布，或需要自定义域名 | `https://<随机名>.trycloudflare.com` | 无需公网 IP；临时隧道重启后域名会变化 |
+| **Tailscale** | 长期使用、只让自己手机访问 | `http://100.x.y.z:3080` | 手机与云电脑登录同一 tailnet；不会把 API 暴露给公网 |
+| **反向代理 / 自有域名** | 已有域名和证书 | `https://bot.example.com` | 需要自己维护 Nginx/Caddy、证书和 DNS |
+
+> 手机上的 `127.0.0.1` 永远指向手机自己，不是 Instabox。只有通过 USB 调试执行 `adb reverse tcp:3080 tcp:3080` 时，这个回环地址才成立；Wi-Fi 或移动网络下必须使用上表中的隧道/VPN 地址。
+
+##### 3. 方案 A：用 Instabox 原生端口发布（推荐）
+
+先发布 3080 端口，再把本地 API 启动到这个端口上：
+
+```bash
+instabox-port publish 3080 --name agent-bot
+```
+
+终端会打印一个 `https://3080-<机器ID>.instabox.tech` 形式的地址。把它写进 `.env`：
+
+```dotenv
+API_ENABLED=1
+API_BIND=127.0.0.1
+API_PORT=3080
+API_PUBLIC_URL=https://3080-<机器ID>.instabox.tech
+API_TOKEN=
+API_ENCRYPTION=1
+```
+
+`API_TOKEN` 留空时，首次启动会自动生成并保存到 `data/api-token.json`。现在启动 Bot：
+
+```bash
+npm run bot -- start
+npm run bot -- status
+npm run bot -- doctor
+```
+
+如果之前已经启动过 Bot，改成 `npm run bot -- restart`。也可以等拿到公网 URL 后运行 `npm run setup` 选择安卓 App，让向导生成 Token 并写入同样的四项配置；随后再把 `API_ENCRYPTION=1` 写入 `.env` 并重启。
+
+**安全提醒**：`instabox-port publish` 默认是公开端口，任何拿到 URL 的人都能访问 API。Bot 自身仍会校验 Bearer Token，但请同时开启 `API_ENCRYPTION=1`，不要把地址和令牌贴到公开聊天。不要用 `--private`：它的 `_token` 查询参数只适合浏览器打开根页面，无法可靠附加到 App 的所有 `/api/v1` 请求上。
+
+端口发布的 URL 只在云电脑运行期间有效；暂停/停止机器或取消发布后，手机就会连不上。重新发布后如果域名或端口变了，必须同步更新 `API_PUBLIC_URL`、重启 Bot，并在 App 里重新配对。
+
+##### 4. 方案 B：Cloudflare 临时隧道（备选）
+
+云电脑没有 `instabox-port` 时，可以安装 `cloudflared` 后运行：
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:3080
+```
+
+输出中的 `https://<随机名>.trycloudflare.com` 就是手机要填的地址。把它写入：
+
+```dotenv
+API_ENABLED=1
+API_BIND=127.0.0.1
+API_PORT=3080
+API_PUBLIC_URL=https://<随机名>.trycloudflare.com
+API_ENCRYPTION=1
+```
+
+然后执行 `npm run bot -- restart`（首次则 `npm run bot -- start`）。临时隧道的域名每次重启都会变化，适合验证和临时使用；长期使用应改用 named tunnel 或在手机与云电脑之间建立 Tailscale。
+
+##### 5. 方案 C：Tailscale 内网直连（长期推荐）
+
+在 Instabox 云电脑和安卓手机都安装 Tailscale，并登录同一个 tailnet。云电脑上执行：
+
+```bash
+tailscale up
+tailscale ip -4
+```
+
+假设输出是 `100.101.102.103`，把 API 改为监听所有网卡，并填写 Tailscale 地址：
+
+```dotenv
+API_ENABLED=1
+API_BIND=0.0.0.0
+API_PORT=3080
+API_PUBLIC_URL=http://100.101.102.103:3080
+API_ENCRYPTION=1
+```
+
+重启 Bot 后，手机先打开 Tailscale，再访问 `http://100.101.102.103:3080/api/v1/health`。Tailscale 流量本身已加密，内网 HTTP 可以工作；仍建议开启 `API_ENCRYPTION=1`，让应用层也加密。不要把 `API_BIND=0.0.0.0` 和公网直连混用而不加防火墙。
+
+##### 6. 用手机走一遍真实链路
+
+在装 APK 之前，先在**云电脑**上运行与手机相同的请求顺序：
+
+```bash
+API_TOKEN="${API_TOKEN:-$(sed -n 's/^API_TOKEN=//p' .env | tail -n1)}"
+API_TOKEN="${API_TOKEN:-$(jq -r .token data/api-token.json)}"
+API_ENC_KEY="$(jq -r .key data/api-enc-key.json 2>/dev/null || true)"
+test -n "$API_TOKEN" || { echo "找不到 API_TOKEN"; exit 1; }
+npm run smoke:app -- --base https://3080-<机器ID>.instabox.tech \
+  --token "$API_TOKEN" --enc "$API_ENC_KEY"
+```
+
+- 使用 Cloudflare 或 Tailscale 时把 `--base` 换成对应地址，IPv6/端口要原样保留。
+- `--enc` 只在 `API_ENCRYPTION=1` 时需要；上面的命令会直接读取 `data/api-enc-key.json`，密钥不会进入 shell 历史。
+- 全部步骤显示 ✅ 才去手机安装；如果只有引擎步骤是 ⚠️，说明链路通了，但 Agent CLI 还没装好。
+
+##### 7. 在安卓 App 里配对
+
+1. 从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 安装最新的正式签名 APK；首次安装允许「安装未知来源应用」。
+2. 打开 App 的「设置」，可以手动填写，也可以点「扫码配对」。
+3. 如果 Telegram / 飞书已配置，向 Bot 发送 `/api`，扫描回复里的二维码。扫码后 App 只**导入**地址、令牌和加密密钥，不会立刻保存，先核对页面上显示的 `API：https://.../api/v1` 是否正确。
+4. 手动填写时：
+   - 服务器地址：`https://3080-<机器ID>.instabox.tech`（或 Tailscale 的 `http://100.x.y.z:3080`）
+   - 访问令牌：`API_TOKEN` 的完整值
+   - 加密密钥：启用 `API_ENCRYPTION=1` 时填写二维码中的 `enc`，或在设置页扫码自动带入
+5. 点「保存并连接」。App 会先对新地址做健康检查，成功后才替换旧配置；失败会留在设置页并给出中文原因，已保存的旧连接不受影响。
+6. 设置页会对 `127.0.0.1`、`localhost` 和公网明文 HTTP 显示警告。看到回环地址警告时不要继续，回到第 2 步换成隧道/VPN 地址。
+
+##### 8. Instabox 常见问题
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| 云电脑浏览器能打开 `127.0.0.1:3080`，手机不能 | 正常。回环地址不能跨机器访问；使用 `instabox-port publish`、Cloudflare Tunnel 或 Tailscale，并把该地址写入 `API_PUBLIC_URL` |
+| `instabox-port publish` 的地址返回 502/503 | Bot 没启动、端口不对，或发布的是错误端口。先在本机 `curl http://127.0.0.1:3080/api/v1/health`，再确认发布的就是 `3080` |
+| 重新发布端口后手机连不上 | 端口 URL 可能已变化。更新 `.env` 的 `API_PUBLIC_URL`，执行 `npm run bot -- restart`，再重新扫码 |
+| 二维码仍指向 `127.0.0.1` | 保存 `.env` 后没有重启 Bot；或 `API_PUBLIC_URL` 留空。修正后 `npm run bot -- restart`，再发一次 `/api` |
+| 连接返回 401 | 令牌不一致。清空过 `data/`、重装 Bot 或手动改过 `API_TOKEN` 都会让旧令牌失效；重新发 `/api` 并扫码 |
+| 连接超时 / DNS 解析失败 | 云电脑可能已停止，端口发布/隧道已断开，或域名过期；重新启动入口并核对地址。App 会直接提示这几种原因 |
+| 启动报「尚未配置可用的控制端」 | 只选了安卓时，`API_PUBLIC_URL` 必须是手机可达的地址；先发布端口或建立隧道，写入 `.env` 后再启动 |
+| Tailscale 地址能 ping 通但 App 连不上 | 确认 Bot 监听的是 `0.0.0.0`，手机 Tailscale 已开启，且 `API_PORT` 与地址中的端口一致 |
+| 公网 HTTP 警告 | 公网明文会暴露令牌与对话。改用 HTTPS 端口发布/反向代理，或至少启用 `API_ENCRYPTION=1`；不要把 `API_BIND=0.0.0.0` 直接暴露到公网 |
+| 机器停止后一切失效 | Instabox 没有公网入站端口，停止会结束 Bot、隧道和端口发布。重新启动机器后依次启动 Bot、重建入口、重启 Bot，并重新扫码 |
 
 #### App 在线更新
 
@@ -487,7 +657,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 - `installSpec` 可选，仅接受 `method: "npm" | "pip"` 与合法包名；Bot 只会执行固定的 `npm install -g` / `python3 -m pip install --user` 命令，不会把包名拼进 shell。
 - id 必须匹配 `^[a-z0-9][a-z0-9._-]*$`，`opencode` 保留给服务端引擎；未知占位符、非法正则或缺少 `bin` 的条目会记录警告并被忽略。`amazonq` / `kiro` 的非交互参数可能随版本变化，标为实验性。
 - 安装检测只看 `PATH` 中是否存在可执行文件；个别发行版会放置“安装引导 shim”，此时仍需实际安装后才能执行。
-- 未安装任何 CLI 时仍可正常使用 OpenCode；`npm run serve` 只对 OpenCode 引擎必需。
+- 未安装任何 CLI 时仍可正常使用 OpenCode；`npm run bot -- start` 默认会启动受管 OpenCode，`npm run serve` 只用于手工前台启动。
 
 ## 目录
 
@@ -549,7 +719,12 @@ bot/
 │   ├── updateOrchestrator.ts 备份 → 门禁构建 → pending → 取消/回滚
 │   ├── updateChecker.ts stable/beta 通道、干跑比较与 release 诊断
 │   ├── releaseStatus.ts `/ops/release` 的轻量版本卡
-│   ├── release-control.ts `apply-release.sh` 使用的状态 CLI
+│   ├── release-control.ts 兼容的 release 状态 CLI（生命周期主入口为 bot-cli）
+│   ├── bot-cli.ts   统一生命周期入口：install/setup/status/logs/start/stop/restart/update/uninstall
+│   ├── runtime.ts   supervisor、PID/锁、release 入口、安装清单与健康检查
+│   ├── release-restart.ts systemd 发布切换、健康等待与自动回滚
+│   ├── lifecycle-options.ts 生命周期参数解析
+│   ├── lifecycle-files.ts 受管文件安全删除与 data root 校验
 │   ├── startupSelfCheck.ts 启动自检与失败记录
 │   ├── dataMigration.ts 数据 schema 快照与迁移标记
 │   ├── androidRelease.ts App 更新清单与 APK 下载路由
@@ -566,7 +741,7 @@ bot/
 ├── docs/ARCHITECTURE.md 分层、模块边界与新增能力放置规则
 ├── tests/            单元测试（node:test）
 ├── install.sh        安装脚本：检查环境、克隆/更新、安装依赖、构建、准备 .env
-├── deploy/           systemd 单元示例（ExecStart 走 scripts/run-current.sh）
+├── deploy/           systemd 单元示例与安装器生成的单元（deploy/generated/ 已 gitignore）
 ├── scripts/          邮件、X、搜图、重启、release 应用/健康检查、cc-switch 安装、安卓发布与源码检查脚本
 ├── bin/              可选：`npm run cc-switch:install` 下载的 cc-switch 二进制（已 gitignore）
 ├── .opencode/agent/assistant.md   Bot 的 agent 人设与工具权限
@@ -643,10 +818,15 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 ```bash
 npm install
 npm run cc-switch:install   # 可选：安装 cc-switch CLI 集成
-npm run serve      # 启动 opencode 无头服务（127.0.0.1:4096）
+npm run setup               # 配置至少一个控制端，并可顺带安装 Agent CLI / magpie / cc-switch
 npm run build
-npm run restart    # 按 data/bot.pid 优雅停止旧进程并后台启动
+npm run bot -- start        # 启动 Bot（默认同时管理本机 opencode）
+npm run bot -- status   # 查看 supervisor、release、PID 与日志路径
+npm run bot -- doctor   # 只读诊断：环境、配置、进程与健康探针
+npm run bot -- logs bot 100  # 查看最近 100 行日志
 ```
+
+`npm run bot -- <command>` 是唯一生命周期入口：`install`、`setup`、`status`、`doctor`、`logs`、`start`、`stop`、`restart`、`update`、`uninstall` 共用同一套进程识别、release 选择与健康检查。`npm run serve` 仍保留为手工启动 opencode 的低层命令，但日常部署不需要单独维护两个终端。
 
 ### Docker 部署（可选）
 
@@ -669,11 +849,11 @@ docker compose logs -f
 首次启动且 `.env` 缺少任何可用控制端时，终端会自动进入选择菜单。也可以随时手动运行：
 
 ```bash
-npm run setup      # 首次配置或重新配置
-npm run clients    # 同一向导，适合安装完成后添加其他控制端
+npm run setup      # 首次配置或重新配置；客户端完成后进入工具安装
+npm run clients    # 只管理控制端，适合安装完成后添加其他控制端
 ```
 
-向导会显示每个控制端的 `[已配置]` / `[未配置]` 状态，支持输入 `1,2,3` 多选、输入 `a` 全选、回车退出。重复运行只更新选中的配置，`.env` 中其他控制端、注释和值都会保留。
+向导会显示每个控制端的 `[已配置]` / `[未配置]` 状态，支持输入 `1,2,3` 多选、输入 `a` 全选、回车退出。重复运行只更新选中的配置，`.env` 中其他控制端、注释和值都会保留。控制端配置成功后，`npm run setup` 会继续检测 Agent CLI、magpie 与 cc-switch，列出未安装项供按编号多选；工具安装失败不会撤销已经保存的客户端配置。只想检查缺失项时运行 `npm run setup -- --check-tools`，只想配置客户端时运行 `npm run clients` 或 `npm run setup -- --no-tools`。
 
 - **Telegram**：粘贴 `@BotFather` 返回的 Token → 向导调用 `getMe` 验证 → 给 Bot 发消息自动识别用户 ID → 确认写入 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_ALLOW_USERS`。
 - **安卓 App**：填写 `API_BIND`、`API_PORT` 和手机可达的 `API_PUBLIC_URL`，向导生成或沿用 `API_TOKEN`。保存后终端会直接打印 `API 地址/api/v1` 与访问令牌；也可在 Telegram / 飞书发送 `/api` 扫二维码配对。仅局域网直连时通常监听 `0.0.0.0`；有反向代理、SSH 隧道或 VPN 时可保持 `127.0.0.1`，只需保证 `API_PUBLIC_URL` 是手机真正能访问的地址。
@@ -685,27 +865,39 @@ npm run clients    # 同一向导，适合安装完成后添加其他控制端
 
 启动时会自动扫描 `PATH` 并打印 `agent CLI detection: n/14 installed (...)`；首次在聊天发送 `/start` 或 `/agents` 即可查看检测结果并安装新 CLI。
 
-`npm run restart` 会在 `data/bot.log` 超过 10MB 时按时间戳轮转，并在启动后检查进程是否存活。
-它还通过 `BOT_LOG_FILE` 告知 Bot 日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
+`npm run bot -- start` / `restart` 会在启动后检查本次启动自检与健康状态。Bot 通过 `BOT_LOG_FILE` 获得日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
 重复启动会被 `data/bot.lock` 拒绝，提示已有实例的 PID；锁文件同时记录进程启动时间，PID 被系统复用后不会误判为仍在运行。
 
 开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + lint + 文件体积门禁 + 无用文件/依赖检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
 
 ### systemd 常驻（可选）
 
-`deploy/telegram-bot.service` 提供了 systemd 单元示例。按实际用户与路径修改后：
+推荐由安装器生成 unit，而不是手工修改示例文件：
 
 ```bash
-sudo cp deploy/telegram-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now telegram-bot
-journalctl -u telegram-bot -f
+npm run bot -- install --systemd          # 系统级（需要 sudo 权限）
+npm run bot -- install --user-systemd     # 当前用户级
+npm run bot -- start
+npm run bot -- status
 ```
 
-使用 systemd 时不要再执行 `npm run restart`，否则会与 systemd 管理的进程争抢单实例锁。`opencode serve` 需要另行启动（`npm run serve` 或自己的 unit）。
+安装器会生成 `agent-bot.service` 和（本机 OpenCode 时）`agent-bot-opencode.service`，并在 `data/install.json` 记录真实路径。`npm run bot -- restart` 在 systemd 模式下会先激活 pending release，再重启服务并检查健康；失败时自动回滚并重启旧版本。不要再运行旧的 `scripts/restart.sh` 抢进程。
+
+如果使用旧版 unit，`scripts/run-current.sh` 仍可作为 `ExecStart`，它会委托给新的生命周期入口。`deploy/telegram-bot.service` 仅保留为手工部署示例，推荐改用上面的安装命令。
 
 > `opencode serve` 不会自动读取 `.env`，修改 `opencode.json` 或 agent 文件后需要带环境变量重启：
 > `set -a; . ./.env; set +a; opencode serve --port 4096 --hostname 127.0.0.1`
+
+### 卸载
+
+```bash
+npm run bot -- uninstall            # 停止服务并删除 launcher / systemd unit，保留 data/ 与 .env
+npm run bot -- uninstall --dry-run  # 只打印将执行的动作
+npm run bot -- uninstall --purge-data  # 同时删除 data/ 与 .env（不可恢复）
+npm run bot -- uninstall --yes      # 非交互环境跳过确认
+```
+
+默认卸载不会删除仓库目录、`data/` 或 `.env`，因此之后重新安装仍可继续使用已有会话、提醒与配对密钥。只有显式传入 `--purge-data` 才会删除 `data/` 与 `.env`；删除前会校验 `DATA_DIR` 不是项目根目录、`/` 或项目目录的上级目录。只删除带 `managed by agent-bot` 标记的 launcher 与 systemd unit，手工创建或已被覆盖的文件会拒绝删除并保留。Docker 部署不使用上述 unit 流程，请在宿主机执行 `docker compose down`；是否删除挂载的 `data/` 由你自行决定。
 
 ## 聊天运维中心
 
@@ -729,15 +921,15 @@ journalctl -u telegram-bot -f
 
 **通道与激活**：`UPDATE_CHANNEL=stable` 默认跟随 `origin/main`，`beta` 默认跟随 `origin/beta`；需要其他分支时同时设置 `UPDATE_BRANCH`。点击「应用 pending 并重启」或发送 `/restart` 才会切换 current。重启后 release 监督脚本会等待新进程写出本次启动的自检：启用 API 时同时验证 `/health`，纯 Telegram/飞书部署则要求 `data/startup-check.json` 的 release、时间与 PID 都匹配本次启动；超时或启动失败会自动把 current 切回上一版并重新启动。启动成功保留 current 与 previous（默认共 3 个 release，`data/releases/state.json` 记录指针与最近更新结果），可用 `/ops` 的「丢弃 pending」「回滚到上一版」处理异常。App 对这三个操作都有二次确认；任务运行中，更新、重启、回滚与丢弃 pending 会返回或提示先停止任务。
 
-**systemd 激活**：unit 的 `ExecStart` 必须指向 `scripts/run-current.sh`（`deploy/telegram-bot.service` 已如此）。需要让 Bot 自己完成 pending 激活与健康检查时，手动执行：
+**systemd 激活**：由 `npm run bot -- install --systemd` 生成的 unit 使用 `dist/bot-cli.js run`，因此 `npm run bot -- restart` 可以完成 pending 激活与健康检查：
 
 ```bash
-RELEASE_SUPERVISOR=systemd RELEASE_SYSTEMD_UNIT=telegram-bot scripts/apply-release.sh
+npm run bot -- update --apply
 ```
 
-普通 `sudo systemctl restart telegram-bot` 只启动 `run-current.sh` 选出的 current，不会把 pending 自动变成 current；不需要自动回滚时，可先执行 `node dist/release-control.js activate` 再重启。Docker 内没有 `.git`，`/update` 与 release 切换不可用，更新方式只能是重新构建镜像（见 Docker 小节）。长命令（安装依赖、安装 cc-switch）超时时会终止整个进程组，连同 npm 生命周期脚本与下载子进程一起收掉，避免超时后仍有进程继续改写 `node_modules`。
+如果使用旧 unit（`scripts/run-current.sh`），普通 `sudo systemctl restart ...` 只会启动 current，不会激活 pending；请改用 `npm run bot -- restart`。Docker 内没有 `.git`，`/update` 与 release 切换不可用，更新方式只能是重新构建镜像（见 Docker 小节）。长命令（安装依赖、安装 cc-switch）超时时会终止整个进程组，连同 npm 生命周期脚本与下载子进程一起收掉，避免超时后仍有进程继续改写 `node_modules`。
 
-**重启 Bot**：非 systemd 部署下调用 `scripts/restart.sh`，优先按 `data/bot.pid` 停止旧进程；该文件缺失或失效时（例如用 `npm start` 手动启动的实例）回退到 `data/bot.lock` 中记录的持锁进程，然后再后台启动新进程，期间短暂离线。检测到 systemd（`INVOCATION_ID` / `SYSTEMD_EXEC_PID`）时会拒绝脚本重启，避免与 systemd 争抢单实例锁，并提示改用 `systemctl restart telegram-bot`。
+**重启 Bot**：统一使用 `npm run bot -- restart`。脚本模式会按锁文件和 PID 的进程启动时间双重校验后停止旧进程（`npm start` 启动的实例也能通过 lock 识别），再启动新版本并等待本次启动自检；systemd 模式会重启 unit、激活 pending 并在失败时回滚。`scripts/restart.sh` 与 `scripts/apply-release.sh` 仅作为兼容入口。
 
 **OpenCode 服务**：`/service opencode start` 使用当前 `OPENCODE_URL` 的端口与 `--hostname 127.0.0.1` 启动 `opencode serve`，PID 写入 `data/opencode.pid`，日志追加到 `data/opencode.log`（超过 10MB 自动轮转）。Bot 只会停止自己启动的实例；手动启动的 OpenCode 会被识别为“未托管”并拒绝停止/重启。`OPENCODE_URL` 指向非本机地址时也不提供启停管理。
 
@@ -941,7 +1133,10 @@ npm run models -- assign self argon2
 ### 安装
 
 ```bash
-curl -fsSL https://usemagpie.ai/install.sh | sh   # 或 go install github.com/yetone/magpie@latest
+npm run setup                                    # 客户端配置后进入工具安装
+npm run setup:tools                              # 单独检测并按编号安装
+# 或只安装 magpie：
+curl -fsSL https://usemagpie.ai/install.sh | sh
 # 也可把二进制放到 ./bin/magpie，或设置 MAGPIE_BIN=/path/to/magpie
 ```
 
@@ -1016,7 +1211,7 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 
 | 现象 | 处理 |
 | --- | --- |
-| `请求失败: ECONNREFUSED` | 本地 `opencode serve` 未启动，执行 `npm run serve` |
+| `请求失败: ECONNREFUSED` | 本地 `opencode serve` 未启动；执行 `npm run bot -- start`（会启动受管 OpenCode），或手工运行 `npm run serve` |
 | `请求失败: UND_ERR_SOCKET` | 服务端连接被关闭；查看 opencode serve 日志与上游模型状态 |
 | `fetch failed` | 已自动解包底层 `ECONNREFUSED` / `ETIMEDOUT` / socket 错误码；按对应原因处理 |
 | `-> 404` 会话不存在 | Bot 会自动新建会话，上下文清空 |
@@ -1027,9 +1222,9 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | 飞书语音没有按语音播放 | 语音建议使用 Ogg/Opus；其他音频格式可能上传失败并回退为文件附件，转成 Opus 后重试 |
 | 首次启动没有出现向导 | 当前不是交互式终端（systemd/CI），或已有任一可用控制端；按输出提示手动配置，或在终端运行 `npm run setup` / `npm run clients` |
 | Telegram 向导识别不到用户 ID | 确认已给 Bot 发送消息；若提示 409 Conflict，先停止其他轮询实例或移除 Webhook，再手动输入 ID |
-| 安卓 App 无法连接或二维码指向回环地址 | 设置手机可达的 `API_PUBLIC_URL`（局域网写 `http://192.168.1.10:3080`，反向代理写 `https://bot.example.com`）；仅监听 `127.0.0.1` 或 `0.0.0.0` 无法自动推断手机该连的地址。提供公网入口时务必保持 Bearer Token 鉴权，并优先走 HTTPS / VPN / SSH 隧道 |
+| 安卓 App 无法连接或二维码指向回环地址 | 设置手机可达的 `API_PUBLIC_URL`（局域网写 `http://192.168.1.10:3080`，反向代理写 `https://bot.example.com`，Instabox 用 `instabox-port publish 3080` 输出的 HTTPS 地址）；仅监听 `127.0.0.1` 或 `0.0.0.0` 无法自动推断手机该连的地址。提供公网入口时务必保持 Bearer Token 鉴权，并优先走 HTTPS / VPN / SSH 隧道 |
 | 仅安卓端时提醒或定时任务返回 409 | 这些功能需要向 Telegram 或飞书 owner 聊天推送。运行 `npm run clients` 添加聊天控制端，并与 Bot 私聊发送一次 `/start` |
-| 启动提示已有实例（PID） | 说明旧进程仍在运行；用 `npm run restart` 重启，或先结束该 PID |
+| 启动提示已有实例（PID） | 说明旧进程仍在运行；用 `npm run bot -- restart` 重启，或先结束该 PID（锁文件会校验 PID 启动时间，不会误杀复用 PID 的进程） |
 | 群组中发消息无响应 | 预期行为：Bot 只处理私聊 |
 | 图片/语音提示不支持 | 当前模型未声明对应输入能力；换用多模态模型或在 `opencode.json` 中开启 `attachment` |
 | 附件下载失败 / 超过 20MB | Telegram Bot API 的 `getFile` 下载限制；压缩后重发，或改用飞书发送（消息资源接口支持更大文件）。单条消息总附件仍受 15MB 上限约束 |
@@ -1062,9 +1257,9 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | `scripts/check-android-sources.mjs` | 无 Android SDK 时的安卓源码静态门：必需源文件是否缺失、是否被 `.gitignore` 吞掉、Kotlin 括号与字符串是否闭合（`npm run check:android`） |
 | `scripts/check-size.mjs` | 模块体积门禁：超过预算即失败，防止已拆分的文件重新长成超大文件（`npm run check:size`） |
 | `scripts/install-cc-switch.sh` | 下载 cc-switch CLI 到 `./bin`（`npm run cc-switch:install`） |
-| `scripts/restart.sh` | 构建产物重启 Bot 并维护 `data/bot.pid` |
-| `scripts/run-current.sh` | systemd `ExecStart` 入口：启动 current release；首次部署回退 checkout 的 `dist/index.js` |
-| `scripts/apply-release.sh` | 激活 pending（或重启 current）、启动/重启、健康检查失败自动回滚；支持 `RELEASE_SUPERVISOR=systemd` |
+| `scripts/restart.sh` | 兼容入口，委托 `npm run bot -- restart` |
+| `scripts/run-current.sh` | 兼容入口，委托 `npm run bot -- run`；优先使用 current release 的构建 |
+| `scripts/apply-release.sh` | 兼容入口，委托 `npm run bot -- restart`（含 pending 激活与回滚） |
 | `scripts/release-health.mjs` | 发布健康探针：API 可用时走 `/health`，Telegram/飞书-only 时校验本次启动自检的 release/PID/时间 |
 | `scripts/publish-android-release.mjs` | 把已签名 APK 复制到 `data/android/releases/`，按实际字节计算 SHA-256/大小并原子更新清单（`npm run release:android`） |
 | `scripts/check-release.mjs` | 发布门禁：类型检查、安卓源码检查、体积预算与全部单元测试（`npm run check:release`） |

@@ -8,6 +8,7 @@ import {
   maskToken,
   parseClientSelection,
   parseFeishuOpenIds,
+  parseSetupToolMode,
   parseUserIds,
   runClientSetup,
   runFeishuSetup,
@@ -96,6 +97,10 @@ test("setup helpers validate tokens, mask secrets and parse whitelist ids", () =
   assert.deepEqual(parseClientSelection("3,1,3"), ["telegram", "feishu"])
   assert.deepEqual(parseClientSelection("unknown"), [])
   assert.deepEqual(parseFeishuOpenIds("ou_a, ou_b，ou_a"), ["ou_a", "ou_b"])
+  assert.equal(parseSetupToolMode([]), "install")
+  assert.equal(parseSetupToolMode(["--check-tools"]), "check")
+  assert.equal(parseSetupToolMode(["--no-tools"]), "off")
+  assert.equal(parseSetupToolMode(["--clients-only"]), "off")
 })
 
 test("upsertEnv replaces telegram keys and keeps comments and unrelated values", () => {
@@ -305,6 +310,54 @@ test("runClientSetup accepts Android alone and writes a usable pairing configura
     assert.match(env, /^API_PUBLIC_URL=http:\/\/192\.168\.1\.10:3080$/m)
     assert.match(env, /^API_TOKEN=[0-9a-f]{48}$/m)
     assert.ok(lines.some((line) => line.includes("http://192.168.1.10:3080/api/v1")))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runClientSetup continues into the optional tool stage after saving the client", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-tools-"))
+  try {
+    const envPath = join(dir, ".env")
+    const { deps, pending } = harness(
+      envPath,
+      ["2", "0.0.0.0", "3080", "http://192.168.1.10:3080", "y"],
+      fakeFetch(undefined, []),
+    )
+    const calls: string[] = []
+    const result = await runClientSetup({
+      ...deps,
+      setupTools: async () => {
+        calls.push("tools")
+        assert.match(readFileSync(envPath, "utf8"), /^API_TOKEN=[0-9a-f]{48}$/m)
+        return { ok: true, installed: ["magpie"], failed: [] }
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.tools, { ok: true, installed: ["magpie"], failed: [] })
+    assert.deepEqual(calls, ["tools"])
+    assert.equal(pending.length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a failed optional tool stage does not undo a saved client or fail setup", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-tools-fail-"))
+  try {
+    const envPath = join(dir, ".env")
+    const { deps } = harness(
+      envPath,
+      ["2", "0.0.0.0", "3080", "http://192.168.1.10:3080", "y"],
+      fakeFetch(undefined, []),
+    )
+    const result = await runClientSetup({
+      ...deps,
+      setupTools: async () => ({ ok: false, installed: [], failed: ["magpie"] }),
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.tools, { ok: false, installed: [], failed: ["magpie"] })
+    assert.match(readFileSync(envPath, "utf8"), /^API_PUBLIC_URL=http:\/\/192\.168\.1\.10:3080$/m)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

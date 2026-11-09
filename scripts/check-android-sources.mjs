@@ -138,6 +138,30 @@ export function balanceError(path, src) {
   return null
 }
 
+/**
+ * Two imports with the same simple name make the compiler reject every use of that name.
+ * In practice this is not hypothetical: a UI file importing both `material3.Surface` and
+ * the theme's `Surface` colour compiles as an ambiguity, and the theme import is easy to
+ * miss while moving components around. Kotlin aliases (`... as DrawerSurface`) are the
+ * intended escape hatch and are reported by their alias, so they stay unique.
+ */
+export function importCollision(path, source) {
+  const seen = new Map()
+  const problems = []
+  for (const [index, line] of source.split("\n").entries()) {
+    const match = /^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?\s*$/.exec(line)
+    if (!match) continue
+    const name = match[2] ?? match[1].split(".").pop()
+    const previous = seen.get(name)
+    if (previous) {
+      problems.push(`${path}:${index + 1}: import name '${name}' is already imported on line ${previous.line}`)
+    } else {
+      seen.set(name, { line: index + 1 })
+    }
+  }
+  return problems
+}
+
 function main(argv) {
   const rootIndex = argv.indexOf(ROOT_FLAG)
   const root = rootIndex >= 0 ? argv[rootIndex + 1] : "android/app/src/main/java"
@@ -163,6 +187,7 @@ function main(argv) {
     const source = readFileSync(file, "utf8")
     const error = balanceError(file, source)
     if (error) problems.push(error)
+    for (const problem of importCollision(file, source)) problems.push(problem)
     for (const problem of cancellationHygiene(file, source)) problems.push(problem)
     for (const problem of serverErrorMapping(file, source)) problems.push(problem)
     for (const problem of pairingKeyGuard(file, source)) problems.push(problem)

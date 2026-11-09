@@ -40,23 +40,24 @@ fun ModelsScreen(vm: AppViewModel) {
     var assigning by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("模型管理", style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = { adding = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("添加", modifier = Modifier.padding(start = 4.dp))
-                }
-                TextButton(onClick = vm::refreshCustomModels) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+        ScreenHeader(
+            title = "模型管理",
+            subtitle = "为 OpenCode 添加与绑定自定义模型",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row {
+                    TextButton(onClick = { adding = true }) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("添加", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(onClick = vm::refreshCustomModels) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
-        }
+        )
 
         Text(
             "自定义模型供 OpenCode 使用，添加后即可在切换模型的列表中选取；改动无需重启。",

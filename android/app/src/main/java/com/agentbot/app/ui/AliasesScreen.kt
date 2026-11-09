@@ -24,7 +24,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.AliasEntry
@@ -36,23 +35,24 @@ fun AliasesScreen(vm: AppViewModel) {
     var adding by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("快捷指令", style = MaterialTheme.typography.titleLarge)
-            Row {
-                TextButton(onClick = { adding = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("新建", modifier = Modifier.padding(start = 4.dp))
-                }
-                TextButton(onClick = vm::refreshAliases) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+        ScreenHeader(
+            title = "快捷指令",
+            subtitle = "输入 /名称 立即展开为常用任务",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                Row {
+                    TextButton(onClick = { adding = true }) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("新建", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(onClick = vm::refreshAliases) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
-        }
+        )
 
         Text(
             "在聊天中发送 /名称 即可触发（输入 / 也能从命令列表中点选）；与 Telegram 的 /alias 共享同一份列表。",

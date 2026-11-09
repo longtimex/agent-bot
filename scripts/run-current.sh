@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# systemd ExecStart entrypoint: run the active managed release, or the checkout
-# before the first managed update. `exec` keeps the PID systemd supervises.
+# Compatibility entry point for units generated before the lifecycle CLI.
+# `exec` keeps the PID systemd supervises; bot-cli run resolves the release once.
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
+if [ -f dist/bot-cli.js ]; then
+  exec node dist/bot-cli.js run
+fi
 
-DATA_DIR="${DATA_DIR:-data}"
-entry=""
-# The release control CLI is part of the checkout build. If the checkout lost its
-# dist/ (or the build is older than this script), fall back to the release's own
-# copy when one exists; never silently run a different release than state.json says.
-if [ -f dist/release-control.js ]; then
-  entry="$(node dist/release-control.js entry current 2>/dev/null || true)"
-else
-  current="$(node -e 'const fs=require("fs");const p=process.argv[1];try{const s=JSON.parse(fs.readFileSync(p,"utf8"));if(s.current&&s.current.path)process.stdout.write(s.current.path+"/dist/index.js")}catch{}' "$DATA_DIR/releases/state.json" 2>/dev/null || true)"
-  [ -n "$current" ] && [ -f "$current" ] && entry="$current"
+release_cli="$(node -e '
+  const fs = require("fs");
+  const path = require("path");
+  try { process.loadEnvFile(".env") } catch {}
+  const statePath = path.resolve(process.env.DATA_DIR || "data", "releases", "state.json");
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    for (const key of ["current", "pending", "previous"]) {
+      const release = state[key];
+      if (!release || typeof release.path !== "string") continue;
+      const entry = path.join(release.path, "dist", "bot-cli.js");
+      if (fs.existsSync(entry)) { process.stdout.write(entry); break }
+    }
+  } catch {}
+' 2>/dev/null || true)"
+if [ -n "$release_cli" ]; then
+  exec node "$release_cli" run
 fi
-if [ -z "$entry" ] || [ ! -f "$entry" ]; then
-  entry="$PWD/dist/index.js"
+
+if [ -f src/bot-cli.ts ]; then
+  exec npx --no-install tsx src/bot-cli.ts run
 fi
-if [ ! -f "$entry" ]; then
-  echo "run-current: no usable dist/index.js (run npm run build first)" >&2
-  exit 1
-fi
-exec node "$entry"
+echo "run-current: no usable lifecycle entry; run npm run build first" >&2
+exit 1

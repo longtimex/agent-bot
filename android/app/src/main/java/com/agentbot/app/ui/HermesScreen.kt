@@ -55,17 +55,18 @@ fun HermesScreen(vm: AppViewModel) {
             .padding(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("Hermes 记忆", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = vm::refreshHermes) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("刷新", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
+        ScreenHeader(
+            title = "Hermes 记忆",
+            subtitle = "维护跨会话的长期记忆",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                TextButton(onClick = vm::refreshHermes) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            },
+        )
         Text(
             "Hermes 每次会话都会读这两份记忆；写入立即生效，停用只是跳过，不会删除内容。",
             color = TextSecondary,

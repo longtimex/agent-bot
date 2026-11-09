@@ -30,17 +30,18 @@ import com.agentbot.app.ui.theme.TextSecondary
 @Composable
 fun HelpScreen(vm: AppViewModel) {
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("帮助", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = vm::refreshHelp) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("刷新", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
+        ScreenHeader(
+            title = "帮助",
+            subtitle = "命令词典与使用说明",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                TextButton(onClick = vm::refreshHelp) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            },
+        )
 
         val sections = vm.helpView?.sections.orEmpty()
         Row(

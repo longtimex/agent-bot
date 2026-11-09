@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -28,28 +28,19 @@ function runScript(cwd: string, env: NodeJS.ProcessEnv, timeoutMs = 15_000): Pro
   })
 }
 
-test("apply-release uses the current release's control CLI when the checkout has no dist", async () => {
+test("apply-release delegates to the lifecycle CLI from a managed release", async () => {
   const dir = tempDir()
   try {
-    // A minimal checkout: only scripts and the state file. There is deliberately
-    // no dist/release-control.js, which is the state after a cleaned build.
+    // A managed install can lose the checkout build while a release is still
+    // current. The wrapper must use that release's lifecycle CLI, not insist on
+    // a dist/release-control.js from the old shell implementation.
     mkdirSync(join(dir, "scripts"), { recursive: true })
     mkdirSync(join(dir, "data", "releases", "store", "current", "dist"), { recursive: true })
     const release = join(dir, "data", "releases", "store", "current")
-    // A runnable stand-in for the built entrypoint, and a minimal control CLI
-    // that reads the same state shape as the real release-control.
     writeFileSync(join(release, "dist", "index.js"), "process.exit(0)\n")
     writeFileSync(
-      join(release, "dist", "release-control.js"),
-      [
-        'const fs = require("fs")',
-        'const path = require("path")',
-        'const state = JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR ?? "data", "releases", "state.json"), "utf8"))',
-        'const current = state.current',
-        'if (process.argv[2] === "entry" && current?.path) process.stdout.write(current.path + "/dist/index.js")',
-        'if (process.argv[2] === "current-id" && current?.id) process.stdout.write(current.id)',
-        "",
-      ].join("\n"),
+      join(release, "dist", "bot-cli.js"),
+      'if (process.argv[2] !== "restart") process.exit(2)\nconsole.log("lifecycle restart selected")\n',
     )
     writeFileSync(join(release, "package.json"), JSON.stringify({ version: "0.5.0" }))
     writeFileSync(
@@ -63,18 +54,11 @@ test("apply-release uses the current release's control CLI when the checkout has
       readFileSync("scripts/apply-release.sh", "utf8"),
     )
     chmodSync(join(dir, "scripts", "apply-release.sh"), 0o755)
-    // Avoid spawning a real bot: the script must fail at the health probe, after
-    // selecting the release control CLI, with a log that proves selection occurred.
     const result = await runScript(dir, {
       DATA_DIR: "data",
-      RELEASE_SUPERVISOR: "script",
-      RELEASE_HEALTH_TIMEOUT: "1",
-      RELEASE_HEALTH_INTERVAL: "1",
     })
-    assert.notEqual(result.code, 0)
-    const log = existsSync(join(dir, "data", "bot.log")) ? readFileSync(join(dir, "data", "bot.log"), "utf8") : ""
-    assert.doesNotMatch(log, /release-control\.js is unavailable/)
-    assert.match(log, /no pending release|started/)
+    assert.equal(result.code, 0, result.output)
+    assert.match(result.output, /lifecycle restart selected/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

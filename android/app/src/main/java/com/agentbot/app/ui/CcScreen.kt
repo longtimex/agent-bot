@@ -99,17 +99,18 @@ fun CcScreen(vm: AppViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("cc-switch 控制台", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = vm::refreshCc) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("刷新", modifier = Modifier.padding(start = 4.dp))
-            }
-        }
+        ScreenHeader(
+            title = "cc-switch 控制台",
+            subtitle = "Provider、用量与会话配置",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                TextButton(onClick = vm::refreshCc) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
+                }
+            },
+        )
 
         if (vm.ccBusy) {
             LinearProgressIndicator(

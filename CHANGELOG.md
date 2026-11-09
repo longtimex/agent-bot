@@ -29,8 +29,24 @@
 
 ## [未发布]
 
+### 新增
+
+- **统一生命周期 CLI**：新增 `npm run bot -- <command>`，统一 `install`、`setup`、`doctor`、`status`、`logs`、`run`、`start`、`stop`、`restart`、`update`、`opencode` 与 `uninstall`。script/systemd supervisor、PID/锁身份、current release、安装清单和健康检查共用 `src/runtime.ts`，旧 `npm run restart`、`scripts/restart.sh`、`scripts/apply-release.sh`、`scripts/run-current.sh` 保留为兼容入口。
+- **安全卸载**：新增 `npm run bot -- uninstall`。默认停止服务并删除受管 launcher/unit，但保留 `data/` 与 `.env`；`--purge-data` 才删除数据，`--dry-run` 只打印动作，`--yes` 供非交互环境使用。只删除带 `managed by agent-bot` 标记的文件，并在任何破坏性操作前拒绝 `/`、项目根与包含项目目录的 `DATA_DIR`。
+- **systemd 发布切换**：`npm run bot -- restart` 在 systemd 下会先激活 pending，再重启 unit、等待本次启动健康检查；失败自动回滚并重启旧版本，成功或回滚结果写入 `data/releases/state.json`。安装器同时启用 Bot 与本机 OpenCode unit。
+
+### 变更
+
+- **安卓 UI 层级与导航重做**：抽屉从 18 项平铺改为「对话 / 自动化 / 智能体与工具 / 服务器」分组，顶部显示连接状态、默认引擎和队列角标，并将「新对话」做成主操作；聊天顶栏收敛为模型芯片、连接点、搜索和溢出菜单，会话设置、队列、状态与设置不再挤占标题栏；空会话提示可直接填入三条常用任务，助手气泡增加身份标签、失败/停止状态和更清晰的复制与重试操作。
+- **安卓视觉系统统一**：扩充 Material3 Typography、Shapes、表面色与描边 token，新增共享 `ScreenHeader`、`SectionLabel`、`AppCard`、`StatusPill`、`EmptyState`；设置、运行状态、历史、提醒、定时任务、帮助，以及会话、队列、引擎、模型、cc-switch、magpie、Hermes、配置、白名单、代理、运维等页面全部使用统一标题层级、卡片边框与空状态；二级页新增「返回聊天」按钮，聊天输入区改为带聚焦边框的整合 composer，窄屏信息密度更稳定。连接点补充读屏状态说明，任务运行时抽屉会禁用「新对话」并显示原因。
+- **安卓配对与网络诊断**：设置页会预览实际请求的 `/api/v1`，并在手机回环地址或公网明文 HTTP 时给出警告；扫码只导入地址、令牌与加密密钥，不再立即保存。保存时先对候选地址执行健康与会话探测，成功后才替换旧配置；失败留在设置页显示中文原因，旧连接及其在线状态不受影响。DNS、超时、拒绝连接与 TLS 证书错误统一改为可操作的中文提示。
+- **Instabox 云电脑教程**：README 新增从空机到手机聊天的完整示例，覆盖 `instabox-port publish` 首选方案、Cloudflare 临时隧道、Tailscale 长期方案、`smoke:app` 链路验证、配对步骤与常见问题；android/README 的暴露方式表同步加入 Instabox 端口发布。
+- **`npm run setup` 串接可选工具安装**：客户端配置成功后会继续检测 Agent CLI、magpie 与 cc-switch，并列出未安装项供按编号多选安装；工具阶段失败不会撤销已保存的 `.env` 或让客户端配置失败。`npm run clients` 保持只管理控制端，首次启动的自动向导只完成客户端配置，不额外下载工具。新增 `npm run setup -- --check-tools`（只检测）与 `--no-tools`（跳过）；`install.sh` 将 `--tools` / `--check-tools` / `--no-tools` 传入同一次向导，避免重复检测。新增 `npm run setup:tools` 供单独管理工具。
+- **安装与运行入口收敛**：README 与安装脚本提示统一使用 `npm run bot -- start/restart/status/doctor/logs`；`install.sh --systemd` / `--user-systemd` 在不带 `--start` 时也会安装 unit，并校验互斥参数与 `--skip-build` 的 `dist/bot-cli.js`。
+
 ### 修复
 
+- **新会话不再先清空本地聊天**：`newChat()` 改为等服务端接受重置并返回新会话后才清空气泡与媒体缓存；请求失败时保留当前对话，不会出现“界面已清空、服务端仍保留旧上下文”的错位。
 - **CI 的 Node 20 兼容性**：`undici` 从 8.x（要求 Node ≥22.19）降到 7.30.2（支持 Node ≥20.18.1），修复 Node 20 runner 在导入阶段因 zstd API 缺失导致的 11 个测试文件崩溃；`engines`、安装脚本和 README 的 Node 下限同步为 20.18.1，CI 继续覆盖 Node 20/22 并新增 Node 24。诊断测试显式固定 `systemd` 状态，避免 GitHub runner 自身运行 systemd 时误报。
 - **无 API 部署的发布健康检查**：`apply-release.sh` 在启动/重启前记录时间边界；`release-health.mjs` 在 `API_ENABLED=0` 或缺少令牌时改读 `data/startup-check.json`，并要求 release、时间与脚本监督的 PID 都对应本次启动。过期的成功记录、其它 release 或启动失败记录都会被拒绝，Telegram/飞书-only 部署不再因探针失败而每次更新都回滚。
 - **启动自检时序**：成功的 `data/startup-check.json` 现在写在各控制端启动之后，并记录 checkout 状态（release=`checkout`）、引擎与各控制端状态，避免 API 已监听但 Telegram 初始化失败时被误判为健康。

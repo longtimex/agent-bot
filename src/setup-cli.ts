@@ -1,6 +1,8 @@
-import { setupFromCli } from "./setup.js"
+import { parseSetupToolMode, setupFromCli } from "./setup.js"
 
-setupFromCli()
+// `npm run clients` is a client-only maintenance entry point. `npm run setup`
+// continues into the optional tool installer after the client configuration.
+setupFromCli({ tools: parseSetupToolMode(process.argv.slice(2)) })
   .then((result) => {
     // Leaving the menu without changes is a valid no-op for an installer; other
     // failures still return non-zero so automation can report them.

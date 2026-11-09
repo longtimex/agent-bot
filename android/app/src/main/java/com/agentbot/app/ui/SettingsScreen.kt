@@ -13,8 +13,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -22,18 +20,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.agentbot.app.data.ApiFormat
+import com.agentbot.app.ui.theme.TextSecondary
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import com.agentbot.app.ui.theme.TextSecondary
 
-/** Server address + token entry, with a live connection test. */
+/** Server address + token entry, with address preview, loopback guard and a live connection test. */
 @Composable
 fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRepository) {
     var baseUrl by remember { mutableStateOf(settings.baseUrl) }
@@ -41,6 +43,32 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
     var encKey by remember { mutableStateOf(settings.encKey) }
     var message by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
+    var scanned by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val normalized = ApiFormat.normalizeBaseUrl(baseUrl)
+    val warning = ApiFormat.connectionWarning(normalized)
+    val healthy = vm.health != null && vm.health?.ok == true && vm.connectionError == null
+
+    fun connect() {
+        if (testing) return
+        if (normalized.isBlank() || token.isBlank()) {
+            message = "请填写服务器地址与访问令牌"
+            return
+        }
+        testing = true
+        message = null
+        scope.launch {
+            val result = vm.saveConnection(normalized, token.trim(), encKey.trim().ifBlank { null })
+            testing = false
+            if (result.isSuccess) {
+                baseUrl = normalized
+                message = "✅ 连接成功"
+            } else {
+                // saveConnection probes before writing, so the stored pairing is still the old one.
+                message = "连接失败，已保留原配置；请检查新地址、令牌和隧道状态"
+            }
+        }
+    }
 
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         val raw = result.contents ?: return@rememberLauncherForActivityResult
@@ -50,11 +78,11 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             val scannedToken = obj["token"]?.jsonPrimitive?.content.orEmpty().trim()
             if (scannedUrl.isBlank() || scannedToken.isBlank()) throw IllegalStateException("二维码缺少 url/token")
             val scannedEnc = obj["enc"]?.jsonPrimitive?.content.orEmpty().trim()
-            val normalized = ApiFormat.normalizeBaseUrl(scannedUrl)
-            baseUrl = normalized
+            baseUrl = ApiFormat.normalizeBaseUrl(scannedUrl)
             token = scannedToken
             encKey = scannedEnc
-            vm.saveConnection(normalized, scannedToken, scannedEnc.ifBlank { null })
+            scanned = true
+            message = "已导入二维码信息。请确认地址预览无误后点「保存并连接」。"
         }.onFailure { message = "二维码无效：${it.message}" }
     }
 
@@ -79,27 +107,54 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
+            .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        Text("设置", style = MaterialTheme.typography.titleLarge)
+        ScreenHeader(
+            title = "设置",
+            subtitle = "配对服务器、检查连接与应用更新",
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                StatusPill(
+                    text = if (healthy) "已连接" else "未连接",
+                    tone = if (healthy) StatusTone.Success else StatusTone.Warning,
+                )
+            },
+        )
         Text(
-            "在服务器的 Telegram 聊天里发送 /api 即可获取这两项信息。",
+            "在服务器的 Telegram / 飞书聊天里发送 /api 获取地址与令牌；云电脑需先把端口发布成手机可达的 HTTPS 地址。",
             color = TextSecondary,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 6.dp, bottom = 18.dp),
+            modifier = Modifier.padding(top = 8.dp, bottom = 18.dp),
         )
 
+        SectionLabel("连接")
         OutlinedTextField(
             value = baseUrl,
-            onValueChange = { baseUrl = it },
+            onValueChange = { baseUrl = it; scanned = false },
             label = { Text("服务器地址") },
             placeholder = { Text("https://bot.example.com") },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             singleLine = true,
         )
+        if (normalized.isNotBlank()) {
+            Text(
+                "API：${ApiFormat.apiUrl(normalized)}",
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        warning?.let {
+            Text(
+                "⚠️ $it",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
         OutlinedTextField(
             value = token,
-            onValueChange = { token = it },
+            onValueChange = { token = it; scanned = false },
             label = { Text("访问令牌") },
             modifier = Modifier
                 .fillMaxWidth()
@@ -116,19 +171,21 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             singleLine = true,
         )
 
+        if (scanned) {
+            Text(
+                "二维码已导入但尚未保存。Instabox 等云电脑的地址可能随端口发布变化，请先核对地址再连接。",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
+
         Row(modifier = Modifier.padding(top = 20.dp)) {
             Button(
-                onClick = {
-                    testing = true
-                    message = null
-                    val normalized = ApiFormat.normalizeBaseUrl(baseUrl)
-                    baseUrl = normalized
-                    vm.saveConnection(normalized, token.trim(), encKey.trim().ifBlank { null })
-                    testing = false
-                },
-                enabled = baseUrl.isNotBlank() && token.isNotBlank(),
+                onClick = { connect() },
+                enabled = !testing && baseUrl.isNotBlank() && token.isNotBlank(),
             ) {
-                Text(if (testing) "保存中…" else "保存并连接")
+                Text(if (testing) "连接中…" else "保存并连接")
             }
             OutlinedButton(
                 onClick = {
@@ -144,22 +201,38 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
         }
 
         message?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 12.dp))
+            Text(
+                it,
+                color = if (it.startsWith("✅")) com.agentbot.app.ui.theme.OkGreen else MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 12.dp),
+            )
         }
 
         val health = vm.health
-        if (health != null && health.ok) {
-            Text(
-                "✅ 已连接：${health.name ?: "agent-bot"}${health.version?.let { " $it" } ?: ""} · 引擎 ${health.engine ?: "?"}",
-                color = com.agentbot.app.ui.theme.OkGreen,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(top = 16.dp),
-            )
-            Text(
-                if (health.encryption) "🔐 消息级加密：已启用（请求与响应自动加密）" else "🔒 消息级加密：服务器未开启（API_ENCRYPTION=1 可启用）",
-                color = if (health.encryption) com.agentbot.app.ui.theme.OkGreen else TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
+        if (healthy && health != null) {
+            SectionLabel("连接状态", modifier = Modifier.padding(top = 20.dp))
+            AppCard(modifier = Modifier.padding(top = 8.dp)) {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    StatusPill("已连接", tone = StatusTone.Success)
+                    Text(
+                        "${health.name ?: "agent-bot"}${health.version?.let { " $it" } ?: ""}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+                Text(
+                    "引擎：${health.engine ?: "?"}",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Text(
+                    if (health.encryption) "消息级加密已启用" else "服务器未开启消息级加密",
+                    color = if (health.encryption) com.agentbot.app.ui.theme.OkGreen else TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
         vm.connectionError?.let {
             Text("⚠️ $it", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 16.dp))
