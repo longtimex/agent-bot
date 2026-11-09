@@ -7,19 +7,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,7 +30,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.ProxyInfo
+import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 /** Telegram's /proxy panel: add, test, enable and remove outbound proxies. */
 @Composable
@@ -40,55 +43,56 @@ fun ProxyScreen(vm: AppViewModel) {
         ScreenHeader(
             title = "网络代理",
             subtitle = "管理 Bot 的出站代理",
-            modifier = Modifier.padding(horizontal = 20.dp),
+            modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                Row {
-                    TextButton(onClick = { adding = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("添加", modifier = Modifier.padding(start = 4.dp))
-                    }
-                    TextButton(onClick = vm::refreshProxies) {
-                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                    }
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Add,
+                    contentDescription = "添加代理",
+                    onClick = { adding = true },
+                )
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新代理",
+                    onClick = vm::refreshProxies,
+                )
             }
         )
 
         Text(
             "仅 Bot 下载媒体时走代理；Telegram 与本地 OpenCode 流量保持直连。",
             color = TextSecondary,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 20.dp),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
         if (vm.proxyBusy) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+            LoadingBar(
+                modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 10.dp),
             )
         }
 
         vm.proxyTestMessage?.let { message ->
-            Text(
-                message,
-                color = if (message.startsWith("✅")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+            val ok = message.startsWith("连接正常")
+            InlineNotice(
+                text = message,
+                modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 6.dp),
+                tone = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                icon = if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error,
             )
         }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
             if (vm.proxies.isEmpty()) {
                 item {
-                    Text(
-                        "尚未添加代理。添加时会先测试连通性（10 秒超时）。",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
+                    EmptyState(
+                        icon = Icons.Filled.Settings,
+                        title = "尚未添加代理",
+                        message = "点右上角 + 添加；保存前会先测试连通性，超时 10 秒。",
                     )
                 }
             }
@@ -97,9 +101,13 @@ fun ProxyScreen(vm: AppViewModel) {
             }
             if (vm.activeProxyId != null) {
                 item {
-                    TextButton(enabled = !vm.proxyBusy, onClick = vm::disableProxy) {
-                        Text("⏹ 停用代理", color = MaterialTheme.colorScheme.error)
-                    }
+                    QuietButton(
+                        text = "停用代理",
+                        icon = Icons.Filled.Stop,
+                        enabled = !vm.proxyBusy,
+                        danger = true,
+                        onClick = vm::disableProxy,
+                    )
                 }
             }
         }
@@ -122,26 +130,50 @@ fun ProxyScreen(vm: AppViewModel) {
 
 @Composable
 private fun ProxyCard(vm: AppViewModel, proxy: ProxyInfo) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("#${proxy.id} ${proxy.name}", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                Text(
-                    if (proxy.active) "已启用" else proxy.protocol?.uppercase() ?: "",
-                    color = if (proxy.active) MaterialTheme.colorScheme.primary else TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
+    AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                proxy.name.ifBlank { "代理 #${proxy.id}" },
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            if (proxy.active) {
+                StatusPill(text = "已启用", tone = StatusTone.Success)
+            } else {
+                StatusPill(text = proxy.protocol?.uppercase() ?: "未启用")
+            }
+        }
+        Text(
+            proxy.url,
+            color = TextTertiary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 5.dp),
+        )
+        Row(
+            modifier = Modifier.padding(top = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!proxy.active) {
+                QuietButton(
+                    text = "启用",
+                    icon = Icons.Filled.PlayArrow,
+                    enabled = !vm.proxyBusy,
+                    onClick = { vm.useProxy(proxy.id) },
                 )
             }
-            Text(proxy.url, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (!proxy.active) {
-                    TextButton(enabled = !vm.proxyBusy, onClick = { vm.useProxy(proxy.id) }) { Text("▶️ 启用") }
-                }
-                TextButton(enabled = !vm.proxyBusy, onClick = { vm.testProxy(proxy.id) }) { Text("🧪 测试") }
-                TextButton(enabled = !vm.proxyBusy, onClick = { vm.removeProxy(proxy.id) }) {
-                    Text("🗑 删除", color = MaterialTheme.colorScheme.error)
-                }
-            }
+            QuietButton(
+                text = "测试",
+                icon = Icons.Filled.Speed,
+                enabled = !vm.proxyBusy,
+                onClick = { vm.testProxy(proxy.id) },
+            )
+            QuietButton(
+                text = "删除",
+                icon = Icons.Filled.DeleteOutline,
+                enabled = !vm.proxyBusy,
+                danger = true,
+                onClick = { vm.removeProxy(proxy.id) },
+            )
         }
     }
 }

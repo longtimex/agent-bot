@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -26,17 +28,11 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,11 +44,18 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.HistoryEntry
+import com.agentbot.app.ui.theme.AppRadius
+import com.agentbot.app.ui.theme.AppSpacing
+import com.agentbot.app.ui.theme.Border
+import com.agentbot.app.ui.theme.OkGreen
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 import com.agentbot.app.data.ApiFormat
 import java.time.Instant
 import java.time.LocalDate
@@ -146,13 +149,12 @@ fun HistoryScreen(vm: AppViewModel) {
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
                 Box {
-                    IconButton(onClick = { actionsOpen = true }, enabled = !exporting) {
-                        Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = "历史操作",
-                            tint = TextSecondary,
-                        )
-                    }
+                    AppIconButton(
+                        icon = Icons.Filled.MoreVert,
+                        contentDescription = "历史操作",
+                        enabled = !exporting,
+                        onClick = { actionsOpen = true },
+                    )
                     DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
                         DropdownMenuItem(
                             text = { Text("分享 Markdown") },
@@ -197,12 +199,13 @@ fun HistoryScreen(vm: AppViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 // Same window choice Telegram offers through `/history <条数>`
                 HISTORY_LIMIT_CHOICES.forEach { count ->
-                    FilterChip(
+                    ChoicePill(
+                        text = "$count",
                         selected = vm.historyLimit == count,
                         onClick = { vm.updateHistoryLimit(count) },
-                        label = { Text("$count 条") },
                     )
                 }
+                Text("条记录", color = TextTertiary, style = MaterialTheme.typography.labelSmall)
             }
             if (vm.historyTotal > vm.history.size) {
                 Text(
@@ -229,40 +232,66 @@ fun HistoryScreen(vm: AppViewModel) {
         }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             vm.history.groupBy { historyDayLabel(it.at) }.forEach { (label, entries) ->
                 item(key = "day-$label") {
-                    Text(
-                        label,
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                    SectionHeader(
+                        title = label,
+                        modifier = Modifier.padding(start = 2.dp, top = 14.dp, bottom = 8.dp),
                     )
                 }
                 items(entries, key = { it.at.toString() + it.prompt.hashCode() }) { entry ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.md),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.66f)),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                    ) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { selected = entry }
-                                .padding(14.dp),
+                                .padding(horizontal = 15.dp, vertical = 14.dp),
                         ) {
-                            Text(entry.prompt, style = MaterialTheme.typography.bodyLarge, maxLines = 3)
-                            val outcome = when (entry.outcome) {
-                                "ok" -> "✅ 成功"
-                                "cancelled" -> "🚫 已取消"
-                                else -> "❌ 失败"
-                            }
                             Text(
-                                "$outcome · ${entry.engine ?: "?"}${entry.model?.let { " / $it" } ?: ""}" +
-                                    (if (entry.scheduled == true) " · 🗓 定时" else "") +
-                                    " · ${AppViewModel.formatDuration(entry.ms)} · ${AppViewModel.formatTime(entry.at)}",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.padding(top = 6.dp),
+                                entry.prompt,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                            Row(
+                                modifier = Modifier.padding(top = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                StatusPill(
+                                    text = when (entry.outcome) {
+                                        "ok" -> "成功"
+                                        "cancelled" -> "已取消"
+                                        else -> "失败"
+                                    },
+                                    tone = when (entry.outcome) {
+                                        "ok" -> StatusTone.Success
+                                        "cancelled" -> StatusTone.Warning
+                                        else -> StatusTone.Error
+                                    },
+                                )
+                                if (entry.scheduled == true) StatusPill("定时")
+                                Text(
+                                    listOfNotNull(
+                                        entry.engine,
+                                        entry.model,
+                                        AppViewModel.formatDuration(entry.ms),
+                                        AppViewModel.formatTime(entry.at),
+                                    ).joinToString(" · "),
+                                    color = TextTertiary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 }
@@ -326,34 +355,41 @@ fun RemindersScreen(vm: AppViewModel) {
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(vm.reminders, key = { it.id }) { reminder ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    AppCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(modifier = Modifier.weight(1f).padding(14.dp)) {
-                                Text(reminder.text, style = MaterialTheme.typography.bodyLarge)
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 16.dp, top = 14.dp, bottom = 14.dp, end = 4.dp),
+                            ) {
+                                Text(reminder.text, style = MaterialTheme.typography.bodyMedium)
                                 Text(
                                     listOfNotNull(
                                         reminder.repeat?.describe(),
                                         ApiFormat.epochMsToLocalString(reminder.dueAt),
                                         dueCountdown(reminder.dueAt, now),
                                     ).joinToString(" · "),
-                                    color = TextSecondary,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextTertiary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(top = 5.dp),
                                 )
                             }
                             // 一次性提醒可延后（与 Telegram 投递按钮同款时长）；重复提醒保持周期
                             if (reminder.repeat == null) {
-                                TextButton(onClick = { snoozeTarget = reminder }) { Text("延后") }
+                                QuietButton(text = "延后", onClick = { snoozeTarget = reminder })
                             }
-                            IconButton(onClick = { vm.deleteReminder(reminder.id) }) {
-                                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = TextSecondary)
-                            }
+                            AppIconButton(
+                                icon = Icons.Filled.Delete,
+                                contentDescription = "删除",
+                                onClick = { vm.deleteReminder(reminder.id) },
+                            )
                         }
                     }
                 }
@@ -408,10 +444,10 @@ fun SchedulesScreen(vm: AppViewModel) {
             onBack = { vm.navigate(Screen.Chat) },
         )
         Text(
-            "「▶️ 运行」立即执行一次，不影响原定时间。",
+            "点播放可立即执行一次，不影响原定时间。",
             color = TextSecondary,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 20.dp),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp),
         )
         if (vm.schedules.isEmpty()) {
             Column(
@@ -428,43 +464,64 @@ fun SchedulesScreen(vm: AppViewModel) {
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(vm.schedules, key = { it.id }) { schedule ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    AppCard(contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(modifier = Modifier.weight(1f).padding(14.dp)) {
-                                Text(schedule.prompt, style = MaterialTheme.typography.bodyLarge, maxLines = 3)
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 16.dp, top = 14.dp, bottom = 14.dp, end = 2.dp),
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        schedule.prompt,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (schedule.paused) {
+                                        StatusPill("已暂停", modifier = Modifier.padding(start = 8.dp))
+                                    }
+                                }
                                 Text(
                                     listOfNotNull(
                                         // Mirrors Telegram's list: which engine/model will actually run this.
                                         schedule.target?.takeIf { it.isNotBlank() }?.let { "执行 $it" },
                                         schedule.repeat?.describe() ?: "一次性",
                                         ApiFormat.epochMsToLocalString(schedule.dueAt),
-                                        if (schedule.paused) "已暂停" else dueCountdown(schedule.dueAt, now),
+                                        dueCountdown(schedule.dueAt, now),
                                         schedule.lastStatus?.let { "上次：$it" },
                                     ).joinToString(" · "),
-                                    color = TextSecondary,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextTertiary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 5.dp),
                                 )
                             }
-                            IconButton(onClick = { vm.runScheduleNow(schedule.id) }) {
-                                Icon(Icons.Filled.PlayCircle, contentDescription = "立即执行", tint = TextSecondary)
-                            }
-                            IconButton(onClick = { vm.setSchedulePaused(schedule.id, !schedule.paused) }) {
-                                Icon(
-                                    if (schedule.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
-                                    contentDescription = if (schedule.paused) "恢复" else "暂停",
-                                    tint = TextSecondary,
-                                )
-                            }
-                            IconButton(onClick = { vm.deleteSchedule(schedule.id) }) {
-                                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = TextSecondary)
-                            }
+                            AppIconButton(
+                                icon = Icons.Filled.PlayCircle,
+                                contentDescription = "立即执行",
+                                onClick = { vm.runScheduleNow(schedule.id) },
+                                enabled = !schedule.paused,
+                            )
+                            AppIconButton(
+                                icon = if (schedule.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                                contentDescription = if (schedule.paused) "恢复" else "暂停",
+                                onClick = { vm.setSchedulePaused(schedule.id, !schedule.paused) },
+                            )
+                            AppIconButton(
+                                icon = Icons.Filled.Delete,
+                                contentDescription = "删除",
+                                onClick = { vm.deleteSchedule(schedule.id) },
+                            )
                         }
                     }
                 }
@@ -493,12 +550,11 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("新建定时任务") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AppTextField(
                     value = text,
                     onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("例如：30m 检查服务器、每天 09:00 生成日报") },
+                    placeholder = "例如：30m 检查服务器、每天 09:00 生成日报",
                     maxLines = 3,
                 )
                 Box {
@@ -524,12 +580,11 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                         }
                     }
                 }
-                OutlinedTextField(
+                AppTextField(
                     value = model,
                     onValueChange = { model = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("模型（选填，如 gemini / sonnet）") },
-                    maxLines = 1,
+                    placeholder = "模型（选填，如 gemini / sonnet）",
+                    singleLine = true,
                 )
                 Text(
                     "到点由所选引擎执行并把结果发到 Telegram；留空则沿用当前会话的引擎与模型。",
@@ -560,16 +615,22 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
 /** Right-bottom floating action pinned above everything for the list screens. */
 @Composable
 private fun FloatingActionButtonRow(onClick: () -> Unit) {
-    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
-        androidx.compose.material3.ExtendedFloatingActionButton(
-            onClick = onClick,
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
+        Surface(
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp),
-            containerColor = MaterialTheme.colorScheme.primary,
+                .padding(20.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onClick),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primary,
+            shadowElevation = 8.dp,
         ) {
-            Icon(Icons.Filled.Add, contentDescription = null)
-            Text("新建", modifier = Modifier.padding(start = 6.dp))
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = "新建",
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.padding(15.dp).size(24.dp),
+            )
         }
     }
 }

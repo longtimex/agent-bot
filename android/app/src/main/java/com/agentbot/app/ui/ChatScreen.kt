@@ -19,21 +19,26 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image as ComposeImage
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,10 +46,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -64,11 +72,9 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -77,11 +83,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -99,14 +102,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -116,10 +123,13 @@ import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.TaskMedia
 import com.agentbot.app.ui.theme.AccentSoft
+import com.agentbot.app.ui.theme.AppRadius
 import com.agentbot.app.ui.theme.Border
 import com.agentbot.app.ui.theme.BubbleUser
 import com.agentbot.app.ui.theme.OkGreen
+import com.agentbot.app.ui.theme.SurfaceHigh
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 import java.io.File
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
@@ -337,40 +347,32 @@ private fun ChatTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 4.dp),
+                .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onOpenDrawer) {
-                Icon(
-                    Icons.Filled.Menu,
-                    contentDescription = "菜单",
-                    tint = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.size(21.dp),
-                )
-            }
+            AppIconButton(
+                icon = Icons.Filled.Menu,
+                contentDescription = "菜单",
+                tint = MaterialTheme.colorScheme.onBackground,
+                onClick = onOpenDrawer,
+            )
             ModelChip(vm)
             androidx.compose.foundation.layout.Spacer(modifier = Modifier.weight(1f))
             ConnectionDot(
                 connected = vm.session != null && vm.connectionError == null,
                 onNavigate = { vm.navigate(Screen.Settings) },
             )
-            IconButton(onClick = onToggleSearch) {
-                Icon(
-                    if (searching) Icons.Filled.Close else Icons.Filled.Search,
-                    contentDescription = if (searching) "关闭搜索" else "搜索",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
+            AppIconButton(
+                icon = if (searching) Icons.Filled.Close else Icons.Filled.Search,
+                contentDescription = if (searching) "关闭搜索" else "搜索",
+                onClick = onToggleSearch,
+            )
             Box {
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(
-                        Icons.Filled.MoreVert,
-                        contentDescription = "更多操作",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
+                AppIconButton(
+                    icon = Icons.Filled.MoreVert,
+                    contentDescription = "更多操作",
+                    onClick = { menuOpen = true },
+                )
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
                         text = { Text("任务队列") },
@@ -443,36 +445,49 @@ private fun ChatSearchBar(query: String, onQueryChange: (String) -> Unit, onClos
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 4.dp, bottom = 6.dp),
+                .padding(start = 12.dp, end = 8.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = onQueryChange,
-                modifier = Modifier
-                    .weight(1f)
-                    .focusRequester(focus),
-                placeholder = { Text("搜索当前会话…", color = TextSecondary) },
-                leadingIcon = {
-                    Icon(Icons.Filled.Search, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
-                },
-                trailingIcon = {
+            Surface(
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(18.dp),
+                color = SurfaceHigh.copy(alpha = 0.5f),
+                border = BorderStroke(1.dp, Border.copy(alpha = 0.72f)),
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 14.dp, end = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = TextTertiary, modifier = Modifier.size(18.dp))
+                    BasicTextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focus)
+                            .padding(horizontal = 10.dp, vertical = 13.dp),
+                        decorationBox = { inner ->
+                            Box {
+                                if (query.isEmpty()) {
+                                    Text("搜索当前会话…", style = MaterialTheme.typography.bodyMedium, color = TextTertiary)
+                                }
+                                inner()
+                            }
+                        },
+                    )
                     if (query.isNotEmpty()) {
-                        IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Filled.Close, contentDescription = "清空", tint = TextSecondary, modifier = Modifier.size(16.dp))
-                        }
+                        AppIconButton(
+                            icon = Icons.Filled.Close,
+                            contentDescription = "清空",
+                            onClick = { onQueryChange("") },
+                        )
                     }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.surfaceVariant,
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
-            TextButton(onClick = onClose) { Text("取消") }
+                }
+            }
+            QuietButton(text = "取消", onClick = onClose)
         }
     }
 }
@@ -519,9 +534,11 @@ private fun SearchResults(matches: List<IndexedValue<ChatMessage>>, query: Strin
             val message = indexed.value
             Surface(
                 color = MaterialTheme.colorScheme.surface,
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(AppRadius.md),
+                border = BorderStroke(1.dp, Border.copy(alpha = 0.62f)),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clip(RoundedCornerShape(AppRadius.md))
                     .clickable { onOpen(indexed.index) },
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -566,11 +583,40 @@ private fun snippet(text: String, query: String, radius: Int = 36): String {
 private fun ModelChip(vm: AppViewModel) {
     var showPicker by remember { mutableStateOf(false) }
     val label = vm.session?.model ?: vm.session?.engineLabel ?: "未连接"
-    AssistChip(
-        onClick = { showPicker = true },
-        label = { Text(label, maxLines = 1) },
-        modifier = Modifier.widthIn(max = 260.dp),
-    )
+    Surface(
+        modifier = Modifier
+            .widthIn(max = 270.dp)
+            .clip(CircleShape)
+            .clickable(onClick = { showPicker = true }),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, Border.copy(alpha = 0.7f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 10.dp, end = 7.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                tint = TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
     if (showPicker) {
         PickerDialog(title = "切换引擎 / 模型", onDismiss = { showPicker = false }, vm = vm)
     }
@@ -590,7 +636,7 @@ private fun ConnectionDot(connected: Boolean, onNavigate: () -> Unit) {
     ) {
         Box(
             modifier = Modifier
-                .size(10.dp)
+                .size(9.dp)
                 .clip(CircleShape)
                 .background(if (connected) OkGreen else MaterialTheme.colorScheme.error),
         )
@@ -608,27 +654,33 @@ private fun EmptyChat(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 24.dp),
+            .padding(horizontal = 28.dp, vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Surface(
-            modifier = Modifier.size(64.dp),
-            shape = MaterialTheme.shapes.large,
-            color = AccentSoft,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+            modifier = Modifier.size(58.dp),
+            shape = CircleShape,
+            color = SurfaceHigh.copy(alpha = 0.62f),
+            border = BorderStroke(1.dp, Border.copy(alpha = 0.85f)),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("⚡", fontSize = 30.sp)
+                Icon(
+                    Icons.Filled.Bolt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(26.dp),
+                )
             }
         }
         Text(
-            "今天想让 Agent 做什么？",
+            "有什么可以帮你？",
             style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.padding(top = 14.dp),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 20.dp),
         )
         Row(
-            modifier = Modifier.padding(top = 8.dp),
+            modifier = Modifier.padding(top = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -645,13 +697,14 @@ private fun EmptyChat(
             if (connected) "发消息开始任务，或从下面选一个常用入口。" else "先完成配对，再开始对话。",
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
-            modifier = Modifier.padding(top = 12.dp),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 14.dp),
         )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(top = 26.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             listOf(
                 "总结一下我今天的任务进展",
@@ -661,26 +714,36 @@ private fun EmptyChat(
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .clip(RoundedCornerShape(AppRadius.md))
                         .clickable { onSuggestion(suggestion) },
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.7f)),
+                    shape = RoundedCornerShape(AppRadius.md),
+                    color = Color.Transparent,
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Icon(
+                            Icons.Filled.ArrowUpward,
+                            contentDescription = null,
+                            tint = TextTertiary,
+                            modifier = Modifier.size(15.dp),
+                        )
                         Text(
                             suggestion,
                             style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f).padding(start = 10.dp),
                         )
-                        Text("填入", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                     }
                 }
             }
             if (!connected) {
-                TextButton(onClick = onOpenSettings) { Text("去设置连接") }
+                SecondaryButton(
+                    text = "连接服务器",
+                    modifier = Modifier.padding(top = 18.dp),
+                    onClick = onOpenSettings,
+                )
             }
         }
     }
@@ -810,11 +873,16 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
         Surface(
             modifier = Modifier.size(28.dp),
             shape = CircleShape,
-            color = AccentSoft,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+            color = SurfaceHigh.copy(alpha = 0.7f),
+            border = BorderStroke(1.dp, Border.copy(alpha = 0.8f)),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("⚡", fontSize = 14.sp)
+                Icon(
+                    Icons.Filled.Bolt,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(15.dp),
+                )
             }
         }
         Column(modifier = Modifier.widthIn(max = 340.dp)) {
@@ -825,7 +893,7 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                 Text(
                     "Agent",
                     style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = TextSecondary,
                 )
                 when (status) {
                     "failed" -> StatusPill(
@@ -907,18 +975,12 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                     }
                 }
                 if (onRetry != null && (status == "failed" || status == "cancelled")) {
-                    TextButton(
+                    QuietButton(
+                        text = if (status == "cancelled") "重新执行" else "重试",
+                        icon = Icons.Filled.Refresh,
                         onClick = onRetry,
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.heightIn(min = 28.dp),
-                    ) {
-                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Text(
-                            if (status == "cancelled") "重新执行" else "重试",
-                            modifier = Modifier.padding(start = 4.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
                 }
             }
         }
@@ -996,9 +1058,11 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
             contentAlignment = Alignment.Center,
         ) {
             if (failed) {
-                TextButton(onClick = { vm.loadMediaImage(taskId, media, retry = true) }) {
-                    Text("图片加载失败，重试")
-                }
+                QuietButton(
+                    text = "图片加载失败，重试",
+                    icon = Icons.Filled.Refresh,
+                    onClick = { vm.loadMediaImage(taskId, media, retry = true) },
+                )
             } else {
                 CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
             }
@@ -1065,27 +1129,30 @@ private fun mediaIcon(kind: String) = when (kind) {
 @Composable
 private fun ErrorBanner(message: String?, onRetry: () -> Unit, onDismiss: () -> Unit) {
     if (message == null) return
-    Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f)) {
+    Surface(color = MaterialTheme.colorScheme.background) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+                .padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                message,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodyMedium,
+            InlineNotice(
+                text = message,
+                tone = MaterialTheme.colorScheme.error,
+                icon = Icons.Filled.Info,
                 modifier = Modifier.weight(1f),
-                maxLines = 3,
             )
-            TextButton(onClick = onRetry) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("重试", modifier = Modifier.padding(start = 4.dp))
-            }
-            IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Close, contentDescription = "关闭", modifier = Modifier.size(14.dp))
-            }
+            QuietButton(
+                text = "重试",
+                icon = Icons.Filled.Refresh,
+                onClick = onRetry,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+            AppIconButton(
+                icon = Icons.Filled.Close,
+                contentDescription = "关闭错误提示",
+                onClick = onDismiss,
+            )
         }
     }
 }
@@ -1469,159 +1536,167 @@ private fun ChatInputBar(
             val pinnedEngine = vm.oneOffEngineLabel
             val pinnedModel = vm.oneOffModelLabel
             val overrideLabel = pinnedEngine?.let { engine -> pinnedModel?.let { model -> "$engine / $model" } ?: engine }
-            if (overrideLabel != null) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.Filled.Tune,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        "本条消息交给「$overrideLabel」，发送后自动恢复默认",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.weight(1f, fill = false).padding(start = 6.dp),
-                    )
-                    IconButton(onClick = { vm.updateOneOffEngine(null) }, modifier = Modifier.size(28.dp)) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "取消本条引擎指定",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(14.dp),
-                        )
-                    }
-                }
-            }
-            if (recording) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.Filled.FiberManualRecord,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(10.dp),
-                    )
-                    Text(
-                        "正在录音 %d:%02d · 最长 ${MAX_VOICE_SECONDS / 60} 分钟，点 ■ 停止并发送".format(
-                            recordSeconds / 60,
-                            recordSeconds % 60,
-                        ),
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(start = 6.dp),
-                    )
-                }
-            }
+            val composerFocus = remember { MutableInteractionSource() }
+            val composerFocused by composerFocus.collectIsFocusedAsState()
             Surface(
-                color = MaterialTheme.colorScheme.surface,
-                shape = MaterialTheme.shapes.large,
-                border = androidx.compose.foundation.BorderStroke(1.dp, Border.copy(alpha = 0.8f)),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(
+                    1.dp,
+                    if (composerFocused) MaterialTheme.colorScheme.primary.copy(alpha = 0.42f)
+                    else Border.copy(alpha = 0.72f),
+                ),
+                shadowElevation = 8.dp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .imePadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .padding(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 10.dp),
             ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Box {
-                    IconButton(onClick = { attachMenu = true }, enabled = !recording) {
-                        Icon(Icons.Filled.AttachFile, contentDescription = "添加附件", tint = TextSecondary)
-                    }
-                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("拍照") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
-                            },
-                            onClick = {
-                                attachMenu = false
-                                takePhoto()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("相册") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Image, contentDescription = null, modifier = Modifier.size(18.dp))
-                            },
-                            onClick = {
-                                attachMenu = false
-                                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("文件") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(18.dp))
-                            },
-                            onClick = {
-                                attachMenu = false
-                                filePicker.launch(arrayOf("*/*"))
-                            },
-                        )
-                    }
-                }
-                IconButton(onClick = { enginePicker = true }, enabled = !recording) {
-                    Icon(
-                        Icons.Filled.Tune,
-                        contentDescription = "本条指定引擎",
-                        tint = if (vm.oneOffEngine != null) MaterialTheme.colorScheme.primary else TextSecondary,
-                    )
-                }
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = onDraftChange,
-                    modifier = Modifier.weight(1f),
-                    enabled = !recording,
-                    placeholder = { Text("发送消息，或输入 / 执行命令…", color = TextSecondary) },
-                    shape = RoundedCornerShape(20.dp),
-                    maxLines = 5,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
-                        unfocusedBorderColor = Border.copy(alpha = 0.75f),
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                    ),
-                )
-                if (running && !recording) {
-                    IconButton(onClick = vm::stop) {
-                        Icon(Icons.Filled.Stop, contentDescription = "停止", tint = MaterialTheme.colorScheme.error)
-                    }
-                }
-                when {
-                    recording -> IconButton(onClick = { finishRecording() }) {
-                        Icon(
-                            Icons.Filled.Stop,
-                            contentDescription = "停止录音并发送",
+                Column {
+                    if (recording) {
+                        ComposerNotice(
+                            icon = Icons.Filled.FiberManualRecord,
                             tint = MaterialTheme.colorScheme.error,
+                            text = "正在录音 %d:%02d · 最长 ${MAX_VOICE_SECONDS / 60} 分钟".format(
+                                recordSeconds / 60,
+                                recordSeconds % 60,
+                            ),
                         )
                     }
-                    draft.isBlank() && vm.pendingAttachments.isEmpty() -> IconButton(onClick = { onMicClick() }) {
-                        Icon(Icons.Filled.Mic, contentDescription = "语音消息", tint = TextSecondary)
+                    if (overrideLabel != null) {
+                        ComposerNotice(
+                            icon = Icons.Filled.Tune,
+                            tint = MaterialTheme.colorScheme.primary,
+                            text = "本条交给「$overrideLabel」，发送后恢复默认",
+                            onClear = { vm.updateOneOffEngine(null) },
+                        )
                     }
-                    else -> IconButton(
-                        onClick = {
-                            if (exact != null) runCommand(exact) else onSend()
+
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = onDraftChange,
+                        enabled = !recording,
+                        interactionSource = composerFocus,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        maxLines = 6,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 54.dp)
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.TopStart) {
+                                if (draft.isEmpty()) {
+                                    Text(
+                                        if (recording) "正在录音，完成后会作为语音发送" else "问点什么，或输入 / 命令",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = TextSecondary.copy(alpha = 0.78f),
+                                    )
+                                }
+                                inner()
+                            }
                         },
-                        enabled = canSend,
+                    )
+
+                    HorizontalDivider(color = Border.copy(alpha = 0.48f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(
-                            Icons.Filled.Send,
-                            contentDescription = "发送",
-                            tint = if (canSend) MaterialTheme.colorScheme.primary else TextSecondary,
+                        Box {
+                            ComposerIconButton(
+                                icon = Icons.Filled.AttachFile,
+                                label = "添加附件",
+                                enabled = !recording,
+                                onClick = { attachMenu = true },
+                            )
+                            DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("拍照") },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    },
+                                    onClick = {
+                                        attachMenu = false
+                                        takePhoto()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("相册") },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    },
+                                    onClick = {
+                                        attachMenu = false
+                                        photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("文件") },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    },
+                                    onClick = {
+                                        attachMenu = false
+                                        filePicker.launch(arrayOf("*/*"))
+                                    },
+                                )
+                            }
+                        }
+                        ComposerIconButton(
+                            icon = Icons.Filled.Tune,
+                            label = "本条指定引擎",
+                            selected = vm.oneOffEngine != null,
+                            enabled = !recording,
+                            onClick = { enginePicker = true },
                         )
+                        Spacer(modifier = Modifier.weight(1f))
+                        if (running && !recording) {
+                            ComposerActionButton(
+                                icon = Icons.Filled.Stop,
+                                label = "停止当前任务",
+                                background = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                                content = MaterialTheme.colorScheme.error,
+                                onClick = vm::stop,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        when {
+                            recording -> ComposerActionButton(
+                                icon = Icons.Filled.Stop,
+                                label = "停止录音并发送",
+                                background = MaterialTheme.colorScheme.error,
+                                content = MaterialTheme.colorScheme.onError,
+                                onClick = { finishRecording() },
+                            )
+                            else -> {
+                                val voiceMode = draft.isBlank() && vm.pendingAttachments.isEmpty()
+                                ComposerActionButton(
+                                    icon = if (voiceMode) Icons.Filled.Mic else Icons.Filled.ArrowUpward,
+                                    label = if (voiceMode) "发送语音消息" else "发送",
+                                    background = if (voiceMode || !canSend) MaterialTheme.colorScheme.surfaceContainerHigh
+                                    else MaterialTheme.colorScheme.primary,
+                                    content = if (voiceMode || !canSend) TextSecondary
+                                    else MaterialTheme.colorScheme.onPrimary,
+                                    enabled = voiceMode || canSend,
+                                    onClick = {
+                                        if (voiceMode) {
+                                            onMicClick()
+                                        } else if (exact != null) {
+                                            runCommand(exact)
+                                        } else {
+                                            onSend()
+                                        }
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
-            }
             }
             if (enginePicker) {
                 val defaultEngine = vm.session?.engine
@@ -1701,7 +1776,7 @@ private fun ChatInputBar(
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = { enginePicker = false }) { Text("完成") }
+                        QuietButton(text = "完成", onClick = { enginePicker = false })
                     },
                 )
             }
@@ -1726,6 +1801,106 @@ private fun EngineOptionRow(label: String, detail: String?, selected: Boolean, o
             )
             if (detail != null) {
                 Text(detail, style = MaterialTheme.typography.bodyMedium, color = TextSecondary, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** A single-line status/override notice inside the composer, keeping the input surface compact. */
+@Composable
+private fun ComposerNotice(
+    icon: ImageVector,
+    tint: Color,
+    text: String,
+    onClear: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = if (onClear == null) 16.dp else 6.dp, top = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(13.dp))
+        Text(
+            text,
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 7.dp),
+        )
+        if (onClear != null) {
+            IconButton(onClick = onClear, modifier = Modifier.size(30.dp)) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "取消本条引擎指定",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerIconButton(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            modifier = Modifier.size(36.dp),
+            shape = CircleShape,
+            color = if (selected) SurfaceHigh.copy(alpha = 0.8f) else Color.Transparent,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    icon,
+                    contentDescription = label,
+                    tint = when {
+                        !enabled -> TextSecondary.copy(alpha = 0.42f)
+                        selected -> MaterialTheme.colorScheme.onSurface
+                        else -> TextSecondary
+                    },
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerActionButton(
+    icon: ImageVector,
+    label: String,
+    background: Color,
+    content: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            modifier = Modifier.size(36.dp),
+            shape = CircleShape,
+            color = if (enabled) background else background.copy(alpha = 0.55f),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label, tint = content, modifier = Modifier.size(19.dp))
             }
         }
     }

@@ -2,28 +2,23 @@ package com.agentbot.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.TextSecondary
 
 /** Telegram's `/help`, `/help full` and `/help cc` in one selectable, scrollable panel. */
@@ -33,43 +28,54 @@ fun HelpScreen(vm: AppViewModel) {
         ScreenHeader(
             title = "帮助",
             subtitle = "命令词典与使用说明",
-            modifier = Modifier.padding(horizontal = 20.dp),
+            modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                TextButton(onClick = vm::refreshHelp) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新帮助",
+                    onClick = vm::refreshHelp,
+                )
             },
         )
 
         val sections = vm.helpView?.sections.orEmpty()
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (sections.isEmpty()) {
+        if (sections.isEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = AppSpacing.screen, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text("正在加载帮助…", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
-            } else {
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = AppSpacing.screen, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 sections.forEach { section ->
-                    FilterChip(
+                    ChoicePill(
+                        text = section.title,
                         selected = section.id == vm.helpSection,
                         onClick = { vm.selectHelpSection(section.id) },
-                        label = { Text(section.title) },
                     )
                 }
             }
         }
 
         if (vm.helpView == null) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp))
+            LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen))
             return@Column
         }
 
         val section = sections.firstOrNull { it.id == vm.helpSection } ?: sections.firstOrNull()
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 4.dp),
+        AppCard(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = AppSpacing.screen, vertical = 4.dp),
+            contentPadding = PaddingValues(0.dp),
         ) {
             SelectionContainer {
                 Text(
@@ -79,7 +85,7 @@ fun HelpScreen(vm: AppViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
+                        .padding(horizontal = 18.dp, vertical = 18.dp),
                 )
             }
         }

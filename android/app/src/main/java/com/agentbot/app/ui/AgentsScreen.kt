@@ -16,11 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,7 +30,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.AgentInfo
+import com.agentbot.app.ui.theme.AppRadius
+import com.agentbot.app.ui.theme.AppSpacing
+import com.agentbot.app.ui.theme.Border
+import com.agentbot.app.ui.theme.SurfaceHigh
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 private data class PendingAgentAction(val agent: AgentInfo, val action: String)
 
@@ -79,28 +80,29 @@ fun AgentsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                TextButton(onClick = vm::refreshAgents) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新引擎列表",
+                    onClick = vm::refreshAgents,
+                )
             },
         )
 
         // Telegram's /agent panel names the current engine, so the management page does too
         Text(
-            "当前引擎：${vm.session?.engineLabel ?: vm.session?.engine ?: "未知"} · 推荐使用 OpenCode（多模型、工具调用、附件收发）",
-            color = TextSecondary,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 20.dp),
+            "当前引擎：${vm.session?.engineLabel ?: vm.session?.engine ?: "未知"}",
+            color = TextTertiary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp),
         )
 
         if (busy) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                LoadingBar()
                 Text(
                     "正在处理 ${vm.agentBusy}…（可能需要几分钟，期间可继续使用聊天）",
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
+                    color = TextTertiary,
+                    style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
@@ -108,73 +110,82 @@ fun AgentsScreen(vm: AppViewModel) {
 
         val result = vm.agentResult
         if (result != null) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (result.ok) {
-                        MaterialTheme.colorScheme.surface
-                    } else {
-                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
-                    },
-                ),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            AppCard(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                contentPadding = PaddingValues(0.dp),
             ) {
-                Row(modifier = Modifier.fillMaxWidth().padding(start = 14.dp, top = 10.dp), verticalAlignment = Alignment.Top) {
+                Row(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp), verticalAlignment = Alignment.Top) {
                     Column(modifier = Modifier.weight(1f)) {
+                        StatusPill(
+                            text = if (result.ok) "完成" else "失败",
+                            tone = if (result.ok) StatusTone.Success else StatusTone.Error,
+                        )
                         Text(
-                            (if (result.ok) "✅ " else "❌ ") + (result.message ?: "操作结束"),
+                            result.message ?: "操作结束",
                             style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 7.dp),
                         )
                         result.output?.takeIf { it.isNotBlank() }?.let { output ->
                             Text(
                                 output.takeLast(4_000),
                                 color = TextSecondary,
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier
-                                    .padding(top = 6.dp)
+                                    .padding(top = 8.dp)
                                     .verticalScroll(rememberScrollState())
                                     .size(width = 320.dp, height = 120.dp),
                             )
                         }
                     }
-                    IconButton(onClick = vm::clearAgentResult, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Filled.Close, contentDescription = "关闭", modifier = Modifier.size(16.dp))
-                    }
+                    AppIconButton(
+                        icon = Icons.Filled.Close,
+                        contentDescription = "关闭",
+                        onClick = vm::clearAgentResult,
+                    )
                 }
             }
         }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(vm.agents, key = { it.id }) { agent ->
                 val current = agent.id == vm.session?.engine
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                AppCard(contentPadding = PaddingValues(0.dp)) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text(
                                 agent.label,
-                                style = MaterialTheme.typography.bodyLarge,
+                                style = MaterialTheme.typography.titleSmall,
                                 modifier = Modifier.weight(1f),
                             )
-                            Text(
-                                when {
-                                    current -> "当前引擎"
+                            StatusPill(
+                                text = when {
+                                    current -> "当前"
                                     agent.installed && agent.managed -> "Bot 托管"
                                     agent.installed -> "已安装"
                                     else -> "未安装"
                                 },
-                                color = when {
-                                    current -> MaterialTheme.colorScheme.primary
-                                    agent.installed -> TextSecondary
-                                    else -> MaterialTheme.colorScheme.error
+                                tone = when {
+                                    current -> StatusTone.Success
+                                    agent.installed -> StatusTone.Neutral
+                                    else -> StatusTone.Warning
                                 },
-                                style = MaterialTheme.typography.labelMedium,
                             )
                         }
                         agent.desc?.let {
-                            Text(it, color = TextSecondary, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                            Text(
+                                it,
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 2,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 5.dp),
+                            )
                         }
                         // The two things Telegram explains after a switch: context and models
                         val capability = listOfNotNull(
@@ -182,55 +193,71 @@ fun AgentsScreen(vm: AppViewModel) {
                             agent.supportsModel?.let { if (it) "可切换模型" else "模型由 CLI 配置" },
                         ).joinToString(" · ")
                         if (capability.isNotBlank()) {
-                            Text(capability, color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                capability,
+                                color = TextTertiary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                            )
                         }
                         if (agent.aliases.isNotEmpty()) {
                             Text(
                                 "也可发送 /engine ${agent.id} 或 ${agent.aliases.take(3).joinToString("、")}",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.labelMedium,
+                                color = TextTertiary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp),
                             )
                         }
                         agent.defaultModel?.let {
                             Text(
                                 "默认模型：$it",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.padding(top = 2.dp),
+                                color = TextTertiary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp),
                             )
                         }
                         if (agent.install != null && !agent.installed && !agent.installable) {
                             Text(
                                 "手动安装：${agent.install}",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.padding(top = 4.dp),
+                                color = TextTertiary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
                             )
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        AppDivider(modifier = Modifier.padding(top = 12.dp), inset = 16.dp)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
                             // Every engine the bot can run is tappable here, as in Telegram's panel
                             if (!current) {
-                                TextButton(onClick = { vm.switchAgent(agent.id) }) {
-                                    Text(if (agent.installed) "🔁 使用此引擎" else "⚠️ 仍要使用")
-                                }
+                                QuietButton(
+                                    text = if (agent.installed) "使用" else "仍要使用",
+                                    enabled = true,
+                                    onClick = { vm.switchAgent(agent.id) },
+                                )
                             }
                             if (agent.installable) {
-                                TextButton(
+                                QuietButton(
+                                    text = "安装",
                                     enabled = !busy,
                                     onClick = { pending = PendingAgentAction(agent, "install") },
-                                ) { Text("⬇️ 安装") }
+                                )
                             }
                             if (agent.updateable) {
-                                TextButton(
+                                QuietButton(
+                                    text = "更新",
                                     enabled = !busy,
                                     onClick = { pending = PendingAgentAction(agent, "update") },
-                                ) { Text("🔄 更新") }
+                                )
                             }
                             if (agent.uninstallable) {
-                                TextButton(
+                                QuietButton(
+                                    text = "卸载",
                                     enabled = !busy,
+                                    danger = true,
                                     onClick = { pending = PendingAgentAction(agent, "uninstall") },
-                                ) { Text("🗑 卸载", color = MaterialTheme.colorScheme.error) }
+                                )
                             }
                         }
                     }
@@ -252,7 +279,7 @@ fun AgentsScreen(vm: AppViewModel) {
         }
         AlertDialog(
             onDismissRequest = { pending = null },
-            title = { Text("确认$verb ${request.agent.label}？", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("确认$verb ${request.agent.label}？", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Column {
                     Text(

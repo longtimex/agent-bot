@@ -992,7 +992,7 @@ class AppViewModel(
                     ),
                 )
                 toast = result.message.ifBlank { if (result.ok) "已创建 Provider「$name」" else "创建 Provider 失败" }
-                ccPanelTitle = "🧩 新建 Provider · $name"
+                ccPanelTitle = "新建 Provider · $name"
                 ccPanelText = result.text
                 // A new provider changes the list and the danger zone in one go
                 reloadCcTables()
@@ -1143,7 +1143,7 @@ class AppViewModel(
             ccBusy = true
             try {
                 val result = api.ccStream(conn(), id)
-                ccPanelTitle = "📡 流式检查 · $id"
+                ccPanelTitle = "流式检查 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
                 connectionError = "流式检查失败：${err.message}"
@@ -1160,7 +1160,7 @@ class AppViewModel(
             ccBusy = true
             try {
                 val result = api.ccProviderModels(conn(), id)
-                ccPanelTitle = "🧾 可用模型 · $id"
+                ccPanelTitle = "可用模型 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
                 connectionError = "拉取模型列表失败：${err.message}"
@@ -1259,7 +1259,7 @@ class AppViewModel(
             try {
                 val result = api.ccDeeplink(conn(), trimmed)
                 toast = result.message.ifBlank { if (result.ok) "已导入 Deep Link" else "Deep Link 导入失败" }
-                ccPanelTitle = "🔗 Deep Link 导入"
+                ccPanelTitle = "Deep Link 导入"
                 ccPanelText = result.text
                 // A link can add providers, so the console should show the new state at once
                 reloadCcTables()
@@ -1278,7 +1278,7 @@ class AppViewModel(
             ccBusy = true
             try {
                 val result = api.ccQuota(conn(), id)
-                ccPanelTitle = "📊 配额 · $id"
+                ccPanelTitle = "配额 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
                 connectionError = "读取配额失败：${err.message}"
@@ -1385,13 +1385,13 @@ class AppViewModel(
             magpieBusy = true
             try {
                 val result = api.magpieView(conn(), name, target)
-                magpieTitle = "🧩 ${result.label.ifBlank { name }}"
+                magpieTitle = result.label.ifBlank { name }
                 magpieOutput = result.text.ifBlank { "（无输出）" }
                 connectionError = null
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
-                magpieTitle = "❌ magpie"
+                magpieTitle = "magpie 错误"
                 magpieOutput = err.message ?: "读取失败"
             } finally {
                 magpieBusy = false
@@ -1414,7 +1414,7 @@ class AppViewModel(
             magpieBusy = true
             try {
                 val result = api.magpieRun(conn(), argv, confirm)
-                magpieTitle = "🧩 ${argv.take(3).joinToString(" ")}"
+                magpieTitle = argv.take(3).joinToString(" ")
                 magpieOutput = result.text.ifBlank { "（无输出）" }
                 magpieConfirmation = null
                 // The command already succeeded; a refresh hiccup must not turn it into a failure.
@@ -2001,10 +2001,10 @@ class AppViewModel(
             try {
                 val result = api.testProxy(conn(), id)
                 val latency = result.latencyMs?.let { " · ${it}ms" } ?: ""
-                proxyTestMessage = (if (result.ok) "✅ 连接正常" else "❌ 连接失败") + latency +
+                proxyTestMessage = (if (result.ok) "连接正常" else "连接失败") + latency +
                     (result.message?.takeIf { !result.ok }?.let { "：$it" } ?: "")
             } catch (err: Exception) {
-                proxyTestMessage = "❌ 测试失败：${err.message}"
+                proxyTestMessage = "测试失败：${err.message}"
             } finally {
                 proxyBusy = false
             }

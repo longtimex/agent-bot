@@ -19,15 +19,9 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -44,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.Peer
 import com.agentbot.app.data.Task
+import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 
@@ -88,11 +83,8 @@ fun SessionScreen(vm: AppViewModel) {
             onBack = { vm.navigate(Screen.Chat) },
         )
 
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+        AppCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 InfoRow("引擎", session?.engineLabel ?: session?.engine ?: "-")
                 InfoRow("模型", session?.modelLine ?: "-")
                 InfoRow("时区", currentTz ?: "-")
@@ -103,15 +95,14 @@ fun SessionScreen(vm: AppViewModel) {
                     Text("自定义目录：$it", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
                 }
                 // Typing an absolute path is the awkward part of changing this on a phone
-                TextButton(
+                QuietButton(
+                    text = "浏览服务器目录…",
                     onClick = {
                         vm.openDirBrowser()
                         browseDir = true
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("浏览服务器目录…")
-                }
+                )
                 HorizontalDivider()
                 if (vm.hasLiveTask) {
                     Row(
@@ -125,38 +116,50 @@ fun SessionScreen(vm: AppViewModel) {
                             style = MaterialTheme.typography.labelMedium,
                             modifier = Modifier.weight(1f),
                         )
-                        TextButton(onClick = vm::stop) { Text("停止") }
+                        QuietButton(text = "停止", onClick = vm::stop)
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { editDir = true }) { Text("修改目录") }
-                    OutlinedButton(onClick = vm::resetWorkDir) { Text("恢复默认目录") }
+                    SecondaryButton(
+                        text = "修改目录",
+                        modifier = Modifier.weight(1f),
+                        onClick = { editDir = true },
+                    )
+                    SecondaryButton(
+                        text = "恢复默认目录",
+                        modifier = Modifier.weight(1f),
+                        onClick = vm::resetWorkDir,
+                    )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = vm::resetModel) { Text("恢复默认模型") }
-                    OutlinedButton(onClick = vm::newChat) { Text("新建会话") }
+                    SecondaryButton(
+                        text = "恢复默认模型",
+                        modifier = Modifier.weight(1f),
+                        onClick = vm::resetModel,
+                    )
+                    SecondaryButton(
+                        text = "新建会话",
+                        modifier = Modifier.weight(1f),
+                        onClick = vm::newChat,
+                    )
                 }
             }
         }
 
         if (others.isNotEmpty()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("另一端会话", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = vm::refreshPeers) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
-            }
+            SectionHeader(
+                title = "另一端会话",
+                action = {
+                    AppIconButton(
+                        icon = Icons.Filled.Refresh,
+                        contentDescription = "刷新对端会话",
+                        onClick = vm::refreshPeers,
+                    )
+                },
+            )
             others.forEach { peer ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(peer.label, style = MaterialTheme.typography.titleSmall)
                         InfoRow("引擎", peer.session?.engineLabel ?: peer.session?.engine ?: "-")
                         InfoRow("模型", peer.session?.modelLine ?: "-")
@@ -175,47 +178,58 @@ fun SessionScreen(vm: AppViewModel) {
                                 "今日 ${activity.todayOk}/${activity.todayTasks} · 累计 ${activity.totalTasks}"
                             } ?: "-",
                         )
-                        OutlinedButton(onClick = { followTarget = peer }) { Text("跟随该会话") }
+                        SecondaryButton(
+                            text = "跟随该会话",
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { followTarget = peer },
+                        )
                     }
                 }
             }
         }
 
-        Text("时区", style = MaterialTheme.typography.titleMedium)
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+        SectionHeader(title = "时区")
+        AppCard {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     "提醒、定时任务与每日统计都使用该时区，切换立即生效并写入 .env。",
                     color = TextSecondary,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                 )
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TIMEZONE_PRESETS.forEach { zone ->
-                        FilterChip(
+                        ChoicePill(
+                            text = zone,
                             selected = zone == currentTz,
                             onClick = { vm.changeTimezone(zone) },
-                            label = { Text(zone) },
                         )
                     }
                 }
-                OutlinedButton(onClick = { editTz = true }) { Text("自定义时区…") }
+                SecondaryButton(
+                    text = "自定义时区…",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { editTz = true },
+                )
             }
         }
 
-        Text("任务", style = MaterialTheme.typography.titleMedium)
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(onClick = vm::stop) { Text("停止所有任务") }
-                OutlinedButton(onClick = { vm.navigate(Screen.Queue) }) { Text("查看队列") }
+        SectionHeader(title = "任务")
+        AppCard {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton(
+                    text = "停止所有任务",
+                    modifier = Modifier.weight(1f),
+                    danger = true,
+                    onClick = vm::stop,
+                )
+                SecondaryButton(
+                    text = "查看队列",
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.navigate(Screen.Queue) },
+                )
             }
         }
     }
@@ -310,20 +324,20 @@ private fun DirBrowserDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 vm.dirBrowseError?.let {
                     Text(it, color = Color.Red, style = MaterialTheme.typography.bodySmall)
                 }
-                if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                if (busy) LoadingBar()
                 Row(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs),
                 ) {
-                    TextButton(onClick = { vm.loadDir("") }, enabled = !busy) { Text("默认") }
+                    QuietButton(text = "默认", enabled = !busy, onClick = { vm.loadDir("") })
                     listing?.home?.takeIf { it.isNotEmpty() }?.let {
-                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("主目录") }
+                        QuietButton(text = "主目录", enabled = !busy, onClick = { vm.loadDir(it) })
                     }
                     listing?.cwd?.takeIf { it.isNotEmpty() }?.let {
-                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("运行目录") }
+                        QuietButton(text = "运行目录", enabled = !busy, onClick = { vm.loadDir(it) })
                     }
                     listing?.parent?.let {
-                        TextButton(onClick = { vm.loadDir(it) }, enabled = !busy) { Text("上一级") }
+                        QuietButton(text = "上一级", enabled = !busy, onClick = { vm.loadDir(it) })
                     }
                 }
                 Column(
@@ -333,18 +347,11 @@ private fun DirBrowserDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                         .verticalScroll(rememberScrollState()),
                 ) {
                     listing?.dirs?.forEach { entry ->
-                        TextButton(
-                            onClick = { vm.loadDir(entry.path) },
-                            enabled = !busy,
+                        SettingsRow(
+                            title = entry.name,
                             modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                entry.name,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
+                            onClick = { vm.loadDir(entry.path) },
+                        )
                     }
                     if (listing != null && !busy && listing.dirs.isEmpty()) {
                         Text(
@@ -410,22 +417,19 @@ fun QueueScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (vm.queue.isNotEmpty()) {
-                        TextButton(onClick = { confirmClear = true }) {
-                            Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Text(
-                                "清空",
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(start = 4.dp),
-                            )
-                        }
-                    }
-                    TextButton(onClick = vm::refreshQueue) {
-                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                    }
+                if (vm.queue.isNotEmpty()) {
+                    AppIconButton(
+                        icon = Icons.Filled.DeleteSweep,
+                        contentDescription = "清空任务队列",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = { confirmClear = true },
+                    )
                 }
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新任务队列",
+                    onClick = vm::refreshQueue,
+                )
             }
         )
 
@@ -442,16 +446,16 @@ fun QueueScreen(vm: AppViewModel) {
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(vm.queue, key = { it.id }) { task ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                AppCard(contentPadding = PaddingValues(0.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column(modifier = Modifier.weight(1f).padding(14.dp)) {
+                        Column(modifier = Modifier.weight(1f).padding(start = 16.dp, top = 14.dp, bottom = 14.dp, end = 4.dp)) {
                             Text(
                                 task.text.ifBlank { "（附件消息）" },
                                 style = MaterialTheme.typography.bodyLarge,
@@ -477,34 +481,30 @@ fun QueueScreen(vm: AppViewModel) {
                                 modifier = Modifier.padding(top = 4.dp),
                             )
                         }
-                        IconButton(onClick = { vm.stopTask(task.id) }) {
-                            Icon(
-                                Icons.Filled.Stop,
-                                contentDescription = "停止",
-                                tint = MaterialTheme.colorScheme.error,
-                            )
-                        }
+                        AppIconButton(
+                            icon = Icons.Filled.Stop,
+                            contentDescription = "停止",
+                            tint = MaterialTheme.colorScheme.error,
+                            onClick = { vm.stopTask(task.id) },
+                        )
                     }
                 }
             }
             if (vm.recentTasks.isNotEmpty()) {
                 item {
-                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
-                        Text("最近任务", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "「重试」按服务器里保存的原提示重发，附件与临时模型选择都跟着走。",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
+                    SectionHeader(
+                        title = "最近任务",
+                        subtitle = "重试会重发原提示，附件与临时模型选择都保留",
+                        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                    )
                 }
                 items(vm.recentTasks, key = { it.id }) { task ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    AppCard(contentPadding = PaddingValues(0.dp)) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(modifier = Modifier.weight(1f).padding(14.dp)) {
+                            Column(modifier = Modifier.weight(1f).padding(start = 16.dp, top = 14.dp, bottom = 14.dp, end = 4.dp)) {
                                 Text(
                                     task.text.ifBlank { "（附件消息）" },
                                     style = MaterialTheme.typography.bodyMedium,
@@ -536,7 +536,7 @@ fun QueueScreen(vm: AppViewModel) {
                                     )
                                 }
                             }
-                            TextButton(onClick = { vm.retryRecord(task.id) }) { Text("重试") }
+                            QuietButton(text = "重试", onClick = { vm.retryRecord(task.id) })
                         }
                     }
                 }

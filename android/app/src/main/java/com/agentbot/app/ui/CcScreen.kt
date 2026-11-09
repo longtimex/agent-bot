@@ -9,22 +9,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.InstallDesktop
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -44,7 +45,9 @@ import com.agentbot.app.data.CcProviderDraft
 import com.agentbot.app.data.CcProviderMeta
 import com.agentbot.app.data.CcStatus
 import com.agentbot.app.data.CcViewSpec
+import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 /**
  * Telegram's `/cc` console. Read views plus typed write routes; the mutating
@@ -102,34 +105,33 @@ fun CcScreen(vm: AppViewModel) {
         ScreenHeader(
             title = "cc-switch 控制台",
             subtitle = "Provider、用量与会话配置",
-            modifier = Modifier.padding(horizontal = 20.dp),
+            modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                TextButton(onClick = vm::refreshCc) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新 cc-switch",
+                    onClick = vm::refreshCc,
+                )
             },
         )
 
         if (vm.ccBusy) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            )
+            LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 10.dp))
         }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
             val status = vm.ccStatus
             if (status == null) {
                 item {
-                    Text(
-                        if (vm.ccBusy) "正在读取 cc-switch…" else "暂无数据，点击刷新重试。",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
+                    EmptyState(
+                        icon = Icons.Filled.Info,
+                        title = if (vm.ccBusy) "正在读取 cc-switch" else "尚未加载 cc-switch",
+                        message = if (vm.ccBusy) "正在读取 Provider 与命令列表。" else "点右上角刷新后重试。",
                     )
                 }
             } else if (!status.available) {
@@ -140,27 +142,28 @@ fun CcScreen(vm: AppViewModel) {
                     item { OutputCard("读取 Provider 失败", status.error) }
                 }
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            "Providers（${status.providers.size}）",
-                            style = MaterialTheme.typography.titleSmall,
-                        )
-                        TextButton(onClick = {
-                            vm.ccProviderFormMeta()
-                            creatingProvider = true
-                        }) { Text("＋ 新建") }
-                    }
+                    SectionHeader(
+                        title = "Providers · ${status.providers.size}",
+                        subtitle = "点 Provider 卡片中的「切换」应用到全局",
+                        modifier = Modifier.padding(top = 8.dp),
+                        action = {
+                            AppIconButton(
+                                icon = Icons.Filled.Add,
+                                contentDescription = "新建 Provider",
+                                onClick = {
+                                    vm.ccProviderFormMeta()
+                                    creatingProvider = true
+                                },
+                            )
+                        },
+                    )
                 }
                 if (status.providers.isEmpty()) {
                     item {
-                        Text(
-                            "暂无 Provider：点「＋ 新建」添加，或用 Deep Link 导入整套配置。",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium,
+                        EmptyState(
+                            icon = Icons.Filled.Add,
+                            title = "暂无 Provider",
+                            message = "点上方 + 新建，或用 Deep Link 导入整套配置。",
                         )
                     }
                 }
@@ -215,7 +218,7 @@ fun CcScreen(vm: AppViewModel) {
     confirmUse?.let { provider ->
         AlertDialog(
             onDismissRequest = { confirmUse = null },
-            title = { Text("切换 Provider", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("切换 Provider", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     "将把 cc-switch 的全局配置切换到「${provider.name.ifBlank { provider.id }}」，影响 Bot 之后的所有调用。",
@@ -329,7 +332,7 @@ fun CcScreen(vm: AppViewModel) {
     pendingLink?.let { link ->
         AlertDialog(
             onDismissRequest = { pendingLink = null },
-            title = { Text("确认导入", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("确认导入", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     "链接可能新增或覆盖 Provider、MCP、提示词等配置：\n" +
@@ -370,7 +373,7 @@ fun CcScreen(vm: AppViewModel) {
     confirmExec?.let { (command, target) ->
         AlertDialog(
             onDismissRequest = { confirmExec = null },
-            title = { Text("确认执行", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("确认执行", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     buildString {
@@ -395,7 +398,7 @@ fun CcScreen(vm: AppViewModel) {
     vm.ccRawConfirmation?.let { words ->
         AlertDialog(
             onDismissRequest = vm::dismissCcRaw,
-            title = { Text("确认执行", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("确认执行", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     "即将执行「/cc $words」。\n" +
@@ -436,7 +439,7 @@ private fun ProviderCreateDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建 Provider", style = MaterialTheme.typography.titleMedium) },
+        title = { Text("新建 Provider", style = MaterialTheme.typography.titleLarge) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -451,60 +454,59 @@ private fun ProviderCreateDialog(
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                OutlinedTextField(
+                AppTextField(
                     value = name,
                     onValueChange = { name = it },
-                    modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("名称（必填）") },
+                    placeholder = "名称（必填）",
                 )
-                OutlinedTextField(
+                AppTextField(
                     value = id,
                     onValueChange = { id = it },
-                    modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("ID（留空则自动生成）") },
+                    placeholder = "ID（留空则自动生成）",
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { pickingTemplate = true }, modifier = Modifier.weight(1f)) {
-                        Text(template ?: "模板 · 未选", maxLines = 1)
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
+                    SecondaryButton(
+                        text = template ?: "模板 · 未选",
+                        modifier = Modifier.weight(1f),
+                        onClick = { pickingTemplate = true },
+                    )
                     if (fieldMode) {
-                        OutlinedButton(onClick = { pickingFormat = true }, modifier = Modifier.weight(1f)) {
-                            Text(apiFormat ?: "格式 · 未选", maxLines = 1)
-                        }
+                        SecondaryButton(
+                            text = apiFormat ?: "格式 · 未选",
+                            modifier = Modifier.weight(1f),
+                            onClick = { pickingFormat = true },
+                        )
                     }
                 }
                 if (fieldMode) {
-                    OutlinedTextField(
+                    AppTextField(
                         value = baseUrl,
                         onValueChange = { baseUrl = it },
-                        modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        placeholder = { Text("Base URL：https://…") },
+                        placeholder = "Base URL：https://…",
                     )
-                    OutlinedTextField(
+                    AppTextField(
                         value = apiKey,
                         onValueChange = { apiKey = it },
-                        modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
+                        placeholder = "API Key",
                         visualTransformation = PasswordVisualTransformation(),
-                        placeholder = { Text("API Key") },
                     )
-                    OutlinedTextField(
+                    AppTextField(
                         value = model,
                         onValueChange = { model = it },
-                        modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        placeholder = { Text("模型 ID，例如 claude-sonnet-4") },
+                        placeholder = "模型 ID，例如 claude-sonnet-4",
                     )
                 }
-                OutlinedTextField(
+                AppTextField(
                     value = config,
                     onValueChange = { config = it },
-                    modifier = Modifier.fillMaxWidth(),
                     maxLines = 6,
-                    placeholder = { Text(if (fieldMode) "可选：额外 settings JSON" else "settings JSON（必填）") },
+                    placeholder = if (fieldMode) "可选：额外 settings JSON" else "settings JSON（必填）",
+                    monospace = true,
                 )
             }
         },
@@ -556,7 +558,7 @@ private fun PromptCreateDialog(onDismiss: () -> Unit, onCreate: (String, String)
     var content by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建提示词", style = MaterialTheme.typography.titleMedium) },
+        title = { Text("新建提示词", style = MaterialTheme.typography.titleLarge) },
         text = {
             Column {
                 Text(
@@ -564,19 +566,19 @@ private fun PromptCreateDialog(onDismiss: () -> Unit, onCreate: (String, String)
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                OutlinedTextField(
+                AppTextField(
                     value = name,
                     onValueChange = { name = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    modifier = Modifier.padding(top = 10.dp),
                     singleLine = true,
-                    placeholder = { Text("名称") },
+                    placeholder = "名称",
                 )
-                OutlinedTextField(
+                AppTextField(
                     value = content,
                     onValueChange = { content = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    modifier = Modifier.padding(top = 10.dp),
                     maxLines = 8,
-                    placeholder = { Text("提示词内容") },
+                    placeholder = "提示词内容",
                 )
             }
         },
@@ -592,75 +594,145 @@ private fun PromptCreateDialog(onDismiss: () -> Unit, onCreate: (String, String)
 
 @Composable
 private fun InfoRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth()) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+    ) {
         Text(
             label,
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.weight(0.32f),
+        )
+        Text(
+            value,
             color = TextSecondary,
             style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(end = 12.dp),
+            modifier = Modifier.weight(0.68f),
         )
-        Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
 private fun StatusCard(vm: AppViewModel, status: CcStatus) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("状态", style = MaterialTheme.typography.titleSmall)
+    AppCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("运行状态", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    status.current ?: "未设置当前 Provider",
+                    color = TextTertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            StatusPill(text = "可用", tone = StatusTone.Success)
+        }
+        Column(
+            modifier = Modifier.padding(top = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
             InfoRow("应用", status.app)
             InfoRow("版本", status.version ?: "未知")
             InfoRow("二进制", status.bin ?: "—")
             InfoRow("当前 Provider", status.current ?: "未设置")
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccTest(null) }, enabled = !vm.ccBusy) { Text("⚡ 测速当前") }
-                TextButton(onClick = { vm.runOpsAction("cc-update", "更新 cc-switch") }, enabled = vm.opsActionBusy == null) {
-                    Text("升级二进制")
-                }
-            }
+        }
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+        ) {
+            QuietButton(
+                text = "测速当前",
+                icon = Icons.Filled.Speed,
+                enabled = !vm.ccBusy,
+                onClick = { vm.ccTest(null) },
+            )
+            QuietButton(
+                text = "升级二进制",
+                enabled = vm.opsActionBusy == null,
+                onClick = { vm.runOpsAction("cc-update", "更新 cc-switch") },
+            )
         }
     }
 }
 
 @Composable
 private fun UnavailableCard(vm: AppViewModel) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("未检测到 cc-switch", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "可在服务器上一键安装；安装过程会执行 npm 并可能持续数分钟，结果见运维中心。",
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            TextButton(
-                onClick = { vm.runOpsAction("cc", "安装 cc-switch") },
-                enabled = vm.opsActionBusy == null,
-            ) { Text("📦 安装 cc-switch") }
-            if (vm.opsActionBusy != null) {
-                Text("正在执行：${vm.opsActionBusy}", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+    AppCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("未检测到 cc-switch", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "可在服务器上一键安装，过程会执行 npm 并可能持续数分钟。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
             }
+            StatusPill(text = "未安装", tone = StatusTone.Warning)
+        }
+        PrimaryButton(
+            text = "安装 cc-switch",
+            modifier = Modifier.padding(top = 14.dp),
+            icon = Icons.Filled.InstallDesktop,
+            enabled = vm.opsActionBusy == null,
+            onClick = { vm.runOpsAction("cc", "安装 cc-switch") },
+        )
+        if (vm.opsActionBusy != null) {
+            Text(
+                "正在执行：${vm.opsActionBusy}",
+                color = TextTertiary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 7.dp),
+            )
         }
     }
 }
 
 @Composable
 private fun ProviderCard(vm: AppViewModel, provider: CcProvider, onUse: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Text(
-                (if (provider.current) "✅ " else "") + (provider.name.ifBlank { provider.id }),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Text(provider.id, color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onUse, enabled = !provider.current && !vm.ccBusy) {
-                    Text(if (provider.current) "使用中" else "切换")
-                }
-                TextButton(onClick = { vm.ccTest(provider.id) }, enabled = !vm.ccBusy) { Text("⚡ 测速") }
-                TextButton(onClick = { vm.ccStream(provider.id) }, enabled = !vm.ccBusy) { Text("📡 流检") }
-                TextButton(onClick = { vm.ccProviderModels(provider.id) }, enabled = !vm.ccBusy) { Text("🧾 模型") }
-                TextButton(onClick = { vm.ccQuota(provider.id) }, enabled = !vm.ccBusy) { Text("📊 配额") }
+    AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    provider.name.ifBlank { provider.id },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    provider.id,
+                    color = TextTertiary,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
             }
+            if (provider.current) {
+                StatusPill(text = "使用中", tone = StatusTone.Success)
+            } else {
+                QuietButton(
+                    text = "切换",
+                    enabled = !vm.ccBusy,
+                    onClick = onUse,
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.xxs),
+        ) {
+            QuietButton(text = "测速", icon = Icons.Filled.Speed, enabled = !vm.ccBusy, onClick = { vm.ccTest(provider.id) })
+            QuietButton(text = "流检", enabled = !vm.ccBusy, onClick = { vm.ccStream(provider.id) })
+            QuietButton(text = "模型", enabled = !vm.ccBusy, onClick = { vm.ccProviderModels(provider.id) })
+            QuietButton(text = "配额", enabled = !vm.ccBusy, onClick = { vm.ccQuota(provider.id) })
         }
     }
 }
@@ -674,37 +746,46 @@ private fun ActionsCard(
     onSearchSessions: () -> Unit,
     onImportDeeplink: () -> Unit,
 ) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Text("MCP / 提示词 / 环境", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("mcp") }, enabled = !vm.ccBusy) { Text("MCP 列表") }
-                TextButton(onClick = { vm.ccSyncMcp() }, enabled = !vm.ccBusy) { Text("同步 MCP") }
-                TextButton(onClick = onImportMcp, enabled = !vm.ccBusy) { Text("导入 MCP") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("prompts") }, enabled = !vm.ccBusy) { Text("提示词") }
-                TextButton(onClick = onActivatePrompt, enabled = !vm.ccBusy) { Text("启用") }
-                TextButton(onClick = { vm.ccDeactivatePrompt() }, enabled = !vm.ccBusy) { Text("停用") }
-                TextButton(onClick = onCreatePrompt, enabled = !vm.ccBusy) { Text("新建") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { vm.ccShowPanel("env-check") }, enabled = !vm.ccBusy) { Text("环境检查") }
-                TextButton(onClick = { vm.ccShowPanel("env-tools") }, enabled = !vm.ccBusy) { Text("环境工具") }
-                TextButton(onClick = { vm.ccShowPanel("proxy") }, enabled = !vm.ccBusy) { Text("代理") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onSearchSessions, enabled = !vm.ccBusy) { Text("搜索会话") }
-                TextButton(onClick = onImportDeeplink, enabled = !vm.ccBusy) { Text("🔗 Deep Link 导入") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                // Same jump Telegram's「全部命令」makes: the shared cc-switch command reference
-                TextButton(onClick = {
-                    vm.selectHelpSection("cc")
-                    vm.navigate(Screen.Help)
-                }) { Text("全部命令") }
-            }
+    AppCard {
+        SectionHeader(title = "MCP / 提示词 / 环境", subtitle = "快捷管理操作")
+        SectionLabel("MCP", modifier = Modifier.padding(top = 14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)) {
+            QuietButton(text = "列表", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccShowPanel("mcp") })
+            QuietButton(text = "同步", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccSyncMcp() })
+            QuietButton(text = "导入", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = onImportMcp)
         }
+        SectionLabel("提示词", modifier = Modifier.padding(top = 12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)) {
+            QuietButton(text = "列表", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccShowPanel("prompts") })
+            QuietButton(text = "启用", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = onActivatePrompt)
+            QuietButton(text = "停用", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccDeactivatePrompt() })
+            QuietButton(text = "新建", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = onCreatePrompt)
+        }
+        SectionLabel("环境", modifier = Modifier.padding(top = 12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)) {
+            QuietButton(text = "检查", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccShowPanel("env-check") })
+            QuietButton(text = "工具", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccShowPanel("env-tools") })
+            QuietButton(text = "代理", modifier = Modifier.weight(1f), enabled = !vm.ccBusy, onClick = { vm.ccShowPanel("proxy") })
+        }
+        AppDivider(modifier = Modifier.padding(top = 6.dp), inset = 0.dp)
+        SettingsRow(
+            title = "搜索会话",
+            subtitle = "按关键词查找 cc-switch 会话索引",
+            onClick = if (!vm.ccBusy) onSearchSessions else null,
+        )
+        SettingsRow(
+            title = "Deep Link 导入",
+            subtitle = "导入整套 Provider / MCP / 提示词配置",
+            onClick = if (!vm.ccBusy) onImportDeeplink else null,
+        )
+        SettingsRow(
+            title = "全部命令",
+            subtitle = "打开 cc-switch 命令参考",
+            onClick = {
+                vm.selectHelpSection("cc")
+                vm.navigate(Screen.Help)
+            },
+        )
     }
 }
 
@@ -716,40 +797,30 @@ private fun ActionsCard(
 @Composable
 private fun ViewsCard(vm: AppViewModel, onOpen: (CcViewSpec) -> Unit) {
     if (vm.ccViews.isEmpty()) return
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Text("只读视图", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "对应 Telegram 的 /cc 查看命令，输出在上方面板显示。",
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
+    AppCard(contentPadding = PaddingValues(vertical = 6.dp)) {
+        SectionHeader(
+            title = "只读视图",
+            subtitle = "结果在输出面板中展示",
+            modifier = Modifier.padding(horizontal = AppSpacing.lg, vertical = 10.dp),
+        )
+        vm.ccViews.forEach { view ->
+            SettingsRow(
+                title = view.label,
+                subtitle = if (view.needsTarget) "需要${view.targetLabel}" else null,
+                onClick = if (!vm.ccBusy) {
+                    { onOpen(view) }
+                } else {
+                    null
+                },
             )
-            // Two per row so a long Chinese label still fits on a phone
-            vm.ccViews.chunked(2).forEach { row ->
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    row.forEach { view ->
-                        TextButton(
-                            onClick = { onOpen(view) },
-                            enabled = !vm.ccBusy,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(
-                                view.label + if (view.needsTarget) " …" else "",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
-                    }
-                    repeat(2 - row.size) { Spacer(modifier = Modifier.weight(1f)) }
-                }
-            }
-            // Not one of the server's read-only views: the memory blobs are edited, not just printed
-            TextButton(
-                onClick = { vm.navigate(Screen.Hermes) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Hermes 记忆 …", style = MaterialTheme.typography.bodyMedium)
-            }
         }
+        // Not one of the server's read-only views: the memory blobs are edited, not just printed
+        AppDivider(inset = AppSpacing.lg)
+        SettingsRow(
+            title = "Hermes 记忆",
+            subtitle = "编辑 MEMORY.md 与 USER.md",
+            onClick = { vm.navigate(Screen.Hermes) },
+        )
     }
 }
 
@@ -759,42 +830,30 @@ private fun ViewsCard(vm: AppViewModel, onOpen: (CcViewSpec) -> Unit) {
  */
 @Composable
 private fun ExecCard(vm: AppViewModel, commands: List<CcExecCommand>, onStart: (CcExecCommand) -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("高级操作", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "对应 Telegram 里需要按按钮确认的 /cc 命令，执行结果在上方面板查看。",
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            commands.groupBy { it.group }.forEach { (group, items) ->
-                Text(
-                    group,
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(top = 8.dp),
+    AppCard(contentPadding = PaddingValues(vertical = 6.dp)) {
+        SectionHeader(
+            title = "高级操作",
+            subtitle = "会修改服务器配置，执行前需要确认",
+            modifier = Modifier.padding(horizontal = AppSpacing.lg, vertical = 10.dp),
+        )
+        commands.groupBy { it.group }.forEach { (group, items) ->
+            AppDivider(inset = AppSpacing.lg)
+            SectionLabel(group, modifier = Modifier.padding(start = AppSpacing.lg, top = 14.dp, bottom = 2.dp))
+            items.forEach { command ->
+                SettingsRow(
+                    title = command.label + if (command.needsTarget) " …" else "",
+                    subtitle = if (command.needsTarget) "需要${command.targetLabel}" else null,
+                    onClick = if (!vm.ccBusy) {
+                        { onStart(command) }
+                    } else {
+                        null
+                    },
+                    trailing = if (command.confirm) {
+                        { StatusPill(text = "需确认", tone = StatusTone.Warning) }
+                    } else {
+                        null
+                    },
                 )
-                items.forEach { command ->
-                    TextButton(
-                        onClick = { onStart(command) },
-                        enabled = !vm.ccBusy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                command.label + if (command.needsTarget) " …" else "",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            if (command.confirm) {
-                                Text("⚠️", style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -802,12 +861,15 @@ private fun ExecCard(vm: AppViewModel, commands: List<CcExecCommand>, onStart: (
 
 @Composable
 private fun OutputCard(title: String, text: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            SelectionContainer {
-                Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-            }
+    AppCard {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        SelectionContainer {
+            Text(
+                text,
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                modifier = Modifier.padding(top = 7.dp),
+            )
         }
     }
 }
@@ -816,27 +878,26 @@ private fun OutputCard(title: String, text: String) {
 private fun PanelCard(vm: AppViewModel) {
     val title = vm.ccPanelTitle ?: return
     val text = vm.ccPanelText ?: return
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(title, style = MaterialTheme.typography.titleSmall)
-                TextButton(onClick = vm::clearCcPanel) { Text("收起") }
-            }
-            SelectionContainer {
-                Text(
-                    text.ifBlank { "（无输出）" },
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 320.dp)
-                        .verticalScroll(rememberScrollState()),
-                )
-            }
+    AppCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            QuietButton(text = "收起", onClick = vm::clearCcPanel)
+        }
+        SelectionContainer {
+            Text(
+                text.ifBlank { "（无输出）" },
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 7.dp)
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
         }
     }
 }

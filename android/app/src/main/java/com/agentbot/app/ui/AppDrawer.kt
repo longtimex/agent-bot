@@ -1,6 +1,7 @@
 package com.agentbot.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,10 +35,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Surface
@@ -47,13 +46,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.agentbot.app.ui.theme.Accent
-import com.agentbot.app.ui.theme.AccentSoft
 import com.agentbot.app.ui.theme.Border
-import com.agentbot.app.ui.theme.Surface as DrawerSurface
+import com.agentbot.app.ui.theme.SurfaceHigh
 import com.agentbot.app.ui.theme.TextSecondary
 
 /** Grouped left drawer: conversation first, tooling and server controls behind clear headings. */
@@ -68,37 +64,50 @@ fun AppDrawer(
     queueCount: Int = 0,
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = DrawerSurface,
-        modifier = Modifier.widthIn(max = 340.dp),
+        drawerContainerColor = MaterialTheme.colorScheme.background,
+        drawerContentColor = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.widthIn(max = 344.dp),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(horizontal = 12.dp, vertical = 14.dp),
+                .padding(horizontal = 14.dp, vertical = 16.dp),
         ) {
             BrandHeader(connected = connected, sessionLabel = sessionLabel)
 
-            Button(
-                onClick = { onNewChat() },
-                enabled = newChatEnabled,
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 14.dp),
-                shape = MaterialTheme.shapes.medium,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Accent,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
+                    .padding(top = 18.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable(enabled = newChatEnabled, onClick = onNewChat),
+                shape = RoundedCornerShape(16.dp),
+                color = if (newChatEnabled) MaterialTheme.colorScheme.primary else SurfaceHigh.copy(alpha = 0.4f),
             ) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text("新对话", modifier = Modifier.padding(start = 8.dp))
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = null,
+                        tint = if (newChatEnabled) MaterialTheme.colorScheme.onPrimary else TextSecondary,
+                        modifier = Modifier.size(19.dp),
+                    )
+                    Text(
+                        "新对话",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (newChatEnabled) MaterialTheme.colorScheme.onPrimary else TextSecondary,
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
+                }
             }
             if (!newChatEnabled) {
                 Text(
                     "当前任务仍在运行，停止后可开启新对话",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
-                    modifier = Modifier.padding(start = 8.dp, top = 6.dp),
+                    modifier = Modifier.padding(start = 4.dp, top = 7.dp),
                 )
             }
 
@@ -139,7 +148,7 @@ fun AppDrawer(
                 DrawerItem(Icons.Filled.Help, "帮助", current is Screen.Help) { onNavigate(Screen.Help) }
             }
 
-            HorizontalDivider(color = Border.copy(alpha = 0.7f), modifier = Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(color = Border.copy(alpha = 0.55f), modifier = Modifier.padding(vertical = 10.dp))
             DrawerItem(Icons.Filled.Settings, "设置", current is Screen.Settings) { onNavigate(Screen.Settings) }
         }
     }
@@ -148,25 +157,30 @@ fun AppDrawer(
 @Composable
 private fun BrandHeader(connected: Boolean, sessionLabel: String?) {
     Row(
-        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Surface(
             modifier = Modifier.size(38.dp),
-            shape = MaterialTheme.shapes.medium,
-            color = AccentSoft,
+            shape = RoundedCornerShape(12.dp),
+            color = SurfaceHigh,
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth().fillMaxHeight(),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Icon(Icons.Filled.Bolt, contentDescription = null, tint = Accent, modifier = Modifier.size(22.dp))
+                Icon(
+                    Icons.Filled.Bolt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(21.dp),
+                )
             }
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text("Agent Bot", style = MaterialTheme.typography.titleMedium)
+            Text("Agent Bot", style = MaterialTheme.typography.titleSmall)
             Text(
                 sessionLabel?.takeIf { it.isNotBlank() } ?: "云端 Agent 控制台",
                 style = MaterialTheme.typography.labelSmall,
@@ -188,7 +202,7 @@ private fun DrawerSection(label: String) {
         label,
         style = MaterialTheme.typography.labelSmall,
         color = TextSecondary,
-        modifier = Modifier.padding(start = 12.dp, top = 14.dp, bottom = 4.dp),
+        modifier = Modifier.padding(start = 12.dp, top = 18.dp, bottom = 6.dp),
     )
 }
 
@@ -205,22 +219,22 @@ private fun DrawerItem(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 1.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) AccentSoft else androidx.compose.ui.graphics.Color.Transparent)
-            .selectable(selected = selected, onClick = onClick, role = Role.Button)
+            .clip(RoundedCornerShape(13.dp))
+            .clickable(onClick = onClick)
+            .background(if (selected) SurfaceHigh.copy(alpha = 0.9f) else androidx.compose.ui.graphics.Color.Transparent)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Icon(
             icon,
             contentDescription = null,
-            tint = if (selected) Accent else TextSecondary,
+            tint = if (selected) MaterialTheme.colorScheme.onSurface else TextSecondary,
             modifier = Modifier.size(20.dp),
         )
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium,
-            color = if (selected) Accent else MaterialTheme.colorScheme.onSurface,
+            color = if (selected) MaterialTheme.colorScheme.onSurface else TextSecondary,
             modifier = Modifier.weight(1f),
             maxLines = 1,
         )

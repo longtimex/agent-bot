@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -17,11 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,6 +37,7 @@ import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.OpsResult
 import com.agentbot.app.data.StartupCheck
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 private val LOG_LINE_CHOICES = listOf(80, 200, 400)
 
@@ -64,25 +62,26 @@ fun OpsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                TextButton(onClick = {
-                    vm.refreshDiagnostics()
-                    vm.refreshLogs()
-                    vm.refreshOpsService()
-                }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新运维数据",
+                    onClick = {
+                        vm.refreshDiagnostics()
+                        vm.refreshLogs()
+                        vm.refreshOpsService()
+                    },
+                )
             },
         )
 
         if (vm.opsBusy || busyLabel != null) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                LoadingBar()
                 busyLabel?.let {
                     Text(
                         "正在$it…（更新与构建可能需要数分钟，期间 Bot 仍可聊天）",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
+                        color = TextTertiary,
+                        style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
@@ -91,8 +90,8 @@ fun OpsScreen(vm: AppViewModel) {
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { OpsActionsCard(vm) { path, label -> pending = path to label } }
             vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.pid, status.url) { path, label -> pending = path to label } } }
@@ -106,7 +105,8 @@ fun OpsScreen(vm: AppViewModel) {
                     Text(
                         "暂无诊断数据，点击刷新重试。",
                         color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 8.dp),
                     )
                 }
             }
@@ -131,7 +131,7 @@ fun OpsScreen(vm: AppViewModel) {
         }
         AlertDialog(
             onDismissRequest = { pending = null },
-            title = { Text("$label？", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("$label？", style = MaterialTheme.typography.titleLarge) },
             text = { Text(body, style = MaterialTheme.typography.bodyMedium) },
             confirmButton = {
                 TextButton(onClick = {
@@ -149,22 +149,44 @@ fun OpsScreen(vm: AppViewModel) {
 @Composable
 private fun OpsActionsCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
     val busy = vm.opsActionBusy != null
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Text("项目维护", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(enabled = !busy, onClick = { vm.runOpsAction("check", "运行检查") }) { Text("🧪 运行检查") }
-                TextButton(enabled = !busy, onClick = { vm.checkForUpdates() }) { Text("🔍 检查更新") }
+    AppCard {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SectionHeader(title = "项目维护")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton(
+                    text = "运行检查",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { vm.runOpsAction("check", "运行检查") },
+                )
+                SecondaryButton(
+                    text = "检查更新",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { vm.checkForUpdates() },
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(enabled = !busy, onClick = { onConfirm("update", "更新项目") }) { Text("⬆️ 更新项目") }
-                TextButton(enabled = !busy, onClick = { vm.shareBackup() }) { Text("📦 备份数据") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton(
+                    text = "更新项目",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { onConfirm("update", "更新项目") },
+                )
+                SecondaryButton(
+                    text = "备份数据",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { vm.shareBackup() },
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(enabled = !busy, onClick = { onConfirm("restart", "重启 Bot") }) {
-                    Text("🔄 重启 Bot", color = MaterialTheme.colorScheme.error)
-                }
-            }
+            SecondaryButton(
+                text = "重启 Bot",
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                danger = true,
+                onClick = { onConfirm("restart", "重启 Bot") },
+            )
         }
     }
 }
@@ -179,26 +201,39 @@ private fun ServiceCard(
     onConfirm: (String, String) -> Unit,
 ) {
     val busy = vm.opsActionBusy != null
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+    AppCard {
+        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("⚡ OpenCode 服务", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                Text(
-                    if (reachable) "🟢 运行中" else "🔴 未运行",
-                    color = if (reachable) MaterialTheme.colorScheme.primary else TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
+                Text("OpenCode 服务", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                StatusPill(
+                    text = if (reachable) "运行中" else "未运行",
+                    tone = if (reachable) StatusTone.Success else StatusTone.Warning,
                 )
             }
             InfoRow("地址", url ?: "—")
             InfoRow("托管", if (managed && pid != null) "Bot 托管（PID $pid）" else if (reachable) "运行中，未托管" else "未运行")
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!reachable) {
-                    TextButton(enabled = !busy, onClick = { vm.runOpsAction("service/start", "启动 OpenCode") }) { Text("▶️ 启动") }
+                    SecondaryButton(
+                        text = "启动",
+                        modifier = Modifier.weight(1f),
+                        enabled = !busy,
+                        onClick = { vm.runOpsAction("service/start", "启动 OpenCode") },
+                    )
                 }
-                TextButton(enabled = !busy, onClick = { onConfirm("service/restart", "重启 OpenCode") }) { Text("🔄 重启") }
-                TextButton(enabled = !busy, onClick = { onConfirm("service/stop", "停止 OpenCode") }) {
-                    Text("⏹ 停止", color = MaterialTheme.colorScheme.error)
-                }
+                SecondaryButton(
+                    text = "重启",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { onConfirm("service/restart", "重启 OpenCode") },
+                )
+                SecondaryButton(
+                    text = "停止",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    danger = true,
+                    onClick = { onConfirm("service/stop", "停止 OpenCode") },
+                )
             }
         }
     }
@@ -206,26 +241,23 @@ private fun ServiceCard(
 
 @Composable
 private fun OpsResultCard(result: OpsResult, onClose: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = if (result.ok) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-        ),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+    AppCard {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    (if (result.ok) "✅ " else "❌ ") + (result.message ?: "操作结束"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
+                StatusPill(
+                    text = if (result.ok) "完成" else "失败",
+                    tone = if (result.ok) StatusTone.Success else StatusTone.Error,
                 )
-                TextButton(onClick = onClose) { Text("关闭") }
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(result.message ?: "操作结束", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                QuietButton(text = "关闭", onClick = onClose)
             }
             result.steps.filter { it.output.isNotBlank() }.forEach { step ->
                 Text(
-                    "${if (step.ok) "✓" else "✗"} ${step.label}",
-                    color = TextSecondary,
+                    step.label,
+                    color = if (step.ok) TextSecondary else MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(top = 6.dp),
+                    modifier = Modifier.padding(top = 10.dp),
                 )
                 SelectionContainer {
                     Text(
@@ -247,9 +279,9 @@ private fun OpsResultCard(result: OpsResult, onClose: () -> Unit) {
 private fun ReleaseCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
     val release = vm.releaseInfo
     val update = vm.diagnostics?.update ?: null
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("版本与更新", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp))
+    AppCard {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("版本与更新", style = MaterialTheme.typography.titleSmall)
             InfoRow("当前 release", release?.label?.takeIf { it.isNotBlank() } ?: "checkout")
             release?.current?.let { InfoRow("Current ID", it) }
             release?.pending?.let { InfoRow("Pending", it) }
@@ -264,18 +296,27 @@ private fun ReleaseCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
             }
             if (release?.pending != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
-                    TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("restart", "应用 pending 并重启") }) {
-                        Text("应用 pending 并重启")
-                    }
-                    TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("cancel-pending", "丢弃 pending") }) {
-                        Text("丢弃 pending")
-                    }
+                    SecondaryButton(
+                        text = "应用 pending",
+                        modifier = Modifier.weight(1f),
+                        enabled = vm.opsActionBusy == null,
+                        onClick = { onConfirm("restart", "应用 pending 并重启") },
+                    )
+                    SecondaryButton(
+                        text = "丢弃 pending",
+                        modifier = Modifier.weight(1f),
+                        enabled = vm.opsActionBusy == null,
+                        onClick = { onConfirm("cancel-pending", "丢弃 pending") },
+                    )
                 }
             }
             if (release?.previous != null && release.pending == null) {
-                TextButton(enabled = vm.opsActionBusy == null, onClick = { onConfirm("rollback", "回滚版本") }) {
-                    Text("回滚到上一版")
-                }
+                SecondaryButton(
+                    text = "回滚到上一版",
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    enabled = vm.opsActionBusy == null,
+                    onClick = { onConfirm("rollback", "回滚版本") },
+                )
             }
         }
     }
@@ -283,9 +324,9 @@ private fun ReleaseCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
 
 @Composable
 private fun StartupCard(check: StartupCheck) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("启动自检", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp))
+    AppCard {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("启动自检", style = MaterialTheme.typography.titleSmall)
             InfoRow("时间", check.at ?: "—")
             InfoRow("版本", listOfNotNull(check.version, check.commit?.take(8), check.release).joinToString(" · "))
             InfoRow("PID", check.pid?.toString() ?: "—")
@@ -300,8 +341,9 @@ private fun StartupCard(check: StartupCheck) {
 
 @Composable
 private fun DiagnosticsCard(diag: Diagnostics) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    AppCard {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("环境诊断", style = MaterialTheme.typography.titleSmall)
             InfoRow("Node", diag.node ?: "—")
             InfoRow("平台", diag.platform ?: "—")
             InfoRow("PID", diag.pid?.toString() ?: "—")
@@ -350,29 +392,29 @@ private fun DiagnosticsCard(diag: Diagnostics) {
 
 @Composable
 private fun LogCard(vm: AppViewModel) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+    AppCard {
+        Column {
             Text("日志", style = MaterialTheme.typography.titleSmall)
             Row(
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(top = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FilterChip(
+                ChoicePill(
+                    text = "Bot",
                     selected = vm.logSource == "bot",
                     onClick = { vm.refreshLogs("bot", vm.logLines) },
-                    label = { Text("Bot") },
                 )
-                FilterChip(
+                ChoicePill(
+                    text = "OpenCode",
                     selected = vm.logSource == "opencode",
                     onClick = { vm.refreshLogs("opencode", vm.logLines) },
-                    label = { Text("OpenCode") },
                 )
                 LOG_LINE_CHOICES.forEach { count ->
-                    FilterChip(
+                    ChoicePill(
+                        text = "$count",
                         selected = vm.logLines == count,
                         onClick = { vm.refreshLogs(vm.logSource, count) },
-                        label = { Text("$count 行") },
                     )
                 }
             }

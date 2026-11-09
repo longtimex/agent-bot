@@ -6,18 +6,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,7 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.MagpieSpec
+import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 /**
  * Telegram's `/magpie` console: CLI/gateway status, the server-listed read-only views, and a
@@ -48,88 +50,126 @@ fun MagpieScreen(vm: AppViewModel) {
         ScreenHeader(
             title = "magpie 网关",
             subtitle = "模型网关状态与服务器命令",
-            modifier = Modifier.padding(horizontal = 20.dp),
+            modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                Row {
-                    TextButton(onClick = { running = true }) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("执行", modifier = Modifier.padding(start = 4.dp))
-                    }
-                    TextButton(onClick = vm::refreshMagpie) {
-                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                    }
-                }
-            }
+                AppIconButton(
+                    icon = Icons.Filled.PlayArrow,
+                    contentDescription = "执行 magpie 命令",
+                    onClick = { running = true },
+                )
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新 magpie 状态",
+                    onClick = vm::refreshMagpie,
+                )
+            },
         )
 
         if (vm.magpieBusy) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            )
+            LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 10.dp))
         }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                        if (overview == null) {
-                            Text("尚未加载。", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
-                        } else if (!overview.available) {
-                            Text("magpie 未安装", style = MaterialTheme.typography.bodyLarge)
+                AppCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("magpie 网关", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "在服务器执行：curl -fsSL https://usemagpie.ai/install.sh | sh，或设置 MAGPIE_BIN 后重启 Bot。",
-                                color = TextSecondary,
+                                "CLI、网关地址与健康状态",
+                                color = TextTertiary,
                                 style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 6.dp),
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                        if (overview?.available == true) {
+                            StatusPill(
+                                text = if (overview.healthy) "可达" else "不可达",
+                                tone = if (overview.healthy) StatusTone.Success else StatusTone.Error,
                             )
                         } else {
-                            Text(
-                                "版本：${overview.version ?: "未知"}",
-                                style = MaterialTheme.typography.bodyMedium,
+                            StatusPill(text = "未安装", tone = StatusTone.Warning)
+                        }
+                    }
+
+                    when {
+                        overview == null -> {
+                            InlineNotice(
+                                text = "尚未读取 magpie 状态。",
+                                modifier = Modifier.padding(top = 12.dp),
+                                icon = Icons.Filled.Info,
                             )
-                            Text(
-                                "网关：${overview.gatewayUrl} · ${if (overview.healthy) "✅ 可达" else "❌ 不可达"}",
-                                color = if (overview.healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
+                            QuietButton(
+                                text = "读取状态",
+                                icon = Icons.Filled.Refresh,
+                                onClick = vm::refreshMagpie,
                                 modifier = Modifier.padding(top = 4.dp),
                             )
-                            overview.bin?.let {
-                                Text("可执行文件：$it", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-                            }
-                            overview.error?.takeIf { it.isNotBlank() }?.let {
-                                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                        !overview.available -> {
+                            InlineNotice(
+                                text = "magpie 未安装。可在服务器执行官方安装脚本，或设置 MAGPIE_BIN 后重启 Bot。",
+                                modifier = Modifier.padding(top = 12.dp),
+                                tone = MaterialTheme.colorScheme.error,
+                                icon = Icons.Filled.Error,
+                            )
+                            Text(
+                                "curl -fsSL https://usemagpie.ai/install.sh | sh",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                modifier = Modifier.padding(top = 10.dp),
+                            )
+                        }
+                        else -> {
+                            Column(
+                                modifier = Modifier.padding(top = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                MagpieInfoRow("版本", overview.version ?: "未知")
+                                MagpieInfoRow("网关", overview.gatewayUrl.ifBlank { "—" })
+                                overview.bin?.takeIf { it.isNotBlank() }?.let { MagpieInfoRow("二进制", it) }
+                                overview.error?.takeIf { it.isNotBlank() }?.let {
+                                    InlineNotice(
+                                        text = it,
+                                        modifier = Modifier.padding(top = 3.dp),
+                                        tone = MaterialTheme.colorScheme.error,
+                                        icon = Icons.Filled.Error,
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            val magpieViews = overview?.views.orEmpty()
-            if (overview?.available == true && magpieViews.isNotEmpty()) {
+            val views = overview?.views.orEmpty()
+            if (overview?.available == true && views.isNotEmpty()) {
                 item {
-                    Text("查看", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 4.dp))
+                    SectionHeader(
+                        title = "只读视图",
+                        subtitle = "结果会显示在下方输出卡片",
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
                 }
-                magpieViews.forEach { view ->
-                    item {
-                        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(view.label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                                TextButton(
-                                    enabled = !vm.magpieBusy,
-                                    onClick = {
-                                        if (view.needsTarget) targetFor = view else vm.showMagpieView(view.name)
-                                    },
-                                ) { Text("查看") }
-                            }
+                views.forEach { view ->
+                    item(key = view.name) {
+                        AppCard(contentPadding = PaddingValues(0.dp)) {
+                            SettingsRow(
+                                title = view.label,
+                                subtitle = if (view.needsTarget) "需要${view.targetLabel}" else null,
+                                onClick = {
+                                    if (view.needsTarget) targetFor = view else vm.showMagpieView(view.name)
+                                },
+                            )
                         }
                     }
                 }
@@ -137,24 +177,29 @@ fun MagpieScreen(vm: AppViewModel) {
 
             vm.magpieOutput.takeIf { it.isNotBlank() }?.let { output ->
                 item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    vm.magpieTitle.ifBlank { "输出" },
-                                    style = MaterialTheme.typography.titleSmall,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                TextButton(onClick = vm::clearMagpieOutput) { Text("关闭") }
-                            }
-                            SelectionContainer {
-                                Text(
-                                    output,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(top = 6.dp),
-                                )
-                            }
+                    AppCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                vm.magpieTitle.ifBlank { "输出" },
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            QuietButton(text = "收起", onClick = vm::clearMagpieOutput)
+                        }
+                        SelectionContainer {
+                            Text(
+                                output,
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp)
+                                    .heightIn(max = 360.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            )
                         }
                     }
                 }
@@ -163,10 +208,10 @@ fun MagpieScreen(vm: AppViewModel) {
             item {
                 Text(
                     "提示：可直接输入 magpie 参数，例如 providers、quota、agent claude deepseek/deepseek-chat。" +
-                        "需要桌面/交互的命令会被服务器拒绝。",
-                    color = TextSecondary,
+                        "需要桌面或交互的命令会被服务器拒绝。",
+                    color = TextTertiary,
                     style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 8.dp),
+                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
         }
@@ -204,18 +249,40 @@ fun MagpieScreen(vm: AppViewModel) {
         AlertDialog(
             onDismissRequest = vm::dismissMagpieRun,
             confirmButton = {
-                TextButton(onClick = vm::confirmMagpieRun) { Text("✅ 确认执行") }
+                TextButton(onClick = vm::confirmMagpieRun) { Text("确认执行") }
             },
             dismissButton = {
                 TextButton(onClick = vm::dismissMagpieRun) { Text("取消") }
             },
-            title = { Text("需要确认", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("需要确认", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     "服务器要求确认这条 magpie 命令：\n\n$words\n\n确认后会原样执行。",
+                    color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )
             },
+        )
+    }
+}
+
+@Composable
+private fun MagpieInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+    ) {
+        Text(
+            label,
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.weight(0.28f),
+        )
+        Text(
+            value,
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(0.72f),
         )
     }
 }

@@ -14,10 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.CustomModel
 import com.agentbot.app.ui.theme.TextSecondary
+import com.agentbot.app.ui.theme.TextTertiary
 
 /** Telegram's `/cc model` panel: custom OpenCode provider models and agent bindings. */
 @Composable
@@ -46,44 +44,46 @@ fun ModelsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                Row {
-                    TextButton(onClick = { adding = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("添加", modifier = Modifier.padding(start = 4.dp))
-                    }
-                    TextButton(onClick = vm::refreshCustomModels) {
-                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Text("刷新", modifier = Modifier.padding(start = 4.dp))
-                    }
-                }
+                AppIconButton(
+                    icon = Icons.Filled.Add,
+                    contentDescription = "添加模型",
+                    onClick = { adding = true },
+                )
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新模型",
+                    onClick = vm::refreshCustomModels,
+                )
             }
         )
 
         Text(
             "自定义模型供 OpenCode 使用，添加后即可在切换模型的列表中选取；改动无需重启。",
             color = TextSecondary,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 20.dp),
         )
 
         if (vm.modelBusy) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            )
+            LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (vm.customModels.isEmpty()) {
                 item {
-                    Text(
-                        "暂无自定义模型。添加格式：简称 provider/modelID [显示名]。",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    AppCard {
+                        Text("还没有自定义模型", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "点右上角 + 添加。格式：简称 provider/modelID [显示名]。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
                 }
             }
             items(vm.customModels, key = { it.key }) { model ->
@@ -91,12 +91,16 @@ fun ModelsScreen(vm: AppViewModel) {
             }
             if (vm.agentBindings.isNotEmpty()) {
                 item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                            Text("Agent 绑定", style = MaterialTheme.typography.titleSmall)
+                    AppCard(contentPadding = PaddingValues(0.dp)) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                "Agent 绑定",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 2.dp),
+                            )
                             vm.agentBindings.forEach { agent ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Column(modifier = Modifier.weight(1f).padding(top = 4.dp)) {
@@ -104,13 +108,14 @@ fun ModelsScreen(vm: AppViewModel) {
                                         Text(
                                             agent.model ?: "未设置",
                                             color = TextSecondary,
-                                            style = MaterialTheme.typography.labelMedium,
+                                            style = MaterialTheme.typography.labelSmall,
                                         )
                                     }
-                                    TextButton(
+                                    QuietButton(
+                                        text = "设为模型",
                                         onClick = { assigning = agent.name },
                                         enabled = !vm.modelBusy,
-                                    ) { Text("设为模型") }
+                                    )
                                 }
                             }
                         }
@@ -151,7 +156,7 @@ fun ModelsScreen(vm: AppViewModel) {
     pendingRemove?.let { key ->
         AlertDialog(
             onDismissRequest = { pendingRemove = null },
-            title = { Text("删除模型 $key？", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("删除模型 $key？", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
                     "删除后，指向该模型的会话会被重置为默认模型；仍被 agent 引用时会提示是否强制删除。",
@@ -174,7 +179,7 @@ fun ModelsScreen(vm: AppViewModel) {
         val key = vm.modelDeleteBlockedKey
         AlertDialog(
             onDismissRequest = vm::clearModelDeleteBlocked,
-            title = { Text("模型仍在使用中", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("模型仍在使用中", style = MaterialTheme.typography.titleLarge) },
             text = { Text(message, style = MaterialTheme.typography.bodyMedium) },
             confirmButton = {
                 TextButton(onClick = {
@@ -191,24 +196,36 @@ fun ModelsScreen(vm: AppViewModel) {
 
 @Composable
 private fun CustomModelCard(vm: AppViewModel, model: CustomModel, onRemove: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(model.key, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+    AppCard(contentPadding = PaddingValues(0.dp)) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(model.key, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 Text(model.label, color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             }
             Text(
                 "${model.providerID}/${model.modelID}",
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 3.dp),
             )
             model.desc?.takeIf { it.isNotBlank() && it != "自定义模型" }?.let {
-                Text(it, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(enabled = !vm.modelBusy, onClick = onRemove) {
-                    Text("🗑 删除", color = MaterialTheme.colorScheme.error)
-                }
+            Row(
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                QuietButton(
+                    text = "删除",
+                    enabled = !vm.modelBusy,
+                    danger = true,
+                    onClick = onRemove,
+                )
             }
         }
     }
