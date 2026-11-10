@@ -379,7 +379,7 @@ test("telegram bridge creates and manages scheduled AI tasks", async () => {
 
     await h.send("/schedule add 10m 检查服务器")
     assert.match(h.lastText(), /定时任务已创建.*#1/)
-    assert.match(h.lastText(), /OpenCode \/ Gemini 3\.8 Flash/)
+    assert.match(h.lastText(), /OpenCode \/ 由引擎决定/)
     assert.match(h.lastText(), /检查服务器/)
 
     await h.send("/schedule add --engine qoder --model deepseek every 2h 汇总日志")
@@ -627,10 +627,18 @@ test("telegram bridge records task history and clears it", async () => {
     await h.send("请检查构建状态")
     await h.waitFor(() => h.texts().some((text) => /处理这条消息时出错了/.test(text)))
 
+    const failed = h.bridge.historyStore.list("tg:7", 1)[0]
+    assert.equal(failed?.outcome, "failed")
+    assert.equal(failed?.errorCode, "ENGINE_UNAVAILABLE", "the stored row must carry the same class as the log")
+    assert.match(failed?.detail ?? "", /请求失败|ECONNREFUSED|fetch failed|不可用/, "the failure summary must be persisted")
+
     await h.send("/history")
     assert.match(h.lastText(), /第 1-1 条 \/ 共 1 条/)
     assert.match(h.lastText(), /❌ 失败/)
+    assert.match(h.lastText(), /ENGINE_UNAVAILABLE/)
     assert.match(h.lastText(), /请检查构建状态/)
+    assert.ok(h.errors.some((line) => /task=q\d+ engine=opencode .*outcome=failed .*reason=ENGINE_UNAVAILABLE/.test(line)),
+      "telegram failures need the same structured terminal line as API tasks")
 
     await h.press("history:clear")
     assert.match(h.panelTexts().at(-1) ?? "", /暂无任务记录/)
@@ -1288,11 +1296,11 @@ test("model selection can be dropped with /model default and the panel button", 
     assert.doesNotMatch(h.lastText(), /（默认）/)
 
     await h.press("model:reset")
-    assert.ok(h.answers().some((text) => /已恢复默认模型/.test(text)))
+    assert.ok(h.answers().some((text) => /已清除模型选择/.test(text)))
     await h.send("/status")
-    assert.match(h.lastText(), /模型: \*.*（默认）/)
+    assert.match(h.lastText(), /模型: \*由 OpenCode 决定\*（本会话未选择）/)
     await h.press("model:reset")
-    assert.ok(h.answers().some((text) => /本会话已经是默认模型/.test(text)))
+    assert.ok(h.answers().some((text) => /本会话没有独立的模型选择/.test(text)))
 
     // CLI engine: the same reset through the command, then via its own button
     await h.send("/agent qoder")
@@ -1310,9 +1318,9 @@ test("model selection can be dropped with /model default and the panel button", 
     const reset = h.buttons().find((button) => button.data.startsWith("cmodelreset:"))
     assert.ok(reset, "CLI panel must offer a reset once a model is stored")
     await h.press(reset.data)
-    assert.ok(h.answers().some((text) => /已恢复默认模型/.test(text)))
+    assert.ok(h.answers().some((text) => /已清除模型选择/.test(text)))
     await h.press(reset.data)
-    assert.ok(h.answers().some((text) => /本会话已经是默认模型/.test(text)))
+    assert.ok(h.answers().some((text) => /本会话没有独立的模型选择/.test(text)))
     assert.equal(h.errors.length, 0)
   } finally {
     await h.close()

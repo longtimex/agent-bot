@@ -570,6 +570,25 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
           model: "MagpieViewResult",
         })
       }
+      const magpieCommands = (overview?.commands ?? []) as Array<Record<string, unknown>>
+      // Contract tests may run against a real server: never fall back to `update` or a daemon
+      // action just because it is the first row. A safe read-only write such as `sync` is enough
+      // to prove the endpoint, while a destructive command stays behind its confirm gate.
+      const magpieCommand = magpieCommands.find((entry) => !entry.needsTarget && !entry.confirm)
+      if (!magpieCommand) problems.push("magpieOverview → GET /magpie answered no commands at all")
+      else {
+        await call({
+          name: "magpieExec → POST /magpie/exec",
+          method: "POST",
+          path: "/magpie/exec",
+          body: {
+            name: String(magpieCommand.name),
+            ...(magpieCommand.needsTarget ? { target: "probe" } : {}),
+            ...(magpieCommand.confirm ? { confirm: true } : {}),
+          },
+          model: "MagpieExecResult",
+        })
+      }
       await call({
         name: "magpieRun → POST /magpie/run",
         method: "POST",

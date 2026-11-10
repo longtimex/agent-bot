@@ -7,30 +7,22 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
-import java.util.Base64
+import java.io.File
 
-/** One attachment queued for the next message. Bytes stay in memory until send. */
+/** One attachment queued for the next message. The picked file stays on disk until send. */
 @Serializable
 data class PendingAttachment(
     val name: String,
     val mime: String,
-    val base64: String,
+    /** Absolute path in the app cache; uploading streams it instead of loading it into the heap. */
+    val path: String,
+    val sizeBytes: Long,
 ) {
-    val sizeBytes: Int get() = base64.length * 3 / 4
+    val file: File get() = File(path)
 }
 
 object AttachmentLimits {
     const val MAX_COUNT = 4
-    const val MAX_TOTAL_BYTES = 15 * 1024 * 1024
-
-    /**
-     * The server's own per-file ceiling (`MAX_ATTACH_FILE_BYTES`). A bigger file is not an error:
-     * the bot answers with a note that it was not attached, so the user pays the upload and gets
-     * no image. Refusing at pick time says the same thing before any bytes leave the phone.
-     */
-    const val MAX_FILE_BYTES = 10 * 1024 * 1024
 }
 
 /** Name and size of an attachment already sent with a chat message; bytes are not kept. */
@@ -38,7 +30,7 @@ object AttachmentLimits {
 data class SentAttachment(
     val name: String,
     val mime: String = "",
-    val size: Int = 0,
+    val size: Long = 0,
 ) {
     val sizeLabel: String
         get() = when {
@@ -48,58 +40,43 @@ data class SentAttachment(
         }
 }
 
-/** Reads content URIs (photo picker, document picker) into PendingAttachments, and persists chat history locally. */
+/** Copies content URIs (photo picker, document picker) into private cache files, and persists chat history locally. */
 object LocalStore {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun read(context: Context, uri: Uri, fallbackName: String? = null): PendingAttachment {
         val resolver = context.contentResolver
-        val mime = resolver.getType(uri) ?: "application/octet-stream"
         val name = queryDisplayName(resolver, uri) ?: fallbackName ?: "attachment.bin"
-        val limit = AttachmentLimits.MAX_FILE_BYTES
-        // A picker hands over anything the user can see, and both the bytes and their Base64 land
-        // on the heap: enforcing the limit only after readBytes() would kill the process on a
-        // video or a disk image before the size was ever known. The cap is the server's own
-        // per-file ceiling, so an oversized pick is refused with the reason instead of being
-        // uploaded and then quietly left out of the prompt.
-        querySize(resolver, uri)?.let { declared ->
-            if (declared > limit) {
-                throw IllegalStateException("$name 有 ${megabytes(declared)}，服务器单个附件最多 ${limit / 1024 / 1024}MB")
-            }
+        val declaredMime = resolver.getType(uri)?.takeIf { it.isNotBlank() }
+        // Some document providers answer null or application/octet-stream for a perfectly
+        // ordinary .mp4/.m4a. Trusting that makes the server treat it as an opaque file,
+        // so fall back to the extension before classifying the attachment.
+        val mime = when {
+            declaredMime != null && declaredMime != "application/octet-stream" -> declaredMime
+            else -> mediaMime(name).takeIf { it != "application/octet-stream" } ?: declaredMime ?: "application/octet-stream"
         }
-        val bytes = resolver.openInputStream(uri)?.use { readCapped(it, limit, name) }
-            ?: throw IllegalStateException("无法读取所选文件")
-        // An empty file encodes to an empty data field, and the server rejects the whole request
-        // over it ("附件缺少 name 或 data") — so one undownloaded cloud placeholder used to fail
-        // every later send too, because a failed send keeps its attachments staged.
-        if (bytes.isEmpty()) throw IllegalStateException("$name 是空的，服务器不会接收空附件")
-        val encoded = Base64.getEncoder().encodeToString(bytes)
-        return PendingAttachment(name = name, mime = mime, base64 = encoded)
+        // Keep the picked file on disk. Reading it into a ByteArray (and then Base64)
+        // made a large video consume several times its size in the phone heap before
+        // the upload even started. The network layer streams this file instead.
+        val dir = File(context.cacheDir, "pending_attachments").apply { mkdirs() }
+        val target = File.createTempFile("picked-", ".bin", dir)
+        try {
+            resolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+            } ?: throw IllegalStateException("无法读取所选文件")
+            if (target.length() == 0L) {
+                throw IllegalStateException("$name 是空的，服务器不会接收空附件")
+            }
+            return PendingAttachment(name = name, mime = mime, path = target.absolutePath, sizeBytes = target.length())
+        } catch (err: Exception) {
+            target.delete()
+            throw err
+        }
     }
 
-    private fun megabytes(bytes: Long): String = "%.1fMB".format(bytes / 1024.0 / 1024.0)
-
-    /** Declared length from the provider, or null when it withholds one (some cloud providers do). */
-    private fun querySize(resolver: android.content.ContentResolver, uri: Uri): Long? = runCatching {
-        resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (index < 0 || !cursor.moveToFirst() || cursor.isNull(index)) null else cursor.getLong(index)
-        }
-    }.getOrNull()?.takeIf { it > 0 }
-
-    /** Streaming read that gives up at the limit, for the case where the provider declares no size. */
-    private fun readCapped(input: InputStream, limit: Int, name: String): ByteArray {
-        val out = ByteArrayOutputStream(minOf(limit, 256 * 1024))
-        val buffer = ByteArray(64 * 1024)
-        var total = 0
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            total += read
-            if (total > limit) throw IllegalStateException("$name 超过 ${limit / 1024 / 1024}MB 上限")
-            out.write(buffer, 0, read)
-        }
-        return out.toByteArray()
+    /** Deletes the cached copy behind a sent or discarded attachment. */
+    fun discard(attachment: PendingAttachment) {
+        runCatching { attachment.file.delete() }
     }
 
     private fun queryDisplayName(resolver: android.content.ContentResolver, uri: Uri): String? = runCatching {
@@ -117,6 +94,8 @@ object LocalStore {
         val text: String,
         val taskId: String? = null,
         val status: String? = null,
+        val errorCode: String? = null,
+        val engineNote: String? = null,
         val at: Long,
         val media: List<TaskMedia> = emptyList(),
         val attachments: List<SentAttachment> = emptyList(),
@@ -131,7 +110,17 @@ object LocalStore {
 
     private fun saveMessages(context: Context, messages: List<com.agentbot.app.ui.ChatMessage>) {
         val stored = messages.map {
-            StoredMessage(it.role.ordinal, it.text, it.taskId, it.status, it.at, it.media, it.attachments)
+            StoredMessage(
+                it.role.ordinal,
+                it.text,
+                it.taskId,
+                it.status,
+                it.errorCode,
+                it.engineNote,
+                it.at,
+                it.media,
+                it.attachments,
+            )
         }
         val encoded = stored.map { json.encodeToString(StoredMessage.serializer(), it) }
         // Walk from the newest row backwards and stop where the budget runs out. The newest row is
@@ -176,6 +165,8 @@ object LocalStore {
                 text = stored.text,
                 taskId = stored.taskId,
                 status = stored.status,
+                errorCode = stored.errorCode,
+                engineNote = stored.engineNote,
                 at = stored.at,
                 media = stored.media,
                 attachments = stored.attachments,

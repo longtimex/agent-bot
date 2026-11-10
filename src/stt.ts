@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { openAsBlob } from "node:fs"
 import type { ModelCapabilities } from "./attachmentInput.js"
 import type { SavedAttachment } from "./attachments.js"
 
@@ -16,18 +16,19 @@ export interface SttConfig {
 
 export interface SttDeps {
   fetchImpl?: typeof fetch
-  readFile?: (path: string) => Buffer
+  /** Test seam; production uses a disk-backed Blob so a large voice note is not read into the heap. */
+  openBlob?: (path: string, type?: string) => Promise<Blob>
 }
 
 /** Calls `{baseUrl}/audio/transcriptions` and returns the transcript text. */
 export async function transcribeAudio(filePath: string, opts: SttConfig, deps: SttDeps = {}): Promise<string> {
   const fetchImpl = deps.fetchImpl ?? fetch
-  const readFile = deps.readFile ?? readFileSync
+  const openBlob = deps.openBlob ?? openAsBlob
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/audio/transcriptions`
 
   const form = new FormData()
-  const bytes = readFile(filePath)
-  form.append("file", new Blob([new Uint8Array(bytes)], { type: "application/octet-stream" }), filePath.split("/").pop() || "audio")
+  const file = await openBlob(filePath, "application/octet-stream")
+  form.append("file", file, filePath.split(/[\\/]/).pop() || "audio")
   form.append("model", opts.model)
   if (opts.language) form.append("language", opts.language)
 
@@ -55,8 +56,6 @@ export async function transcribeAudio(filePath: string, opts: SttConfig, deps: S
 export interface ApplySttOptions {
   stt?: SttConfig
   modelCapabilities?: ModelCapabilities
-  /** Upper bound for one transcription (matches the Telegram inbound file cap). */
-  maxBytes?: number
 }
 
 export interface ApplySttResult {
@@ -76,7 +75,7 @@ export async function applyStt(saved: SavedAttachment[], opts: ApplySttOptions =
   if (!opts.stt) return { saved, errors }
   const out: SavedAttachment[] = []
   for (const item of saved) {
-    const blocked = item.kind === "audio" && (opts.modelCapabilities?.audio === false || item.bytes > (opts.maxBytes ?? 10 * 1024 * 1024))
+    const blocked = item.kind === "audio" && opts.modelCapabilities?.audio === false
     if (!blocked) {
       out.push(item)
       continue

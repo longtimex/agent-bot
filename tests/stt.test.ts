@@ -32,7 +32,7 @@ function fakeFetch(response: unknown, ok = true, status = 200): { fetch: typeof 
 
 test("transcribeAudio posts the file to /audio/transcriptions with model and auth", async () => {
   const { fetch, calls } = fakeFetch({ text: "  你好，记得喝水  " })
-  const text = await transcribeAudio("/tmp/voice.ogg", STT, { fetchImpl: fetch, readFile: () => Buffer.from("ogg") })
+  const text = await transcribeAudio("/tmp/voice.ogg", STT, { fetchImpl: fetch, openBlob: async () => new Blob([Buffer.from("ogg")], { type: "application/octet-stream" }) })
   assert.equal(text, "你好，记得喝水")
   assert.equal(calls.length, 1)
   assert.equal(calls[0]!.url, "https://stt.example/v1/audio/transcriptions")
@@ -47,26 +47,26 @@ test("transcribeAudio posts the file to /audio/transcriptions with model and aut
 
 test("transcribeAudio forwards language when configured", async () => {
   const { fetch, calls } = fakeFetch({ text: "hi" })
-  await transcribeAudio("/tmp/v.ogg", { ...STT, language: "zh" }, { fetchImpl: fetch, readFile: () => Buffer.alloc(0) })
+  await transcribeAudio("/tmp/v.ogg", { ...STT, language: "zh" }, { fetchImpl: fetch, openBlob: async () => new Blob([]) })
   assert.equal((calls[0]!.init.body as FormData).get("language"), "zh")
 })
 
 test("transcribeAudio raises on http errors and empty results", async () => {
   const bad = fakeFetch("quota exceeded", false, 429)
   await assert.rejects(
-    transcribeAudio("/tmp/v.ogg", STT, { fetchImpl: bad.fetch, readFile: () => Buffer.alloc(0) }),
+    transcribeAudio("/tmp/v.ogg", STT, { fetchImpl: bad.fetch, openBlob: async () => new Blob([]) }),
     /HTTP 429/,
   )
   const empty = fakeFetch({ text: "   " })
   await assert.rejects(
-    transcribeAudio("/tmp/v.ogg", STT, { fetchImpl: empty.fetch, readFile: () => Buffer.alloc(0) }),
+    transcribeAudio("/tmp/v.ogg", STT, { fetchImpl: empty.fetch, openBlob: async () => new Blob([]) }),
     /空结果/,
   )
 })
 
 test("applyStt only rewrites audio the model cannot accept", async () => {
   const { fetch } = fakeFetch({ text: "转写内容" })
-  const deps = { fetchImpl: fetch, readFile: () => Buffer.alloc(0) }
+  const deps = { fetchImpl: fetch, openBlob: async () => new Blob([]) }
   const voice = audioItem()
   const image = audioItem({ kind: "image", name: "pic.png", mime: "image/png", path: "/tmp/pic.png" })
 
@@ -92,7 +92,7 @@ test("applyStt is a pass-through without a config and collects failures per file
   const failing = fakeFetch("boom", false, 500)
   const result = await applyStt([audioItem()], { stt: STT, modelCapabilities: { audio: false } }, {
     fetchImpl: failing.fetch,
-    readFile: () => Buffer.alloc(0),
+    openBlob: async () => new Blob([]),
   })
   assert.equal(result.saved[0]!.text, undefined, "a failed transcription keeps the original item")
   assert.equal(result.errors.length, 1)

@@ -24,7 +24,7 @@ export interface PersonalCommandDeps {
   store: SessionStore
   agents: AgentCliService
   timezone: () => string
-  currentModel: (key: string) => { providerID: string; modelID: string; label: string }
+  currentModel: (key: string) => { providerID: string; modelID: string; label: string } | undefined
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
   sendPanel: (chatId: number, panel: Panel) => Promise<void>
   aliasPanel: (chatId: number) => Panel
@@ -157,7 +157,7 @@ export class TelegramPersonalCommands {
         const defaults: ScheduleDefaults =
           engine === "opencode"
             ? { engine, model: this.#deps.currentModel(key) }
-            : { engine, cliModel: this.#deps.store.getCliModel(key, engine) ?? this.#deps.agents.registry.defaultModel(engine) }
+            : { engine, cliModel: this.#deps.store.getCliModel(key, engine) }
         const task = this.#deps.schedules.add(chatId, userId, input, defaults)
         const when = formatReminderTime(task.dueAt, this.#deps.timezone())
         const remaining = formatRemaining(task.dueAt - Date.now())

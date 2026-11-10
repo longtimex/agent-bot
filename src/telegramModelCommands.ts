@@ -2,7 +2,6 @@ import { statSync } from "node:fs"
 import { homedir } from "node:os"
 import { InlineKeyboard } from "grammy"
 import { normalizeWorkDirInput, type AgentCliService } from "./agentCli.js"
-import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
 import type { Logger } from "./logger.js"
 import { escapeMarkdown, type Panel } from "./messages.js"
@@ -15,7 +14,6 @@ export interface ModelCommandDeps {
   store: SessionStore
   agents: AgentCliService
   oc: Opencode
-  cfg: BotConfig
   log: Logger
   runningSince: Map<string, number>
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
@@ -123,13 +121,13 @@ export class TelegramModelCommands {
         if (!this.clearCliModelSelection(job.key, engine)) {
           await this.#deps.sendText(
             job.chatId,
-            `ℹ️ 本会话没有独立的模型选择，当前就是 *${escapeMarkdown(profile.label)}* 的默认模型。`,
+            `ℹ️ 本会话没有独立的模型选择，当前模型由 *${escapeMarkdown(profile.label)}* 自身配置决定。`,
           )
           return
         }
         await this.#deps.sendText(
           job.chatId,
-          `↩️ 已取消本会话的模型选择，恢复 *${escapeMarkdown(profile.label)}* 默认模型（已重置会话上下文）。`,
+          `↩️ 已取消本会话的模型选择，之后由 *${escapeMarkdown(profile.label)}* 自身配置决定（已重置会话上下文）。`,
         )
         return
       }
@@ -143,7 +141,7 @@ export class TelegramModelCommands {
         return
       }
 
-      const current = this.#deps.store.getCliModel(job.key, engine) ?? profile.defaultModel
+      const current = this.#deps.store.getCliModel(job.key, engine)
       if (current === selectedModel) {
         await this.#deps.sendText(
           job.chatId,
@@ -185,7 +183,7 @@ export class TelegramModelCommands {
     }
 
     const current = this.getCurrentModel(job.key)
-    if (current.providerID === targetModel.providerID && current.modelID === targetModel.modelID) {
+    if (current?.providerID === targetModel.providerID && current.modelID === targetModel.modelID) {
       await this.#deps.sendText(
         job.chatId,
         `✅ 当前已经是 *${escapeMarkdown(targetModel.label)}*，无需切换，会话上下文保持不变。`,
@@ -232,13 +230,13 @@ export class TelegramModelCommands {
     if (!(await this.clearOpenCodeModelSelection(key))) {
       await this.#deps.sendText(
         chatId,
-        `ℹ️ 本会话没有独立的模型选择，当前就是默认模型 *${escapeMarkdown(this.getCurrentModel(key).label)}*。`,
+        "ℹ️ 本会话没有独立的模型选择，当前由 OpenCode 自身配置决定。",
       )
       return
     }
     await this.#deps.sendText(
       chatId,
-      `↩️ 已取消本会话的模型选择，恢复默认模型：*${escapeMarkdown(this.getCurrentModel(key).label)}*\n（已重置会话上下文，可直接继续提问）`,
+      "↩️ 已取消本会话的模型选择，之后由 OpenCode 自身配置决定模型。\n（已重置会话上下文，可直接继续提问）",
     )
   }
 
@@ -261,12 +259,12 @@ export class TelegramModelCommands {
   cliModelLabel(engine: string, model: string | undefined): string {
     if (model) return this.#deps.agents.registry.modelLabel(engine, model)
     const profile = this.#deps.agents.registry.get(engine)
-    if (!profile) return "CLI 默认"
-    return profile.supportsModel ? "CLI 默认" : "CLI 固定"
+    if (!profile) return "由 CLI 决定"
+    return profile.supportsModel ? "由 CLI 决定" : "CLI 固定"
   }
 
-  getCurrentModel(key: string): { providerID: string; modelID: string; label: string } {
-    return resolveOpencodeModel(this.#deps.store, this.#deps.cfg.opencode.model, key)
+  getCurrentModel(key: string): { providerID: string; modelID: string; label: string } | undefined {
+    return resolveOpencodeModel(this.#deps.store, key)
   }
 
 }

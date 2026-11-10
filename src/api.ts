@@ -52,9 +52,9 @@ import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
 import { routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 
-// Attachment uploads are base64 on the same endpoint: a 15MB batch inflates
-// to ~20MB, so the cap covers text-only requests with plenty of headroom
-const MAX_BODY_BYTES = 48 * 1024 * 1024
+// Attachment uploads are base64 on the same endpoint. There is deliberately no
+// fixed application-level ceiling: the JSON body is still bounded by available
+// memory, which is what a single-process Node server can actually honor.
 
 /** HTTP helpers live in apiHttp.ts so the route split can grow without re-plumbing. */
 
@@ -253,8 +253,10 @@ export class ApiServer {
         else res.end()
       })
     })
-    // Bound slow clients and idle sockets; attachment uploads are the only long body.
-    server.requestTimeout = 120_000
+    // Attachment uploads are the only long bodies. A 120s request timeout cut off
+    // a phone sending a large video over a slow uplink before the file was complete.
+    // Node's socket idle timeout still closes a client that stops sending.
+    server.requestTimeout = 0
     server.headersTimeout = 30_000
     server.keepAliveTimeout = 5_000
     server.on("clientError", (err, socket) => {
@@ -843,13 +845,13 @@ export class ApiServer {
       if (model?.modelID !== own?.modelID || model?.providerID !== own?.providerID) {
         if (model) store.setModel(this.appKey, model)
         else store.clearModel(this.appKey)
-        changed.push(model ? `模型 ${model.label}` : "恢复默认模型")
+        changed.push(model ? `模型 ${model.label}` : "清除模型选择")
       }
     } else {
       const model = store.getCliModel(from, engine) ?? ""
       if (model !== (store.getCliModel(this.appKey, engine) ?? "")) {
         store.setCliModel(this.appKey, engine, model)
-        changed.push(model ? `模型 ${this.#opts.agents.registry.modelLabel(engine, model)}` : "恢复该引擎的默认模型")
+        changed.push(model ? `模型 ${this.#opts.agents.registry.modelLabel(engine, model)}` : "清除该引擎的模型选择")
       }
     }
     // Copy what the other session really runs in, which `workDir` already resolved to an
@@ -882,17 +884,17 @@ export class ApiServer {
       timezone: this.#opts.timezone(),
     }
     if (engine === "opencode") {
-      const model = resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, key)
-      view.model = model.label
+      const model = resolveOpencodeModel(this.#opts.store, key)
+      view.model = model?.label
       view.modelRef = model
       view.hasSession = Boolean(this.#opts.store.get(key))
     } else {
-      const model = this.#opts.store.getCliModel(key, engine) ?? this.#opts.agents.registry.defaultModel(engine)
+      const model = this.#opts.store.getCliModel(key, engine)
       view.model = model
         ? this.#opts.agents.registry.modelLabel(engine, model)
         : profile?.supportsModel
-          ? "默认"
-          : "由 CLI 决定"
+          ? "由 CLI 决定"
+          : "CLI 固定"
       view.hasSession = Boolean(this.#opts.store.getCliSession(key, engine))
       view.workDir = this.#opts.agents.workDir(key)
     }
@@ -943,8 +945,8 @@ export class ApiServer {
       } catch (err) {
         throw new ApiError(400, err instanceof Error ? err.message : "无法识别的模型")
       }
-      const current = this.#opts.store.getModel(this.appKey) ?? resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, this.appKey)
-      if (current.providerID === info.providerID && current.modelID === info.modelID) {
+      const current = resolveOpencodeModel(this.#opts.store, this.appKey)
+      if (current?.providerID === info.providerID && current.modelID === info.modelID) {
         return `当前已经是 ${info.label}，无需切换，会话上下文保持不变`
       }
       this.#opts.store.setModel(this.appKey, { providerID: info.providerID, modelID: info.modelID, label: info.label })
@@ -957,7 +959,7 @@ export class ApiServer {
       const options = (profile?.models ?? []).map((m) => m.id).join(", ")
       throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
     }
-    const current = this.#opts.store.getCliModel(this.appKey, engine) ?? this.#opts.agents.registry.defaultModel(engine)
+    const current = this.#opts.store.getCliModel(this.appKey, engine)
     if (current === resolved) {
       return `当前已经是 ${this.#opts.agents.registry.modelLabel(engine, resolved)}，无需切换，会话上下文保持不变`
     }
@@ -968,21 +970,20 @@ export class ApiServer {
 
   /** `/model <reset word>` on OpenCode: false when the session never picked one itself. */
   async #clearOpenCodeModel(): Promise<string> {
-    const fallback = () => resolveOpencodeModel(this.#opts.store, this.#opts.cfg.opencode.model, this.appKey).label
-    if (!this.#opts.store.clearModel(this.appKey)) return `本会话没有独立的模型选择，当前就是默认模型 ${fallback()}`
+    if (!this.#opts.store.clearModel(this.appKey)) return "本会话没有独立的模型选择，当前由 OpenCode 自身配置决定"
     await this.#resetSession()
-    return `已取消本会话的模型选择，恢复默认模型 ${fallback()}（会话上下文已重置）`
+    return "已取消本会话的模型选择，之后由 OpenCode 自身配置决定模型（会话上下文已重置）"
   }
 
   /** `/model <reset word>` on a CLI engine, mirroring Telegram's own selection drop. */
   #clearCliModel(engine: string): string {
     const label = this.#opts.agents.registry.label(engine)
     if (!this.#opts.store.getCliModel(this.appKey, engine)) {
-      return `本会话没有独立的模型选择，当前就是 ${label} 默认模型`
+      return `本会话没有独立的模型选择，当前由 ${label} 自身配置决定`
     }
     this.#opts.store.setCliModel(this.appKey, engine, "")
     this.#opts.store.clearCliSession(this.appKey, engine)
-    return `已取消本会话的模型选择，恢复 ${label} 默认模型（会话上下文已重置）`
+    return `已取消本会话的模型选择，之后由 ${label} 自身配置决定模型（会话上下文已重置）`
   }
 
   // Wire views for reminders/schedules moved to apiPersonal.ts (publicReminder/publicSchedule).
@@ -1008,14 +1009,11 @@ export class ApiServer {
   async #readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     const encKey = this.#bodyKeys.get(req)
     const chunks: Buffer[] = []
-    let total = 0
     for await (const chunk of req) {
-      total += (chunk as Buffer).byteLength
-      if (total > MAX_BODY_BYTES) throw new ApiError(413, "请求体过大")
       chunks.push(chunk as Buffer)
     }
-    if (total === 0) return {}
-    const raw = Buffer.concat(chunks, total)
+    if (chunks.length === 0) return {}
+    const raw = Buffer.concat(chunks)
 
     const parseObject = (text: string): Record<string, unknown> => {
       try {

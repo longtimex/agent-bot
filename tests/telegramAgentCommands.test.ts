@@ -26,7 +26,6 @@ function harness() {
       list: () => [profile],
       label: (id: string) => id,
       modelLabel: (id: string) => id,
-      defaultModel: () => undefined,
     },
   } as unknown as AgentCliService
   const installer = {

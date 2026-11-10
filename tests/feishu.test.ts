@@ -688,16 +688,14 @@ test("feishu audio and video events reach the shared attachment pipeline", async
   try {
     await h.message("ou_owner", "/start")
     await h.media("ou_owner", "audio", { file_key: "audio_v3_owner", file_name: "voice.opus", mime_type: "audio/opus" })
-    await h.waitFor(() => h.calls.some((call) => call.method === "resource" && call.fileKey === "audio_v3_owner"))
+    await h.waitFor(() => h.prompts.some((prompt) => /请转写这段音频/.test(prompt.text)))
     const audio = h.calls.find((call) => call.method === "resource" && call.fileKey === "audio_v3_owner")
     assert.equal(audio?.resourceType, "audio")
-    assert.match(h.prompts.at(-1)?.text ?? "", /请转写这段音频/)
 
     await h.media("ou_owner", "video", { file_key: "video_v3_owner", file_name: "clip.mp4", mime_type: "video/mp4" })
-    await h.waitFor(() => h.calls.some((call) => call.method === "resource" && call.fileKey === "video_v3_owner"))
+    await h.waitFor(() => h.prompts.some((prompt) => prompt.text.includes("clip.mp4")))
     const video = h.calls.find((call) => call.method === "resource" && call.fileKey === "video_v3_owner")
     assert.equal(video?.resourceType, "media")
-    assert.match(h.prompts.at(-1)?.text ?? "", /clip\.mp4/)
     assert.equal(h.errors.length, 0)
   } finally {
     await h.close()

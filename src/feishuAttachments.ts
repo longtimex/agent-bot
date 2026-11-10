@@ -122,10 +122,11 @@ export function feishuMessageToTelegram(message: Message, refs: FeishuResourceRe
 
 export interface FeishuAttachmentDownloadDeps {
   client: FeishuApiLike
+  /** 0 disables the application-level ceiling. */
   maxBytes: number
 }
 
-/** Streaming download: stop at the configured limit instead of buffering a 100 MB file. */
+/** Streaming download into memory; callers that need disk use the stream variant below. */
 export async function downloadFeishuResource(
   deps: FeishuAttachmentDownloadDeps,
   ref: FeishuResourceRef,
@@ -146,8 +147,8 @@ export async function downloadFeishuResource(
       if (signal?.aborted) throw new Error("已取消下载")
       const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
       total += data.byteLength
-      if (total > deps.maxBytes) {
-        throw new Error(`超过 ${Math.round(deps.maxBytes / 1024 / 1024)}MB 上限`)
+      if (deps.maxBytes > 0 && total > deps.maxBytes) {
+        throw new Error(`超过配置的 ${Math.round(deps.maxBytes / 1024 / 1024)}MB 下载上限（MAX_INPUT_MB，0 表示不限）`)
       }
       chunks.push(data)
     }
@@ -158,10 +159,44 @@ export async function downloadFeishuResource(
   return Buffer.concat(chunks, total)
 }
 
+export interface FeishuStreamDeps {
+  client: FeishuApiLike
+  /** 0 disables the application-level ceiling. */
+  maxBytes: number
+  signal?: AbortSignal
+}
+
+/** Streams a Feishu resource without holding the whole file in memory. */
+export async function* openFeishuResourceStream(
+  deps: FeishuStreamDeps,
+  ref: FeishuResourceRef,
+): AsyncGenerator<Uint8Array> {
+  const resourceType = ref.type === "video" ? "media" : ref.type
+  const response = await deps.client.im.v1.messageResource.get({
+    params: { type: resourceType },
+    path: { message_id: ref.messageId, file_key: ref.fileKey },
+  })
+  const stream = response.getReadableStream() as AsyncIterable<Buffer | Uint8Array> & { destroy?: () => void }
+  let total = 0
+  try {
+    for await (const chunk of stream) {
+      if (deps.signal?.aborted) throw new Error("已取消下载")
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += data.byteLength
+      if (deps.maxBytes > 0 && total > deps.maxBytes) {
+        throw new Error(`超过配置的 ${Math.round(deps.maxBytes / 1024 / 1024)}MB 下载上限（MAX_INPUT_MB，0 表示不限）`)
+      }
+      yield data
+    }
+  } finally {
+    stream.destroy?.()
+  }
+}
+
 export function attachmentFromRef(ref: FeishuResourceRef): AttachmentDescriptor {
   return {
     fileId: encodeFeishuFileId(ref),
-    kind: ref.type === "image" ? "image" : ref.type === "audio" ? "audio" : "document",
+    kind: ref.type === "image" ? "image" : ref.type === "audio" ? "audio" : ref.type === "video" ? "video" : "document",
     name: ref.name,
     mime: ref.mime,
   }

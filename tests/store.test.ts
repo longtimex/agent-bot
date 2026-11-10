@@ -168,7 +168,7 @@ test("SessionStore drops empty shell records on load", () => {
     writeFileSync(
       path,
       JSON.stringify({
-        // /new、恢复默认目录/模型后留下的空壳:只剩 updatedAt
+        // /new、恢复默认目录/清除模型选择后留下的空壳:只剩 updatedAt
         "tg:shell": { sessionID: "", updatedAt: "2026-01-01T00:00:00.000Z" },
         // 有状态的记录必须原样保留
         "tg:engine-only": { sessionID: "", engine: "claude" },
@@ -179,6 +179,51 @@ test("SessionStore drops empty shell records on load", () => {
     assert.equal(store.get("tg:shell"), undefined)
     assert.equal(store.getEngine("tg:engine-only"), "claude", "an engine choice alone keeps the record")
     assert.equal(store.get("tg:real"), "ses_9")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("two SessionStore instances merge different chats instead of overwriting a stale snapshot", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-store-concurrent-"))
+  try {
+    const path = join(dir, "sessions.json")
+    const bot = new SessionStore(path, log)
+    const cli = new SessionStore(path, log)
+    bot.set("api:app", "ses_api")
+    cli.set("tg:42", "ses_telegram")
+    bot.setModel("api:app", { providerID: "custom", modelID: "api-model", label: "API" })
+    cli.setEngine("tg:42", "codex")
+
+    const reloaded = new SessionStore(path, log)
+    assert.equal(reloaded.get("api:app"), "ses_api")
+    assert.equal(reloaded.get("tg:42"), "ses_telegram")
+    assert.equal(reloaded.getEngine("tg:42"), "codex")
+    assert.deepEqual(reloaded.listModelRefs(), [
+      { key: "api:app", providerID: "custom", modelID: "api-model" },
+    ])
+    assert.deepEqual(readdirSync(dir), ["sessions.json"], "the transaction lock must not be left behind")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clearModel in a separate process keeps a chat saved after its handle was created", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-store-model-race-"))
+  try {
+    const path = join(dir, "sessions.json")
+    const seed = new SessionStore(path, log)
+    seed.set("api:app", "ses_api")
+    seed.setModel("api:app", { providerID: "custom", modelID: "gone", label: "Gone" })
+    // A CLI process opened before the Bot wrote this new chat: its constructor snapshot is stale
+    const cli = new SessionStore(path, log)
+    const bot = new SessionStore(path, log)
+    bot.set("tg:7", "ses_new")
+
+    assert.equal(cli.clearModel("api:app"), true)
+    const after = new SessionStore(path, log)
+    assert.equal(after.getModel("api:app"), undefined)
+    assert.equal(after.get("tg:7"), "ses_new", "the unrelated chat must survive the CLI write")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

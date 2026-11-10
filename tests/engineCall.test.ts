@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { callEngine, cliAttachmentNotice, defaultOpencodeModel, resolveOpencodeModel } from "../src/engineCall.js"
+import { callEngine, cliAttachmentNotice, resolveOpencodeModel } from "../src/engineCall.js"
 import type { EngineCallDeps } from "../src/engineCall.js"
 import { OpencodeError } from "../src/opencode.js"
 import { SessionStore } from "../src/store.js"
@@ -12,7 +12,7 @@ const log = { debug() {}, info() {}, warn() {}, error() {} }
 
 interface FakeOc {
   sessions: string[]
-  prompts: Array<{ sessionID: string; text: string; files: unknown[] }>
+  prompts: Array<{ sessionID: string; text: string; files: unknown[]; model?: unknown }>
   /** When set, the next prompt() rejects with this error (once per entry). */
   failFirstWith?: (sessionID: string) => Error | undefined
 }
@@ -28,8 +28,8 @@ function makeDeps(overrides: Partial<FakeOc> = {}): { deps: EngineCallDeps; stor
       return id
     },
     subscribeSession: (_id: string, _cb: (status: string) => void) => () => {},
-    prompt: async (sessionID: string, text: string, opts: { files?: unknown[] }) => {
-      fake.prompts.push({ sessionID, text, files: opts.files ?? [] })
+    prompt: async (sessionID: string, text: string, opts: { files?: unknown[]; model?: unknown }) => {
+      fake.prompts.push({ sessionID, text, files: opts.files ?? [], model: opts.model })
       const failure = fake.failFirstWith?.(sessionID)
       if (failure) {
         fake.failFirstWith = undefined
@@ -69,7 +69,7 @@ test("CLI engines route through AgentCliService with the per-session model", asy
 test("OpenCode reuses the stored session and passes files", async () => {  const { deps, store, fake } = makeDeps()
   try {
     store.set("tg:1", "ses-existing")
-    const files = [{ mime: "image/png", filename: "a.png", data: Buffer.alloc(0) }]
+    const files = [{ mime: "image/png", filename: "a.png", path: "/tmp/a.png", size: 0 }]
     const reply = await callEngine(deps, { key: "tg:1", engine: "opencode", text: "看图", files })
     assert.equal(reply, "回复:看图")
     assert.deepEqual(fake.prompts.map((p) => p.sessionID), ["ses-existing"], "no new session when one is stored")
@@ -109,24 +109,39 @@ test("non-404 errors surface instead of triggering session recovery", async () =
   }
 })
 
-test("model resolution prefers the session pick, then config, then the builtin fallback", () => {
+test("model resolution only returns a session pick and never invents a default", () => {
     const dir = mkdtempSync(join(tmpdir(), "bot-engine-resolve-"))
     try {
       const store = new SessionStore(join(dir, "sessions.json"), log)
       store.set("tg:1", "s")
       store.setModel("tg:1", { providerID: "custom", modelID: "mine", label: "我的模型" })
 
-      const saved = resolveOpencodeModel(store, { providerID: "a", modelID: "b" }, "tg:1")
-      assert.deepEqual({ providerID: saved.providerID, modelID: saved.modelID }, { providerID: "custom", modelID: "mine" })
+      const saved = resolveOpencodeModel(store, "tg:1")
+      assert.deepEqual({ providerID: saved?.providerID, modelID: saved?.modelID }, { providerID: "custom", modelID: "mine" })
 
       store.clearModel("tg:1")
-      const configured = resolveOpencodeModel(store, { providerID: "a", modelID: "b" }, "tg:1")
-      assert.deepEqual({ providerID: configured.providerID, modelID: configured.modelID }, { providerID: "a", modelID: "b" })
-
-    const fallback = defaultOpencodeModel()
-    assert.ok(fallback.providerID && fallback.modelID && fallback.label)
+      const unset = resolveOpencodeModel(store, "tg:1")
+      assert.equal(unset, undefined, "no session pick must stay unset for the engine to decide")
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("OpenCode omits model from the request unless one was explicitly selected", async () => {
+  const { deps, fake } = makeDeps()
+  try {
+    await callEngine(deps, { key: "tg:1", engine: "opencode", text: "hi" })
+    assert.equal(fake.prompts[0]?.model, undefined)
+
+    await callEngine(deps, {
+      key: "tg:1",
+      engine: "opencode",
+      text: "hi again",
+      model: { providerID: "custom", modelID: "chosen", label: "Chosen" },
+    })
+    assert.deepEqual(fake.prompts[1]?.model, { providerID: "custom", modelID: "chosen" })
+  } finally {
+    tempCleanup(deps)
   }
 })
 
@@ -141,7 +156,7 @@ test("a CLI engine is told that binary attachments did not travel with the promp
     captured.push({ text })
     return `CLI:${text.slice(0, 4)}`
   }
-  const files = [{ mime: "image/png", filename: "截图.png", data: Buffer.alloc(0) }]
+  const files = [{ mime: "image/png", filename: "截图.png", path: "/tmp/截图.png", size: 0 }]
   await callEngine(deps, { key: "tg:1", engine: "claude", text: "看图说话", files })
 
   assert.equal(captured.length, 1)

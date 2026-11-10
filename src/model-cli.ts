@@ -36,7 +36,7 @@ const USAGE = `模型管理 CLI（供 Bot 与 AI Agent 使用）
 说明：
   • add 会把模型写入 data/models.json，并同步到项目 opencode.json 对应 provider 的 models 列表。
   • assign 修改 .opencode/agent/<name>.md 的 frontmatter model 字段；self 表示当前 Bot 的 agent。
-  • del 默认拒绝删除仍被 agent、opencode.json 或某个聊天选用的模型；确认时加 --force（此时相关聊天的模型选择会被重置为引擎默认）。
+  • del 默认拒绝删除仍被 agent、opencode.json 或某个聊天选用的模型；确认时加 --force（此时相关聊天的模型选择会被清除）。
   • 修改立即生效，Bot 会在下次读取模型列表时自动重新加载。`
 
 export interface ParsedArgs {
@@ -196,10 +196,10 @@ function main(): void {
       console.log(`   ⚠️ 强制删除，以下引用仍然存在：${removed.references.join("、")}`)
     }
     if (removed.resetAgents.length > 0) {
-      console.log(`   已清除 ${removed.resetAgents.length} 个 agent 的模型绑定：${removed.resetAgents.join("、")}（改用引擎默认）`)
+      console.log(`   已清除 ${removed.resetAgents.length} 个 agent 的模型绑定：${removed.resetAgents.join("、")}（改由引擎自身配置决定）`)
     }
     if (removed.resetChats.length > 0) {
-      console.log(`   已重置 ${removed.resetChats.length} 个聊天的模型选择：${removed.resetChats.join("、")}（改用引擎默认）`)
+      console.log(`   已清除 ${removed.resetChats.length} 个聊天的模型选择：${removed.resetChats.join("、")}（改由引擎自身配置决定）`)
     }
     return
   }

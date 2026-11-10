@@ -231,7 +231,7 @@ const ENV_RULES: Record<string, EnvRule> = {
   TASK_MAX_TIMEOUT_MS: intRule(10_000, 86_400_000),
   MAX_REPLY_LENGTH: intRule(100, 4000),
   MAX_MEDIA_MB: intRule(1, 100),
-  MAX_INPUT_MB: intRule(1, 100),
+  MAX_INPUT_MB: intRule(0, 100_000),
   REMINDER_TIMEZONE: { hint: "IANA 时区", validate: timezoneRule },
   LOG_LEVEL: enumRule(["debug", "info", "warn", "error"]),
   STARTUP_NOTICE: boolRule,

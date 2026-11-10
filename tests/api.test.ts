@@ -3041,6 +3041,60 @@ test("api runs the raw cc-switch argv Telegram answers as /cc run", async () => 
   })
 })
 
+test("api magpie exec runs only catalog commands with validated targets and confirmation", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const overview = await fetch(`${h.base}/api/v1/magpie`, { headers: authHeaders() })
+    assert.equal(overview.status, 200)
+    const catalog = (await overview.json()) as {
+      available: boolean
+      views: Array<{ name: string; needsTarget: boolean }>
+      commands: Array<{ name: string; label: string; needsTarget: boolean; confirm: boolean }>
+    }
+    assert.equal(catalog.available, true)
+    assert.ok(catalog.views.some((view) => view.name === "providers"))
+    assert.ok(catalog.commands.some((command) => command.name === "provider-test" && command.needsTarget))
+    assert.ok(catalog.commands.some((command) => command.name === "provider-rm" && command.confirm))
+
+    const postExec = (body: Record<string, unknown>) =>
+      fetch(`${h.base}/api/v1/magpie/exec`, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+    const errorOf = async (res: Response) => ((await res.json()) as { error?: string }).error ?? ""
+
+    // A safe catalog command reaches the CLI with exactly the argv the server built.
+    const checked = await postExec({ name: "update-check" })
+    assert.equal(checked.status, 200)
+    assert.equal(h.magpieCalls.at(-1), "update check")
+    const checkedBody = (await checked.json()) as { ok: boolean; name: string; label: string; text: string }
+    assert.equal(checkedBody.ok, true)
+    assert.equal(checkedBody.name, "update-check")
+    assert.equal(checkedBody.label, "检查 magpie 更新")
+    assert.equal(checkedBody.text, "magpie: update check")
+
+    // A target-taking command rejects a missing or injection-shaped target before running.
+    const missingTarget = await postExec({ name: "provider-test" })
+    assert.equal(missingTarget.status, 400)
+    assert.match(await errorOf(missingTarget), /Provider ID/)
+    const traversal = await postExec({ name: "provider-test", target: "../etc" })
+    assert.equal(traversal.status, 400)
+    assert.match(await errorOf(traversal), /路径段/)
+    assert.equal(h.magpieCalls.at(-1), "update check", "a rejected target must never reach magpie")
+
+    // A destructive command keeps the server's confirmation gate, then receives the target.
+    const unconfirmed = await postExec({ name: "provider-rm", target: "p1" })
+    assert.equal(unconfirmed.status, 400)
+    assert.match(await errorOf(unconfirmed), /需要确认/)
+    assert.equal(h.magpieCalls.at(-1), "update check", "an unconfirmed removal must never reach magpie")
+    const removed = await postExec({ name: "provider-rm", target: "p1", confirm: true })
+    assert.equal(removed.status, 200)
+    assert.equal(h.magpieCalls.at(-1), "provider rm p1")
+
+    // Only names from the server catalog are accepted; an arbitrary argv belongs on /magpie/run.
+    const unknown = await postExec({ name: "shell", target: "rm -rf" })
+    assert.equal(unknown.status, 400)
+    assert.match(await errorOf(unknown), /未知的命令/)
+    assert.equal(h.magpieCalls.at(-1), "provider rm p1")
+  })
+})
+
 /**
  * cc-switch reads `-a`/`--app` on every subcommand, and `--apps` is a different flag that
  * has to stay usable — the guard has to tell those apart in every compact spelling.

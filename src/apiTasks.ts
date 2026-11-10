@@ -1,9 +1,19 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, unlinkSync } from "node:fs"
+import type { IncomingMessage } from "node:http"
 import type { ApiRequestContext } from "./apiCore.js"
 import { ApiError } from "./apiCore.js"
 import type { AgentCliService } from "./agentCli.js"
-import { buildAttachmentSections, MAX_ATTACH_TOTAL_BYTES } from "./attachmentInput.js"
-import { isTextAttachment, pruneInbox, readTextAttachment, saveAttachment, type AttachmentKind, type SavedAttachment } from "./attachments.js"
+import { buildAttachmentSections } from "./attachmentInput.js"
+import { multipartParts, readMultipartPart } from "./multipart.js"
+import {
+  attachmentKind,
+  isTextAttachment,
+  pruneInbox,
+  readTextAttachment,
+  saveAttachment,
+  saveAttachmentStream,
+  type SavedAttachment,
+} from "./attachments.js"
 import type { BotConfig } from "./config.js"
 import { callEngine, resolveOpencodeModel, type EngineCallDeps, type ResolvedModel } from "./engineCall.js"
 import type { TaskHistoryStore } from "./history.js"
@@ -17,12 +27,15 @@ import type { UsageOutcome, UsageStore } from "./usage.js"
 import { redactSecrets } from "./ccswitch.js"
 import { mimeForName } from "./apiHttp.js"
 import type { ApiAttachment, ApiTask, ApiTaskMedia, ApiTaskView } from "./apiTaskTypes.js"
+import { classifyTaskError } from "./taskErrors.js"
+import { logApiTaskTerminal } from "./taskTerminalLog.js"
 
 const MAX_API_ATTACHMENTS = 4
 const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 export const MAX_TASK_RECORDS = 200
 const MAX_API_QUEUE = 4
+const OPENCODE_HEALTH_CACHE_MS = 10_000
 
 export interface TaskManagerDeps {
   cfg: BotConfig
@@ -48,6 +61,8 @@ export class ApiTaskManager {
   /** SSE subscribers per task id; each gets the serialized task view on every update. */
   readonly #taskListeners = new Map<string, Set<(payload: string) => void>>()
   readonly #lastEmit = new Map<string, number>()
+  #opencodeHealthAt = 0
+  #opencodeHealthy = false
 
   constructor(deps: TaskManagerDeps) {
     this.#deps = deps
@@ -74,17 +89,13 @@ export class ApiTaskManager {
     return waiting
   }
 
-  /**
-   * Accepts the client's attachment list: base64-decodable, sane names/mimes,
-   * at most 4 files and 15MB decoded in total (same caps as Telegram).
-   */
+  /** Accepts the client's attachment list: base64-decodable, sane names/mimes, at most 4 files. */
   parseAttachments(raw: unknown): ApiAttachment[] | undefined {
     if (raw === undefined || raw === null) return undefined
     if (!Array.isArray(raw)) throw new ApiError(400, "attachments 必须是数组")
     if (raw.length > MAX_API_ATTACHMENTS) {
       throw new ApiError(400, `附件最多 ${MAX_API_ATTACHMENTS} 个`)
     }
-    let total = 0
     const parsed = raw.map((item) => {
       if (!item || typeof item !== "object") throw new ApiError(400, "附件项必须是 {name, mime, data} 对象")
       const record = item as Record<string, unknown>
@@ -95,14 +106,6 @@ export class ApiTaskManager {
       if (!MIME_RE.test(mime)) throw new ApiError(400, `附件 ${name} 的 mime 无效`)
       const stripped = data.replace(/\s+/g, "")
       if (!BASE64_RE.test(stripped)) throw new ApiError(400, `附件 ${name} 不是合法的 base64`)
-      // "=" is padding, not a fourth data byte. Deriving the decoded size from the
-      // actual byte length avoids charging up to two extra bytes per attachment,
-      // which was enough to reject a legal 15MB batch.
-      const bytes = Buffer.from(stripped, "base64").byteLength
-      total += bytes
-      if (total > MAX_ATTACH_TOTAL_BYTES) {
-        throw new ApiError(400, `附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
-      }
       return { name, mime: mime.toLowerCase(), data: stripped }
     })
     return parsed.length > 0 ? parsed : undefined
@@ -122,11 +125,7 @@ export class ApiTaskManager {
           continue
         }
         const stored = saveAttachment(this.#deps.cfg.inboxDir, chatId, att.name, buffer)
-        const kind: AttachmentKind = att.mime.startsWith("image/")
-          ? "image"
-          : att.mime.startsWith("audio/")
-            ? "audio"
-            : "document"
+        const kind = attachmentKind(att.mime, stored.name)
         const record: SavedAttachment = {
           fileId: "",
           kind,
@@ -153,21 +152,148 @@ export class ApiTaskManager {
     return { saved, failed }
   }
 
+  /**
+   * Streams a multipart task request. Text fields stay small; every file part is
+   * written to the inbox as it arrives, so neither the request nor a video is ever
+   * held in memory as one Buffer.
+   */
+  async parseMultipartTask(req: IncomingMessage, boundary: string): Promise<{
+    text: string
+    engine?: string
+    model?: string
+    attachments?: SavedAttachment[]
+    failed: string[]
+  }> {
+    const fields = new Map<string, string>()
+    const owner = this.#deps.ownerChatId
+    const chatId = (typeof owner === "function" ? owner() : owner) ?? 0
+    const attachments: SavedAttachment[] = []
+    const failed: string[] = []
+    let fileCount = 0
+    try {
+      for await (const part of multipartParts(req, boundary)) {
+        if (part.filename === undefined) {
+          fields.set(part.name, (await readMultipartPart(part.data)).toString("utf8").trim())
+          continue
+        }
+        const index = /^file(\d+)$/.exec(part.name)?.[1]
+        if (index === undefined) {
+          await readMultipartPart(part.data)
+          continue
+        }
+        fileCount += 1
+        if (fileCount > MAX_API_ATTACHMENTS) {
+          // Drain this part so the parser reaches the boundary, then reject the
+          // request. The first four files are removed by the catch below.
+          await readMultipartPart(part.data)
+          throw new ApiError(400, `附件最多 ${MAX_API_ATTACHMENTS} 个`)
+        }
+
+        const name = part.filename || `file${index}.bin`
+        const mime = part.contentType?.trim() || "application/octet-stream"
+        if (!MIME_RE.test(mime)) {
+          failed.push(`${name}: mime 无效`)
+          await readMultipartPart(part.data)
+          continue
+        }
+        try {
+          const stored = await saveAttachmentStream(this.#deps.cfg.inboxDir, chatId, name, part.data)
+          const kind = attachmentKind(mime, stored.name)
+          const record: SavedAttachment = {
+            fileId: "",
+            kind,
+            name: stored.name,
+            mime: mime.toLowerCase(),
+            path: stored.path,
+            bytes: stored.bytes,
+          }
+          if (isTextAttachment(mime, stored.name)) {
+            try {
+              const { text: inline, truncated } = readTextAttachment(stored.path)
+              record.text = inline
+              record.truncated = truncated
+            } catch {
+              // binary fallback
+            }
+          }
+          attachments.push(record)
+        } catch (err) {
+          failed.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+
+      const text = fields.get("text") ?? ""
+      const engine = fields.get("engine") || undefined
+      const model = fields.get("model") || undefined
+      if (text.length > 12_000) {
+        throw new ApiError(400, "消息太长（上限 12000 字），请分段发送")
+      }
+      // A bad engine/model pin must not leave this request's uploads behind.
+      this.#select(engine, model)
+      pruneInbox(this.#deps.cfg.inboxDir)
+      return {
+        text,
+        engine,
+        model,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        failed,
+      }
+    } catch (err) {
+      this.#discardSaved(attachments)
+      throw err
+    }
+  }
+
+  /** Deletes only this submit's newly-written inbox files after a later rejection. */
+  #discardSaved(attachments: SavedAttachment[] | undefined): void {
+    for (const item of attachments ?? []) {
+      try {
+        unlinkSync(item.path)
+      } catch {
+        // already pruned or never created
+      }
+    }
+  }
+
+  /** Submits already-persisted attachments, used by the multipart path. */
+  submitSaved(text: string, engineOverride?: string, modelOverride?: string, saved?: SavedAttachment[], failed: string[] = []): ApiTask {
+    try {
+      if (this.waitingCount() >= MAX_API_QUEUE) {
+        throw new ApiError(409, `待处理消息过多（最多排队 ${MAX_API_QUEUE} 条），请等待当前任务完成或发送 /stop 取消。`)
+      }
+      const selection = this.#select(engineOverride, modelOverride)
+      const promptText = failed.length > 0 ? [text, `[附件处理失败]\n${failed.join("\n")}`].filter(Boolean).join("\n\n") : text
+      return this.#submit(text, modelOverride, saved ?? [], promptText, selection)
+    } catch (err) {
+      this.#discardSaved(saved)
+      throw err
+    }
+  }
+
   submit(text: string, engineOverride?: string, modelOverride?: string, attachments?: ApiAttachment[]): ApiTask {
-    // Telegram drops a prompt past MAX_PENDING waiting jobs; the App gets the same cap as a 409
     if (this.waitingCount() >= MAX_API_QUEUE) {
       throw new ApiError(409, `待处理消息过多（最多排队 ${MAX_API_QUEUE} 条），请等待当前任务完成或发送 /stop 取消。`)
     }
-    const id = `t${Date.now().toString(36)}${++this.#sequence}`
-    const engine = engineOverride ?? this.#deps.store.getEngine(this.#appKey)
+    const selection = this.#select(engineOverride, modelOverride)
+    const { saved: savedAttachments, failed: saveFailed } = attachments
+      ? this.#saveAttachments(attachments)
+      : { saved: [], failed: [] }
+    const promptText =
+      saveFailed.length > 0 ? [text, `[附件处理失败]\n${saveFailed.join("\n")}`].filter(Boolean).join("\n\n") : text
+    return this.#submit(text, modelOverride, savedAttachments, promptText, selection)
+  }
+
+  /** Validates the engine and model pin before any upload is persisted. */
+  #select(engineOverride: string | undefined, modelOverride: string | undefined): {
+    engine: string
+    autoEngine: boolean
+    modelRef?: ResolvedModel
+  } {
+    const explicitEngine = engineOverride?.trim() || this.#deps.store.getExplicitEngine(this.#appKey)
+    const engine = explicitEngine ?? "opencode"
+    const autoEngine = explicitEngine === undefined
     const profile = engine === "opencode" ? undefined : this.#deps.agents.registry.get(engine)
-    if (!profile && engine !== "opencode") {
-      throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
-    }
-    // Validate the pin here so a bad name answers 400 like POST /model does instead of queueing a
-    // task that can only fail later, and before anything is written: #saveAttachments would leave
-    // up to 15 MB in the inbox that no task references, and a client fixing its request would
-    // write a second copy. OpenCode needs the full reference.
+    if (!profile && engine !== "opencode") throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
     let modelRef: ResolvedModel | undefined
     if (modelOverride) {
       if (engine === "opencode") {
@@ -182,33 +308,33 @@ export class ApiTaskManager {
         throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
       }
     }
-    // 附件在提交时即落盘 inbox:排队/运行/完成后 task 里只留摘要,
-    // 否则每条任务都持有最多 15MB 的 base64 字符串直到 200 条记录被清理
-    const { saved: savedAttachments, failed: saveFailed } = attachments
-      ? this.#saveAttachments(attachments)
-      : { saved: [], failed: [] }
-    // 落盘失败的附件直接在提示词里声明(与 Telegram 的失败提示一致)
-    const promptText =
-      saveFailed.length > 0 ? [text, `[附件处理失败]\n${saveFailed.join("\n")}`].filter(Boolean).join("\n\n") : text
+    return { engine, autoEngine, modelRef }
+  }
+
+  #submit(
+    text: string,
+    modelOverride: string | undefined,
+    savedAttachments: SavedAttachment[],
+    promptText: string,
+    selection: { engine: string; autoEngine: boolean; modelRef?: ResolvedModel },
+  ): ApiTask {
+    const id = `t${Date.now().toString(36)}${++this.#sequence}`
     const task: ApiTask = {
       id,
       key: this.#appKey,
       status: "queued",
       text: promptText,
-      engine,
+      engine: selection.engine,
+      autoEngine: selection.autoEngine,
       model: modelOverride,
-      modelRef,
+      modelRef: selection.modelRef,
       createdAt: Date.now(),
       savedAttachments: savedAttachments.length > 0 ? savedAttachments : undefined,
     }
     this.#tasks.set(id, task)
     this.#pruneTasks()
-
     const previous = this.#queues.get(task.key) ?? Promise.resolve()
-    const run = previous.then(
-      () => this.#runTask(task),
-      () => this.#runTask(task),
-    )
+    const run = previous.then(() => this.#runTask(task), () => this.#runTask(task))
     this.#queues.set(task.key, run)
     const cleanup = (): void => {
       if (this.#queues.get(task.key) === run) this.#queues.delete(task.key)
@@ -219,6 +345,21 @@ export class ApiTaskManager {
 
   async #runTask(task: ApiTask): Promise<void> {
     if (task.status === "cancelled") return
+
+    // A brand-new session has no explicit engine and therefore starts on OpenCode. If
+    // that server is not running, every task would fail in milliseconds before any model
+    // is reached. Only this implicit default may fall back; a user who chose OpenCode
+    // explicitly keeps it, even when the health probe is down, so the error is truthful.
+    if (task.autoEngine && task.engine === "opencode" && !task.model) {
+      const healthy = await this.#opencodeIsHealthy()
+      if (!healthy) {
+        const fallback = this.#fallbackEngine()
+        if (fallback) {
+          task.engine = fallback
+          task.engineNote = `OpenCode 未运行，本次自动使用 ${this.#deps.agents.registry.label(fallback)}`
+        }
+      }
+    }
     task.status = "running"
     task.startedAt = Date.now()
     this.#emitTask(task, true)
@@ -229,20 +370,19 @@ export class ApiTaskManager {
     const started = Date.now()
     let outcome: UsageOutcome = "failed"
     let modelLabel: string | undefined
+    let failureDetail: string | undefined
 
     try {
       let opencodeModel: ResolvedModel | undefined
       if (!isOpencode) {
         const profile = this.#deps.agents.registry.get(engine)
         if (!profile) throw new Error(`未知的 Agent 引擎：${engine}`)
-        const resolvedModel =
-          task.model ?? this.#deps.store.getCliModel(task.key, engine) ?? this.#deps.agents.registry.defaultModel(engine)
-        modelLabel = this.#deps.agents.registry.modelLabel(engine, resolvedModel ?? "")
+        const resolvedModel = task.model ?? this.#deps.store.getCliModel(task.key, engine)
+        modelLabel = resolvedModel ? this.#deps.agents.registry.modelLabel(engine, resolvedModel) : undefined
         task.model = task.model ?? resolvedModel
       } else {
-        opencodeModel =
-          task.modelRef ?? resolveOpencodeModel(this.#deps.store, this.#deps.cfg.opencode.model, task.key)
-        modelLabel = opencodeModel.label
+        opencodeModel = task.modelRef ?? resolveOpencodeModel(this.#deps.store, task.key)
+        modelLabel = opencodeModel?.label
       }
 
       let input: { text: string; files: PromptFile[] } = { text: task.text, files: [] }
@@ -277,10 +417,14 @@ export class ApiTaskManager {
       const detail = err instanceof Error ? err.message : String(err)
       if (/已取消当前任务/.test(detail)) {
         task.status = "cancelled"
+        task.errorCode = "TASK_CANCELLED"
+        failureDetail = redactSecrets(detail).replace(/\s+/g, " ").slice(0, 300)
         outcome = "cancelled"
       } else {
         task.status = "failed"
         task.error = redactSecrets(detail).slice(0, 2000)
+        task.errorCode = classifyTaskError(detail)
+        failureDetail = task.error
       }
     } finally {
       task.finishedAt = Date.now()
@@ -292,27 +436,79 @@ export class ApiTaskManager {
         model: modelLabel,
         ms: Date.now() - started,
         outcome,
+        errorCode: outcome === "ok" ? undefined : (task.errorCode ?? classifyTaskError(failureDetail ?? "")),
+        detail: failureDetail,
         scheduled: false,
       })
+      logApiTaskTerminal(
+        {
+          log: this.#deps.log,
+          session: (engine) => this.#deps.store.getCliSession(task.key, engine) ?? this.#deps.store.get(task.key),
+        },
+        task,
+        outcome,
+        failureDetail,
+        started,
+      )
       // One terminal snapshot (reply/error + status + finishedAt) for SSE subscribers
       this.#emitTask(task, true)
     }
+  }
+
+  async #opencodeIsHealthy(): Promise<boolean> {
+    if (Date.now() - this.#opencodeHealthAt < OPENCODE_HEALTH_CACHE_MS) return this.#opencodeHealthy
+    this.#opencodeHealthAt = Date.now()
+    this.#opencodeHealthy = await this.#deps.oc.health().catch(() => false)
+    return this.#opencodeHealthy
+  }
+
+  /** Codex first because it is the most common replacement, then any installed CLI profile. */
+  #fallbackEngine(): string | undefined {
+    const registry = this.#deps.agents.registry
+    const profiles = registry.list()
+    const codex = profiles.find((profile) => profile.id === "codex" && registry.binPath(profile))
+    if (codex) return codex.id
+    return profiles.find((profile) => registry.binPath(profile))?.id
   }
 
   /** History label for an attachment-only task, which has no prompt text of its own. */
   #attachmentSummary(attachments?: SavedAttachment[]): string {
     const kinds: string[] = []
     for (const item of attachments ?? []) {
-      const kind = item.mime.startsWith("image/")
+      const kind = item.kind === "image"
         ? "图片"
-        : item.mime.startsWith("audio/")
+        : item.kind === "audio"
           ? "语音"
-          : item.mime === "application/pdf"
-            ? "PDF"
-            : "文件"
+          : item.kind === "video"
+            ? "视频"
+            : item.mime === "application/pdf"
+              ? "PDF"
+              : "文件"
       if (!kinds.includes(kind)) kinds.push(kind)
     }
     return kinds.length > 0 ? `（${kinds.join("、")}）` : ""
+  }
+
+  /**
+   * A queued task never entered #runTask, so it has no terminal log and no error code yet.
+   * Record both here: otherwise the App shows a bare "已停止" with no diagnosis and an
+   * operator grepping bot.log sees nothing at all for the message the user just cancelled.
+   */
+  #cancelQueued(task: ApiTask): void {
+    task.status = "cancelled"
+    task.errorCode = "TASK_CANCELLED"
+    task.finishedAt = Date.now()
+    logApiTaskTerminal(
+      {
+        log: this.#deps.log,
+        session: (engine) => this.#deps.store.getCliSession(task.key, engine) ?? this.#deps.store.get(task.key),
+      },
+      task,
+      "cancelled",
+      undefined,
+      task.createdAt,
+    )
+    this.#emitTask(task, true)
   }
 
   /** Telegram's 「清空排队」: drops queued tasks only, leaving the running one alone. */
@@ -320,9 +516,7 @@ export class ApiTaskManager {
     const cleared: string[] = []
     for (const task of this.#tasks.values()) {
       if (task.key !== this.#appKey || task.status !== "queued") continue
-      task.status = "cancelled"
-      task.finishedAt = Date.now()
-      this.#emitTask(task, true)
+      this.#cancelQueued(task)
       cleared.push(task.id)
     }
     return { cleared }
@@ -333,9 +527,7 @@ export class ApiTaskManager {
     for (const task of this.#tasks.values()) {
       if (task.key !== this.#appKey) continue
       if (task.status === "queued") {
-        task.status = "cancelled"
-        task.finishedAt = Date.now()
-        this.#emitTask(task, true)
+        this.#cancelQueued(task)
         stopped.push(task.id)
       } else if (task.status === "running") {
         task.controller?.abort()
@@ -352,7 +544,6 @@ export class ApiTaskManager {
       store: this.#deps.store,
       log: this.#deps.log,
       opencodeAgent: this.#deps.cfg.opencode.agent ?? "assistant",
-      opencodeModel: this.#deps.cfg.opencode.model,
       taskTimeoutMs: this.#deps.cfg.taskTimeoutMs,
       taskMaxTimeoutMs: this.#deps.cfg.taskMaxTimeoutMs,
     }
@@ -436,7 +627,7 @@ export class ApiTaskManager {
   }
 
   view(task: ApiTask): ApiTaskView {
-    const { controller: _controller, key: _key, savedAttachments, media, ...view } = task
+    const { controller: _controller, key: _key, autoEngine: _autoEngine, savedAttachments, media, ...view } = task
     return {
       ...view,
       ...(savedAttachments?.length ? { attachmentCount: savedAttachments.length } : {}),
@@ -577,9 +768,7 @@ export class ApiTaskManager {
     const task = this.#tasks.get(id)
     if (!task || task.key !== this.#appKey) throw new ApiError(404, "任务不存在或已被清理")
     if (task.status === "queued") {
-      task.status = "cancelled"
-      task.finishedAt = Date.now()
-      this.#emitTask(task, true)
+      this.#cancelQueued(task)
     } else if (task.status === "running") {
       task.controller?.abort()
     } else {

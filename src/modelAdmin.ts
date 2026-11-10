@@ -49,7 +49,7 @@ export interface RemoveModelResult {
   references: string[]
   /** Chats that were pointing at the deleted model and had their selection reset. */
   resetChats: string[]
-  /** Agents whose frontmatter `model:` was cleared so they fall back to the engine default. */
+  /** Agents whose frontmatter `model:` was cleared so their engine's own configuration decides. */
   resetAgents: string[]
 }
 

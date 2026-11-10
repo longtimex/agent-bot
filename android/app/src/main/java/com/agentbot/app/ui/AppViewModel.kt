@@ -25,6 +25,7 @@ import com.agentbot.app.data.AttachmentLimits
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.LogTail
+import com.agentbot.app.data.MagpieSpec
 import com.agentbot.app.data.MagpieOverview
 import com.agentbot.app.data.MediaCache
 import com.agentbot.app.data.PendingAttachment
@@ -88,6 +89,10 @@ data class ChatMessage(
     val text: String,
     val taskId: String? = null,
     val status: String? = null,
+    /** Stable server error class, persisted with the bubble so a restart keeps the diagnosis. */
+    val errorCode: String? = null,
+    /** Actual engine chosen for this task and any fallback explanation from the server. */
+    val engineNote: String? = null,
     /** Live progress line reported by the server while the task runs. */
     val progress: String? = null,
     /** Server-side start time, used to tick the elapsed label while running. */
@@ -194,6 +199,10 @@ class AppViewModel(
     var mediaErrors by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** Human-readable reason per failed media key; the bubble shows it instead of a dead spinner. */
+    var mediaErrorDetails by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
     private val mediaLoads = mutableSetOf<String>()
 
     var busy by mutableStateOf(false)
@@ -238,6 +247,14 @@ class AppViewModel(
     var ccStatus by mutableStateOf<CcStatus?>(null)
         private set
 
+    /** True once status, views and commands came from one completed catalog read. */
+    var ccCatalogReady by mutableStateOf(false)
+        private set
+
+    /** Why the last catalog read failed; a pending `/cc` must report this instead of using stale rows. */
+    var ccCatalogError by mutableStateOf<String?>(null)
+        private set
+
     /** Mutating `/cc` commands the server allowlists; rendered as the danger zone. */
     var ccCommands by mutableStateOf<List<CcExecCommand>>(emptyList())
         private set
@@ -272,6 +289,15 @@ class AppViewModel(
     /** Words awaiting the user's confirmation (the server refused with 「需要确认」). */
     var magpieConfirmation by mutableStateOf<String?>(null)
         private set
+
+    /** A listed command waiting for its target and/or confirmation. */
+    var magpieCommandConfirmation by mutableStateOf<Pair<MagpieSpec, String?>?>(null)
+        private set
+
+    /** Opens the confirmation dialog for a listed command; the screen never writes state directly. */
+    fun requestMagpieCommand(command: MagpieSpec, target: String? = null) {
+        magpieCommandConfirmation = command to target
+    }
 
     /** Hermes' MEMORY.md / USER.md and the limits line, loaded when the screen opens. */
     var hermes by mutableStateOf<HermesMemory?>(null)
@@ -398,6 +424,12 @@ class AppViewModel(
 
     var appUpdateError by mutableStateOf<String?>(null)
         private set
+
+    /** A verified APK waiting for the user to grant the installer permission and come back. */
+    private var pendingInstallApk: File? = null
+
+    /** Prevents returning to an unchanged permission page from opening Settings in a loop. */
+    private var installSettingsOpened = false
 
     /** Label of the running ops action (update/build can take minutes). */
     var opsActionBusy by mutableStateOf<String?>(null)
@@ -537,12 +569,8 @@ class AppViewModel(
 
     fun stageAttachment(attachment: PendingAttachment): Boolean {
         if (pendingAttachments.size >= AttachmentLimits.MAX_COUNT) {
+            LocalStore.discard(attachment)
             toast = "最多附带 ${AttachmentLimits.MAX_COUNT} 个附件"
-            return false
-        }
-        val total = pendingAttachments.sumOf { it.sizeBytes } + attachment.sizeBytes
-        if (total > AttachmentLimits.MAX_TOTAL_BYTES) {
-            toast = "附件总大小超过 ${AttachmentLimits.MAX_TOTAL_BYTES / 1024 / 1024}MB"
             return false
         }
         pendingAttachments = pendingAttachments + attachment
@@ -550,10 +578,12 @@ class AppViewModel(
     }
 
     fun removeAttachment(index: Int) {
+        val removed = pendingAttachments.getOrNull(index) ?: return
         pendingAttachments = pendingAttachments.filterIndexed { i, _ -> i != index }
+        LocalStore.discard(removed)
     }
 
-    /** Reads a picked file away from the main thread; 15 MB of Base64 would freeze the picker. */
+    /** Copies a picked file into app cache off the main thread; upload streams it later. */
     fun stageAttachmentFrom(context: Context, uri: Uri) {
         viewModelScope.launch {
             try {
@@ -597,15 +627,23 @@ class AppViewModel(
         if (uris.isEmpty()) return
         viewModelScope.launch {
             var staged = 0
+            val failures = mutableListOf<String>()
             for (uri in uris) {
                 try {
                     val attachment = withContext(Dispatchers.IO) { LocalStore.read(context, uri) }
-                    if (stageAttachment(attachment)) staged++
-                } catch (_: Exception) {
+                    if (stageAttachment(attachment)) staged++ else LocalStore.discard(attachment)
+                } catch (err: Exception) {
+                    failures += err.message ?: "无法读取"
                 }
             }
             if (staged < uris.size) {
-                toast = if (staged == 0) "分享内容无法读取" else "部分分享内容无法读取（已导入 $staged/${uris.size}）"
+                val reason = failures.firstOrNull { it.isNotBlank() }
+                toast = when {
+                    staged == 0 && reason != null -> "分享内容无法读取：$reason"
+                    staged == 0 -> "分享内容无法读取"
+                    reason != null -> "部分分享内容无法读取（已导入 $staged/${uris.size}）：$reason"
+                    else -> "部分分享内容无法读取（已导入 $staged/${uris.size}）"
+                }
             }
         }
     }
@@ -735,6 +773,7 @@ class AppViewModel(
 
     /** Refreshes the visible tab after the app returns to the foreground; failures stay silent. */
     fun onForeground() {
+        resumePendingInstall()
         silent { health = api.health(conn()); session = api.session(conn()) }
         when (screen) {
             Screen.History -> silent { loadHistory() }
@@ -939,15 +978,33 @@ class AppViewModel(
 
     /** Reloads the console's server-driven tables, so views and actions never drift apart. */
     private suspend fun reloadCcTables() {
-        val status = api.ccStatus(conn())
-        ccStatus = status
-        if (status.available) {
-            ccCommands = api.ccExecCommands(conn())
-            ccViews = api.ccViews(conn())
+        ccCatalogReady = false
+        ccCatalogError = null
+        try {
+            // Publish the three responses together: a `/cc` word is resolved only after the
+            // catalog that names it is complete, never against a half-replaced list.
+            val status = api.ccStatus(conn())
+            val commands = if (status.available) api.ccExecCommands(conn()) else emptyList()
+            val views = if (status.available) api.ccViews(conn()) else emptyList()
+            ccStatus = status
+            ccCommands = commands
+            ccViews = views
+        } catch (err: CancellationException) {
+            throw err
+        } catch (err: Exception) {
+            ccCatalogError = err.message ?: "读取失败"
+            throw err
+        } finally {
+            // A failed read must release a typed request too, so CcScreen can report it instead
+            // of leaving the console waiting forever for a refresh that may never be tapped.
+            ccCatalogReady = true
         }
     }
 
     fun refreshCc() {
+        // Navigation reaches this synchronously, before CcScreen can resolve a pending `/cc`.
+        ccCatalogReady = false
+        ccCatalogError = null
         guarded("加载 cc-switch") {
             reloadCcTables()
         }
@@ -995,7 +1052,7 @@ class AppViewModel(
                 ccPanelTitle = "新建 Provider · $name"
                 ccPanelText = result.text
                 // A new provider changes the list and the danger zone in one go
-                reloadCcTables()
+                refreshCcAfterMutation()
             } catch (err: Exception) {
                 connectionError = "创建 Provider 失败：${err.message}"
             } finally {
@@ -1012,7 +1069,7 @@ class AppViewModel(
                 val result = api.ccUse(conn(), id)
                 toast = result.message.ifBlank { "已切换 Provider" }
                 ccTestMessage = null
-                refreshCc()
+                refreshCcAfterMutation()
             } catch (err: Exception) {
                 connectionError = "切换 Provider 失败：${err.message}"
             } finally {
@@ -1262,7 +1319,7 @@ class AppViewModel(
                 ccPanelTitle = "Deep Link 导入"
                 ccPanelText = result.text
                 // A link can add providers, so the console should show the new state at once
-                reloadCcTables()
+                refreshCcAfterMutation()
             } catch (err: Exception) {
                 connectionError = "Deep Link 导入失败：${err.message}"
             } finally {
@@ -1317,7 +1374,7 @@ class AppViewModel(
                 ccPanelText = result.text
                 ccRawConfirmation = null
                 // Provider commands change what the console lists, so its header refreshes
-                if (argv.first() == "provider") ccStatus = api.ccStatus(conn())
+                if (argv.first() == "provider" || argv.first() == "use") refreshCcAfterMutation()
             } catch (err: ApiException) {
                 if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
                     ccRawConfirmation = words
@@ -1353,7 +1410,7 @@ class AppViewModel(
                 toast = result.message.ifBlank { if (result.ok) "已完成：${command.label}" else "执行失败：${command.label}" }
                 ccPanelTitle = "🛠 ${command.label}"
                 ccPanelText = result.text
-                if (name == "provider-delete") ccStatus = api.ccStatus(conn())
+                if (name.startsWith("provider-")) refreshCcAfterMutation()
             } catch (err: Exception) {
                 connectionError = "${command.label} 失败：${err.message}"
             } finally {
@@ -1366,6 +1423,17 @@ class AppViewModel(
         ccPanelTitle = null
         ccPanelText = null
         ccTestMessage = null
+    }
+
+    /** A provider write already succeeded; a failed list re-read must not turn it into a failure. */
+    private suspend fun refreshCcAfterMutation() {
+        try {
+            reloadCcTables()
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+            showToast("操作已完成，但列表刷新失败；请点右上角刷新")
+        }
     }
 
     // ---- magpie ----
@@ -1450,6 +1518,64 @@ class AppViewModel(
 
     fun dismissMagpieRun() {
         magpieConfirmation = null
+    }
+
+    /**
+     * Runs one command from the server's own catalog. A command that needs a target is never
+     * sent without one, and a destructive one is sent only after the confirmation dialog.
+     */
+    fun runMagpieCommand(name: String, target: String? = null, confirm: Boolean = false) {
+        if (magpieBusy) return
+        val spec = magpie?.commands?.find { it.name == name } ?: return
+        val value = target?.trim()?.takeIf { it.isNotEmpty() }
+        if (spec.needsTarget && value == null) {
+            toast = "请填写${spec.targetLabel}"
+            return
+        }
+        viewModelScope.launch {
+            magpieBusy = true
+            try {
+                val result = api.magpieExec(conn(), name, value, confirm)
+                magpieTitle = result.label.ifBlank { spec.label }
+                magpieOutput = result.text.ifBlank { "（无输出）" }
+                magpieCommandConfirmation = null
+                refreshMagpieAfterCommand(name)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: ApiException) {
+                if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
+                    magpieCommandConfirmation = spec to value
+                } else {
+                    connectionError = "magpie 执行失败：${err.message}"
+                }
+            } catch (err: Exception) {
+                connectionError = "magpie 执行失败：${err.message}"
+            } finally {
+                magpieBusy = false
+            }
+        }
+    }
+
+    fun confirmMagpieCommand() {
+        val (spec, target) = magpieCommandConfirmation ?: return
+        magpieCommandConfirmation = null
+        runMagpieCommand(spec.name, target, true)
+    }
+
+    fun dismissMagpieCommand() {
+        magpieCommandConfirmation = null
+    }
+
+    /** A write can change the gateway header, so reload it without hiding a successful command. */
+    private suspend fun refreshMagpieAfterCommand(name: String) {
+        val mutating = setOf("sync", "update", "daemon-start", "daemon-stop", "daemon-restart", "provider-rm", "group-rm")
+        if (name !in mutating) return
+        try {
+            reloadMagpie()
+        } catch (err: CancellationException) {
+            throw err
+        } catch (_: Exception) {
+        }
     }
 
     fun clearMagpieOutput() {
@@ -1871,7 +1997,7 @@ class AppViewModel(
 
     /** The button's intent: always drop this session's own model pick. */
     fun resetModel() {
-        guarded("恢复默认模型") {
+        guarded("清除模型选择") {
             val message = api.setModel(conn(), "default", reset = true)
             session = api.session(conn())
             toast = message
@@ -2106,6 +2232,10 @@ class AppViewModel(
                     throw ApiException(0, "APK 下载为空，已删除文件")
                 }
                 appUpdateStage = "安装中"
+                pendingInstallApk = downloaded
+                // A fresh user-initiated download may follow a denied permission page, so allow
+                // Settings to open again instead of leaving the button silently inactive.
+                installSettingsOpened = false
                 openInstaller(downloaded)
             } catch (err: ActivityNotFoundException) {
                 appUpdateError = "没有可用的 APK 安装器，请允许浏览器/文件管理器安装应用"
@@ -2134,10 +2264,14 @@ class AppViewModel(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !appContext.packageManager.canRequestPackageInstalls()
         ) {
-            appUpdateError = "请先允许本应用安装未知来源应用，返回设置页后再次点击「下载并安装」"
-            val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${appContext.packageName}"))
-            settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            appContext.startActivity(settings)
+            pendingInstallApk = apk
+            appUpdateError = "请允许本应用安装未知来源应用；授权并返回后会自动继续安装，无需再次点击"
+            if (!installSettingsOpened) {
+                installSettingsOpened = true
+                val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${appContext.packageName}"))
+                settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                appContext.startActivity(settings)
+            }
             return
         }
         val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", apk)
@@ -2146,6 +2280,27 @@ class AppViewModel(
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         appContext.startActivity(intent)
+        // The system installer now owns the APK; a later foreground return is not a retry.
+        pendingInstallApk = null
+        installSettingsOpened = false
+    }
+
+    /** Continues an update once the user returns from the install-permission page. */
+    private fun resumePendingInstall() {
+        val apk = pendingInstallApk ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !appContext.packageManager.canRequestPackageInstalls()
+        ) {
+            return
+        }
+        appUpdateError = null
+        try {
+            openInstaller(apk)
+        } catch (err: ActivityNotFoundException) {
+            appUpdateError = "没有可用的 APK 安装器，请允许浏览器/文件管理器安装应用"
+        } catch (err: Exception) {
+            appUpdateError = "应用更新失败：${err.message}"
+        }
     }
 
     fun refreshOpsService() {
@@ -2363,6 +2518,7 @@ class AppViewModel(
             messages = emptyList()
             mediaImages = emptyMap()
             mediaErrors = emptySet()
+            mediaErrorDetails = emptyMap()
             // Trailing history writes are the only writer of the stored chat, so the reset goes
             // through them too: calling clearMessages here could be overtaken by an in-flight
             // snapshot and bring the old bubbles back on the next launch.
@@ -2424,8 +2580,9 @@ class AppViewModel(
                 oneOffModel = null
                 oneOffChoices = ModelChoices()
                 // Only the files this request actually carried. Clearing the strip instead would
-                // silently drop an attachment the user picked while a 10 MB upload was in flight.
+                // silently drop an attachment the user picked while a large upload was in flight.
                 pendingAttachments = pendingAttachments.filterNot { staged -> attachments.any { it === staged } }
+                attachments.forEach { LocalStore.discard(it) }
                 val sentAt = System.currentTimeMillis()
                 val sent = attachments.map { SentAttachment(it.name, it.mime, it.sizeBytes) }
                 messages = messages + ChatMessage(ChatMessage.Role.USER, raw, at = sentAt, attachments = sent) +
@@ -2535,6 +2692,8 @@ class AppViewModel(
             it.copy(
                 status = task.status,
                 text = task.reply ?: task.error ?: it.text,
+                errorCode = task.errorCode,
+                engineNote = task.engineNote,
                 progress = task.progress,
                 startedAt = task.startedAt ?: it.startedAt,
                 media = task.media.ifEmpty { it.media },
@@ -2626,13 +2785,18 @@ class AppViewModel(
     /** Downloads and decodes one reply image; the bubble calls this from LaunchedEffect. */
     fun loadMediaImage(taskId: String, media: TaskMedia, retry: Boolean = false) {
         val key = "$taskId/${media.index}"
-        if (retry) mediaErrors = mediaErrors - key
+        if (retry) {
+            mediaErrors = mediaErrors - key
+            mediaErrorDetails = mediaErrorDetails - key
+        }
         if (mediaImages.containsKey(key) || mediaErrors.contains(key) || !mediaLoads.add(key)) return
         viewModelScope.launch {
             try {
                 val file = mediaFile(taskId, media)
                 val bitmap = withContext(Dispatchers.IO) { decodeMediaFile(file) }
                 if (bitmap != null) {
+                    mediaErrors = mediaErrors - key
+                    mediaErrorDetails = mediaErrorDetails - key
                     // A decoded image costs ~10MB of heap, so only the newest few stay cached;
                     // scrolling back re-decodes the ones that left.
                     mediaImages = (mediaImages + (key to bitmap)).let { cached ->
@@ -2641,9 +2805,11 @@ class AppViewModel(
                     }
                 } else {
                     mediaErrors = mediaErrors + key
+                    mediaErrorDetails = mediaErrorDetails + (key to "图片格式无法识别或文件已损坏")
                 }
-            } catch (_: Exception) {
+            } catch (err: Exception) {
                 mediaErrors = mediaErrors + key
+                mediaErrorDetails = mediaErrorDetails + (key to (err.message ?: "下载失败"))
             } finally {
                 mediaLoads.remove(key)
             }
@@ -2707,7 +2873,13 @@ class AppViewModel(
             try {
                 val file = mediaFile(taskId, media)
                 val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", file)
-                val mime = mediaMime(media.name)
+                val byName = mediaMime(media.name)
+                val mime = when {
+                    byName != "application/octet-stream" -> byName
+                    media.kind == "voice" || media.kind == "audio" -> "audio/mp4"
+                    media.kind == "video" -> "video/mp4"
+                    else -> byName
+                }
                 val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
                 try {
                     appContext.startActivity(
@@ -2721,6 +2893,24 @@ class AppViewModel(
                 }
             } catch (err: Exception) {
                 connectionError = "无法打开 ${media.name}：${err.message}"
+            }
+        }
+    }
+
+    /** Downloads reply media for the in-app player without handing it to an external app. */
+    fun withMediaFile(
+        taskId: String,
+        media: TaskMedia,
+        onReady: (File) -> Unit,
+        onFailure: () -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            try {
+                val file = mediaFile(taskId, media)
+                onReady(file)
+            } catch (err: Exception) {
+                connectionError = "无法加载 ${media.name}：${err.message}"
+                onFailure()
             }
         }
     }

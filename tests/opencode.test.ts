@@ -1,5 +1,9 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import type { AddressInfo } from "node:net"
 import test, { mock } from "node:test"
 import { describeFetchError, oneLine, Opencode, OpencodeError } from "../src/opencode.js"
@@ -68,9 +72,42 @@ test("prompt rejects when the external signal aborts and aborts the server sessi
   )
 })
 
-test("prompt attaches files as data URLs", async () => {
+test("prompt attaches files by local URL instead of embedding their bytes", async () => {
   let received: { parts?: Array<Record<string, unknown>> } | undefined
+  const dir = mkdtempSync(join(tmpdir(), "opencode-file-url-"))
+  const path = join(dir, "a.png")
+  writeFileSync(path, Buffer.from([1, 2, 3]))
+  try {
+    await withServer(
+      (req, res) => {
+        const chunks: Buffer[] = []
+        req.on("data", (chunk: Buffer) => chunks.push(chunk))
+        req.on("end", () => {
+          received = JSON.parse(Buffer.concat(chunks).toString()) as typeof received
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ parts: [{ type: "text", text: "ok" }] }))
+        })
+      },
+      async (oc) => {
+        const reply = await oc.prompt("ses_test", "hi", {
+          files: [{ mime: "image/png", filename: "a.png", path, size: 3 }],
+        })
+        assert.equal(reply, "ok")
+      },
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 
+  const file = received?.parts?.find((part) => part.type === "file")
+  assert.ok(file)
+  assert.equal(file.mime, "image/png")
+  assert.equal(file.filename, "a.png")
+  assert.equal(file.url, pathToFileURL(path).href)
+})
+
+test("prompt omits a file above OpenCode's own attachment limit but keeps the request valid", async () => {
+  let received: { parts?: Array<Record<string, unknown>> } | undefined
   await withServer(
     (req, res) => {
       const chunks: Buffer[] = []
@@ -82,18 +119,12 @@ test("prompt attaches files as data URLs", async () => {
       })
     },
     async (oc) => {
-      const reply = await oc.prompt("ses_test", "hi", {
-        files: [{ mime: "image/png", filename: "a.png", data: Buffer.from([1, 2, 3]) }],
+      await oc.prompt("ses_test", "hi", {
+        files: [{ mime: "video/mp4", filename: "large.mp4", path: "/tmp/large.mp4", size: 20 * 1024 * 1024 + 1 }],
       })
-      assert.equal(reply, "ok")
     },
   )
-
-  const file = received?.parts?.find((part) => part.type === "file")
-  assert.ok(file)
-  assert.equal(file.mime, "image/png")
-  assert.equal(file.filename, "a.png")
-  assert.equal(file.url, `data:image/png;base64,${Buffer.from([1, 2, 3]).toString("base64")}`)
+  assert.deepEqual(received?.parts, [{ type: "text", text: "hi" }])
 })
 
 test("prompt tolerates an empty 200 response", async () => {
@@ -189,8 +220,8 @@ test("inputCapabilities reads /provider once and caches", async () => {
     },
     async (oc) => {
       const model = { providerID: "custom", modelID: "vision-model" }
-      assert.deepEqual(await oc.inputCapabilities(model), { image: true, audio: false, pdf: true })
-      assert.deepEqual(await oc.inputCapabilities(model), { image: true, audio: false, pdf: true })
+      assert.deepEqual(await oc.inputCapabilities(model), { image: true, audio: false, video: false, pdf: true })
+      assert.deepEqual(await oc.inputCapabilities(model), { image: true, audio: false, video: false, pdf: true })
       assert.equal(await oc.inputCapabilities({ providerID: "custom", modelID: "missing" }), undefined)
     },
   )
@@ -447,7 +478,7 @@ test("inputCapabilities reports an unknown model as undefined, not as unsupporte
     },
     async (oc) => {
       const known = await oc.inputCapabilities({ providerID: "openai", modelID: "gpt" })
-      assert.deepEqual(known, { image: true, audio: false, pdf: false })
+      assert.deepEqual(known, { image: true, audio: false, video: false, pdf: false })
       const custom = await oc.inputCapabilities({ providerID: "custom", modelID: "claude" })
       assert.equal(custom, undefined, "a model missing from /provider is unknown, not incapable")
     },

@@ -85,7 +85,6 @@ export interface AgentCliProfile {
   parse?: CliParseMode
   supportsModel?: boolean
   strictModels?: boolean
-  defaultModel?: string
   modelHint?: string
   models?: AgentCliModel[]
   args: AgentCliArgs
@@ -284,7 +283,6 @@ function mergeProfile(id: string, raw: Record<string, unknown>, base?: AgentCliP
     parse,
     supportsModel,
     strictModels,
-    defaultModel: typeof raw.defaultModel === "string" ? raw.defaultModel : base?.defaultModel,
     modelHint: typeof raw.modelHint === "string" ? raw.modelHint : base?.modelHint,
     models,
     args: mergedArgs,
@@ -449,9 +447,6 @@ export class AgentCliRegistry {
     return match?.label ?? model
   }
 
-  defaultModel(engine: string): string | undefined {
-    return this.get(engine)?.defaultModel
-  }
 }
 
 export interface CliParseResult {
@@ -870,15 +865,17 @@ export class AgentCliService {
       }
     }
 
+    // An omitted model is deliberate: the CLI's own configuration decides. Never
+    // inject a project default here, because it would override the user's choice.
     const model = profile.supportsModel
-      ? (modelOverride ?? this.#store.getCliModel(key, profile.id) ?? profile.defaultModel)
+      ? (modelOverride ?? this.#store.getCliModel(key, profile.id))
       : undefined
     const workDir = this.#resolveWorkDir(key)
     const args = buildCliArgs(profile, { workDir, sessionId, model, prompt: query }, isNew)
     const budget = argvBudgetError(profile.label, args)
     if (budget) throw new Error(budget)
     this.#log.debug(
-      `spawning ${profile.id} (${binPath}, isNew=${isNew}, session=${sessionId ?? "none"}, model=${model ?? "default"}, cwd=${workDir})`,
+      `spawning ${profile.id} (${binPath}, isNew=${isNew}, session=${sessionId ?? "none"}, model=${model ?? "engine config"}, cwd=${workDir})`,
     )
 
     return new Promise((resolve, reject) => {

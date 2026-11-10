@@ -3,6 +3,8 @@ import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 import { clip } from "./messages.js"
 import type { UsageOutcome } from "./usage.js"
+import type { ApiTaskErrorCode } from "./apiTaskTypes.js"
+import { isTaskErrorCode } from "./taskErrors.js"
 
 export interface HistoryEntry {
   at: number
@@ -11,6 +13,10 @@ export interface HistoryEntry {
   model?: string
   ms: number
   outcome: UsageOutcome
+  /** Stable failure class; absent for successful runs and legacy entries. */
+  errorCode?: ApiTaskErrorCode
+  /** Short redacted human-readable failure summary. */
+  detail?: string
   scheduled?: boolean
 }
 
@@ -20,6 +26,8 @@ export interface HistoryRecordInput {
   model?: string
   ms: number
   outcome: UsageOutcome
+  errorCode?: ApiTaskErrorCode
+  detail?: string
   scheduled?: boolean
 }
 
@@ -60,6 +68,8 @@ function sanitizeEntry(value: unknown): HistoryEntry | undefined {
     model: typeof record.model === "string" && record.model ? record.model : undefined,
     ms: typeof record.ms === "number" && Number.isFinite(record.ms) && record.ms >= 0 ? Math.round(record.ms) : 0,
     outcome: record.outcome as UsageOutcome,
+    errorCode: isTaskErrorCode(record.errorCode) ? record.errorCode : undefined,
+    detail: typeof record.detail === "string" && record.detail ? redactSecrets(record.detail).replace(/\s+/g, " ").trim().slice(0, 300) : undefined,
     scheduled: record.scheduled === true ? true : undefined,
   }
 }
@@ -91,6 +101,8 @@ export class TaskHistoryStore {
       model: input.model,
       ms: Math.max(0, Math.round(input.ms)),
       outcome: input.outcome,
+      errorCode: input.errorCode,
+      detail: input.detail ? redactSecrets(input.detail).replace(/\s+/g, " ").trim().slice(0, 300) || undefined : undefined,
       scheduled: input.scheduled ? true : undefined,
     }
     this.#chats[key] = [entry, ...this.#entries(key)].slice(0, MAX_HISTORY_PER_CHAT)
@@ -248,6 +260,7 @@ export function formatHistoryMarkdown(
       entry.engine ?? "unknown",
       entry.model,
       `${(entry.ms / 1000).toFixed(1)}s`,
+      entry.errorCode ? entry.errorCode : undefined,
       entry.scheduled ? "定时" : undefined,
     ]
       .filter(Boolean)
@@ -255,6 +268,11 @@ export function formatHistoryMarkdown(
     lines.push(`## ${badge} ${formatStamp(entry.at, zone)}`, "", `\`${meta}\``, "")
     for (const line of entry.prompt.split("\n")) {
       lines.push(`> ${line}`)
+    }
+    if (entry.detail) {
+      // The prompt above is quoted so Markdown in it cannot break the document; the
+      // diagnostic is one sanitized line, but still keep it from becoming a heading
+      lines.push("", `失败详情：${entry.detail.replace(/^#/gm, "\\#")}`)
     }
     lines.push("")
   }

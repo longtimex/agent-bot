@@ -445,10 +445,10 @@ export class CcCommands {
                   ? `\n⚠️ 强制删除，以下引用仍存在：${escapeMarkdown(removed.references.join("、"))}`
                   : "") +
                 (removed.resetAgents.length > 0
-                  ? `\n已清除 ${removed.resetAgents.length} 个 Agent 的模型绑定：${escapeMarkdown(removed.resetAgents.join("、"))}，它们将使用引擎默认模型。`
+                  ? `\n已清除 ${removed.resetAgents.length} 个 Agent 的模型绑定：${escapeMarkdown(removed.resetAgents.join("、"))}，之后由各引擎自身配置决定。`
                   : "") +
                 (removed.resetChats.length > 0
-                  ? `\n已重置 ${removed.resetChats.length} 个会话的模型选择，它们将使用引擎默认模型。`
+                  ? `\n已清除 ${removed.resetChats.length} 个会话的模型选择，之后由各引擎自身配置决定。`
                   : ""),
             )
             return

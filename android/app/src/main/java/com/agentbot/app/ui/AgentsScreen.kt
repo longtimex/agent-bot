@@ -208,14 +208,6 @@ fun AgentsScreen(vm: AppViewModel) {
                                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp),
                             )
                         }
-                        agent.defaultModel?.let {
-                            Text(
-                                "默认模型：$it",
-                                color = TextTertiary,
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp),
-                            )
-                        }
                         if (agent.install != null && !agent.installed && !agent.installable) {
                             Text(
                                 "手动安装：${agent.install}",

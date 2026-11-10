@@ -164,7 +164,7 @@ export async function routeSchedules(
     const engine = deps.store.getEngine(deps.appKey)
     const defaults =
       engine === "opencode"
-        ? { engine, model: resolveOpencodeModel(deps.store, deps.cfg.opencode.model, deps.appKey) }
+        ? { engine, model: resolveOpencodeModel(deps.store, deps.appKey) }
         : { engine, cliModel: deps.store.getCliModel(deps.appKey, engine) }
     let task
     try {
@@ -680,7 +680,6 @@ export function builtinAgentView(): Record<string, unknown> {
     install: undefined,
     sessionMode: "session",
     supportsModel: true,
-    defaultModel: undefined,
     models: undefined,
     experimental: undefined,
     managed: false,
@@ -708,7 +707,6 @@ export function agentView(deps: PersonalRouteDeps, profile: AgentCliProfile): Re
     install: profile.install,
     sessionMode: profile.sessionMode,
     supportsModel: Boolean(profile.supportsModel),
-    defaultModel: profile.defaultModel,
     models: profile.models,
     experimental: profile.experimental,
     managed: installer?.isManaged(profile.id) ?? false,

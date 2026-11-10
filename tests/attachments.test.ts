@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import test from "node:test"
 import { buildAttachmentSections } from "../src/attachmentInput.js"
+import { OPENCODE_ATTACHMENT_LIMIT } from "../src/opencode.js"
 import {
   isTextAttachment,
   pruneInbox,
@@ -156,10 +157,137 @@ test("the manifest names attachments by absolute path so any engine cwd resolves
     assert.equal(listed.length, 2, "both attachments are listed for the engine")
     assert.ok(listed.every((p) => isAbsolute(p)), `manifest paths must be absolute, got ${listed.join(", ")}`)
     assert.ok(input.text.includes(`<file name="${text.path}">`), "the inlined copy carries the same path")
-    assert.equal(input.files.length, 1, "the image still rides as a data file")
+    assert.equal(input.files.length, 1, "the image still rides as a file reference")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("videos keep their own kind and default instruction", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-video-"))
+  try {
+    const video = saveAttachment(dir, 8, "clip.mp4", Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70]))
+    const input = buildAttachmentSections("", {
+      saved: [
+        { fileId: "v1", kind: "video", name: "clip.mp4", mime: "video/mp4", path: video.path, bytes: 8 },
+      ],
+    })
+    assert.match(input.text, /请查看并分析用户发送的视频/)
+    assert.match(input.text, /^- 视频: .*clip\.mp4/m)
+    assert.equal(input.files.length, 1, "a model with unknown capabilities still receives the video")
+    assert.equal(input.files[0]?.mime, "video/mp4")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a model that rejects video is told where the saved file is instead of losing it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-video-caps-"))
+  try {
+    const video = saveAttachment(dir, 9, "clip.mp4", Buffer.from("not-a-real-video"))
+    const input = buildAttachmentSections("分析这个视频", {
+      saved: [
+        { fileId: "v2", kind: "video", name: "clip.mp4", mime: "video/mp4", path: video.path, bytes: 16 },
+      ],
+      modelCapabilities: { video: false },
+    })
+    assert.equal(input.files.length, 0)
+    assert.match(input.text, /不支持视频输入/)
+    assert.ok(input.text.includes(video.path), "the model can still inspect the file by absolute path")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a supported video is attached as a data file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-video-supported-"))
+  try {
+    const video = saveAttachment(dir, 10, "clip.mp4", Buffer.from("video-bytes"))
+    const input = buildAttachmentSections("看看", {
+      saved: [
+        { fileId: "v3", kind: "video", name: "clip.mp4", mime: "video/mp4", path: video.path, bytes: 11 },
+      ],
+      modelCapabilities: { video: true },
+    })
+    assert.equal(input.files.length, 1)
+    assert.deepEqual(input.files[0], { mime: "video/mp4", filename: "clip.mp4", path: video.path, size: 11 })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("old 10MB and 15MB project ceilings no longer reject an attachment", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-unlimited-"))
+  try {
+    const videoPath = join(dir, "large.mp4")
+    writeFileSync(videoPath, "")
+    truncateSync(videoPath, 16 * 1024 * 1024)
+    const video = buildAttachmentSections("看看", {
+      saved: [{ fileId: "v4", kind: "video", name: "large.mp4", mime: "video/mp4", path: videoPath, bytes: 16 * 1024 * 1024 }],
+      modelCapabilities: { video: true },
+    })
+    assert.equal(video.files.length, 1)
+    assert.equal(video.files[0]?.path, videoPath)
+
+    const imagePath = join(dir, "large.png")
+    writeFileSync(imagePath, "")
+    truncateSync(imagePath, 11 * 1024 * 1024)
+    const image = buildAttachmentSections("看看", {
+      saved: [{ fileId: "i4", kind: "image", name: "large.png", mime: "image/png", path: imagePath, bytes: 11 * 1024 * 1024 }],
+      modelCapabilities: { image: true },
+    })
+    assert.equal(image.files.length, 1, "the removed 10MB image ceiling must not linger")
+    assert.doesNotMatch(image.text, /图片过大/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a file above OpenCode's own 20MB attachment ceiling keeps its path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-inbox-opencode-limit-"))
+  try {
+    const videoPath = join(dir, "huge.mp4")
+    writeFileSync(videoPath, "")
+    truncateSync(videoPath, OPENCODE_ATTACHMENT_LIMIT + 1)
+    const input = buildAttachmentSections("看看", {
+      saved: [{
+        fileId: "v5",
+        kind: "video",
+        name: "huge.mp4",
+        mime: "video/mp4",
+        path: videoPath,
+        bytes: OPENCODE_ATTACHMENT_LIMIT + 1,
+      }],
+      modelCapabilities: { video: true },
+    })
+    assert.equal(input.files.length, 0, "OpenCode's platform limit still applies to direct attachments")
+    assert.ok(input.text.includes(videoPath), "the whole file stays available through its absolute path")
+    assert.match(input.text, /OpenCode 单附件 20MB/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("attachmentKind separates video from documents", async () => {
+  const { attachmentKind } = await import("../src/attachments.js")
+  assert.equal(attachmentKind("image/png"), "image")
+  assert.equal(attachmentKind("audio/mp4"), "audio")
+  assert.equal(attachmentKind("video/quicktime"), "video")
+  assert.equal(attachmentKind("application/pdf"), "document")
+  assert.equal(attachmentKind("application/octet-stream", "clip.MP4"), "video")
+  assert.equal(attachmentKind("", "voice.m4a"), "audio")
+  assert.equal(attachmentKind("application/octet-stream", "scan.jpeg"), "image")
+  assert.equal(attachmentKind("application/octet-stream", "archive.zip"), "document")
+})
+
+test("media download MIME covers the formats attachments accept", async () => {
+  const { mimeForName } = await import("../src/apiHttp.js")
+  assert.equal(mimeForName("voice.opus"), "audio/ogg")
+  assert.equal(mimeForName("voice.aac"), "audio/aac")
+  assert.equal(mimeForName("voice.amr"), "audio/amr")
+  assert.equal(mimeForName("clip.m4v"), "video/mp4")
+  assert.equal(mimeForName("clip.mkv"), "video/x-matroska")
+  assert.equal(mimeForName("clip.3gp"), "video/3gpp")
 })
 
 test("pruneInbox deletes an expired symlink itself and never follows it", async () => {

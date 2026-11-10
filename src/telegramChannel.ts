@@ -81,4 +81,15 @@ export async function downloadFeishuAttachment(
   return downloadFeishuResource({ client, maxBytes }, ref, signal)
 }
 
+/** Disk-backed Feishu download; used by the attachment pipeline to avoid a full Buffer. */
+export async function openFeishuAttachmentStream(
+  client: FeishuApiLike,
+  ref: FeishuResourceRef,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<AsyncIterable<Uint8Array>> {
+  const { openFeishuResourceStream } = await import("./feishuAttachments.js")
+  return openFeishuResourceStream({ client, maxBytes, signal }, ref)
+}
+
 export type { Channel }

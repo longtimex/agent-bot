@@ -27,6 +27,7 @@ import {
   type ModelInfo,
 } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
+import { ChatTaskOutcomeRecorder, chatTaskOutcomeRecorder } from "./telegramTaskOutcome.js"
 import { resolveEncKey } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
 import { OpsService } from "./ops.js"
@@ -62,7 +63,7 @@ import { ReminderDelivery } from "./telegramReminderDelivery.js"
 import type { FeishuApiLike } from "./feishuTypes.js"
 import {
   createChannelBot,
-  downloadFeishuAttachment,
+  openFeishuAttachmentStream,
   seedFeishuBotInfo,
   isUserAllowed,
   resolveOwnerChatId,
@@ -126,6 +127,7 @@ export class TelegramBridge {
   readonly #usage: UsageStore
   readonly #usageReport: DailyReportService
   readonly #history: TaskHistoryStore
+  readonly #outcomes: ChatTaskOutcomeRecorder
   readonly #queues = new Map<string, Promise<void>>()
   readonly #pending = new Map<string, Job[]>()
   readonly #generation = new Map<string, number>()
@@ -236,6 +238,7 @@ export class TelegramBridge {
       )
     this.#usage = new UsageStore(resolve(cfg.dataDir, "usage.json"), log, this.#timezone)
     this.#history = new TaskHistoryStore(resolve(cfg.dataDir, "history.json"), log)
+    this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
@@ -287,7 +290,7 @@ export class TelegramBridge {
       timezone: () => this.#timezone,
       startedAt: () => this.#startedAt,
       pendingCount: (key) => this.#pending.get(key)?.length ?? 0,
-      currentModel: (key) => this.#getCurrentModel(key),
+      currentModel: (key) => this.#modelCommands.getCurrentModel(key),
       cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
       encryptionEnabled: () => resolveEncKey(this.#cfg) !== undefined,
       runningSince: this.#runningSince,
@@ -312,7 +315,7 @@ export class TelegramBridge {
       schedules: this.#schedules,
       runningSince: this.#runningSince,
       pendingCount: (key) => this.#pending.get(key)?.length ?? 0,
-      currentModel: (key) => this.#getCurrentModel(key),
+      currentModel: (key) => this.#modelCommands.getCurrentModel(key),
       cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
     })
     this.#personalCommands = new TelegramPersonalCommands({
@@ -322,7 +325,7 @@ export class TelegramBridge {
       store: this.#store,
       agents: this.#agents,
       timezone: () => this.#timezone,
-      currentModel: (key) => this.#getCurrentModel(key),
+      currentModel: (key) => this.#modelCommands.getCurrentModel(key),
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
       aliasPanel: (chatId) => this.#personalPanels.aliasPanel(chatId),
@@ -333,7 +336,6 @@ export class TelegramBridge {
       store: this.#store,
       agents: this.#agents,
       oc: this.#oc,
-      cfg: this.#cfg,
       log: this.#log,
       runningSince: this.#runningSince,
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
@@ -393,8 +395,8 @@ export class TelegramBridge {
       oc: this.#oc,
       maskToken: (text) => this.#maskToken(text),
       log: this.#log,
-      feishuDownload: this.#feishuResourceClient
-        ? (ref, signal) => downloadFeishuAttachment(this.#feishuResourceClient!, ref, this.#cfg.maxInputBytes, signal)
+      feishuStream: this.#feishuResourceClient
+        ? (ref, signal) => openFeishuAttachmentStream(this.#feishuResourceClient!, ref, this.#cfg.maxInputBytes, signal)
         : undefined,
     })
     this.#mediaSender = new TelegramMediaSender({
@@ -906,10 +908,12 @@ export class TelegramBridge {
         const attachments = this.#collectAttachments(ctx.message)
         if (attachments.length === 0) return
 
-        const limitMb = Math.round(this.#cfg.maxInputBytes / 1024 / 1024)
-        const tooBig = attachments.find((att) => (att.size ?? 0) > this.#cfg.maxInputBytes)
+        const tooBig = this.#cfg.maxInputBytes > 0
+          ? attachments.find((att) => (att.size ?? 0) > this.#cfg.maxInputBytes)
+          : undefined
         if (tooBig) {
-          await this.#sendTextMessage(chatId, `⚠️ ${tooBig.name} 超过 ${limitMb}MB 上限，无法接收。`)
+          const limitMb = Math.round(this.#cfg.maxInputBytes / 1024 / 1024)
+          await this.#sendTextMessage(chatId, `⚠️ ${tooBig.name} 超过配置的 ${limitMb}MB 下载上限，无法接收。`)
           return
         }
         if (!(await this.#ensureCapacity(chatId, key))) return
@@ -1267,10 +1271,10 @@ export class TelegramBridge {
         }
         if (data === "model:reset") {
           if (!(await this.#clearOpenCodeModelSelection(key))) {
-            await answer("本会话已经是默认模型")
+            await answer("本会话没有独立的模型选择")
             return
           }
-          await answer("已恢复默认模型")
+          await answer("已清除模型选择，之后由 OpenCode 自身配置决定")
           await this.#editPanel(ctx, this.#modelPanel(key))
           return
         }
@@ -1280,8 +1284,8 @@ export class TelegramBridge {
           await answer("模型不存在")
           return
         }
-        const current = this.#getCurrentModel(key)
-        if (current.providerID === target.providerID && current.modelID === target.modelID) {
+        const current = this.#modelCommands.getCurrentModel(key)
+        if (current?.providerID === target.providerID && current.modelID === target.modelID) {
           await answer("已经是当前模型")
           return
         }
@@ -1304,10 +1308,10 @@ export class TelegramBridge {
           return
         }
         if (!this.#clearCliModelSelection(key, engine)) {
-          await answer("本会话已经是默认模型")
+          await answer("本会话没有独立的模型选择")
           return
         }
-        await answer("已恢复默认模型")
+        await answer("已清除模型选择，之后由 CLI 自身配置决定")
         await this.#editPanel(ctx, this.#modelPanel(key))
         return
       }
@@ -1344,7 +1348,7 @@ export class TelegramBridge {
           await answer("任务执行中，请先发送 /stop")
           return
         }
-        const current = this.#store.getCliModel(key, engine) ?? this.#agents.registry.defaultModel(engine)
+        const current = this.#store.getCliModel(key, engine)
         if (current === model) {
           await answer("已经是当前模型")
           return
@@ -1655,8 +1659,8 @@ export class TelegramBridge {
 
       if (engine === "opencode") {
         const sessionID = this.#store.get(job.key)
-        const currentModel = this.#getCurrentModel(job.key)
-        infoText += `• OpenCode 模型: *${escapeMarkdown(currentModel.label)}*\n• 会话 ID: \`${sessionID || "暂未创建"}\``
+        const currentModel = this.#modelCommands.getCurrentModel(job.key)
+        infoText += `• OpenCode 模型: *${escapeMarkdown(currentModel?.label ?? "由 OpenCode 决定")}*\n• 会话 ID: \`${sessionID || "暂未创建"}\``
       } else {
         const profile = this.#agents.registry.get(engine)
         const sessionID = this.#store.getCliSession(job.key, engine)
@@ -1749,12 +1753,13 @@ export class TelegramBridge {
 
     const engine = job.engine ?? this.#store.getEngine(job.key)
     const isOpencode = engine === "opencode"
-    const activeModel = isOpencode ? (job.model ?? this.#getCurrentModel(job.key)) : undefined
+    const activeModel = isOpencode ? (job.model ?? this.#modelCommands.getCurrentModel(job.key)) : undefined
     const cliModel = isOpencode
       ? undefined
-      : (job.cliModel ?? this.#store.getCliModel(job.key, engine) ?? this.#agents.registry.defaultModel(engine))
+      : (job.cliModel ?? this.#store.getCliModel(job.key, engine))
     const taskStarted = Date.now()
     let outcome: UsageOutcome = "failed"
+    let failureDetail: string | undefined
 
     const controller = new AbortController()
 
@@ -1777,7 +1782,7 @@ export class TelegramBridge {
         ? await this.#buildAttachmentInput(job, activeModel, controller.signal)
         : { text: job.text, files: [] as PromptFile[] }
       const attachmentInfo = job.attachments?.length ? ` attachments=${job.attachments.length}` : ""
-      const promptLabel = isOpencode ? `OpenCode: ${activeModel?.label}` : this.#agents.registry.label(engine)
+      const promptLabel = isOpencode ? `OpenCode: ${activeModel?.label ?? "engine config"}` : this.#agents.registry.label(engine)
       this.#log.info(`prompt [${job.key}] (${promptLabel}) length=${input.text.length}${attachmentInfo}`)
       this.#log.debug(`prompt content: ${input.text.slice(0, 80).replace(/\n/g, " ")}`)
 
@@ -1805,10 +1810,10 @@ export class TelegramBridge {
       const detail = err instanceof Error ? err.message : String(err)
       if (/已取消当前任务/.test(detail)) {
         outcome = "cancelled"
-        this.#log.info(`task cancelled [${job.key}]`)
+        failureDetail = redactSecrets(this.#maskToken(detail)).replace(/\s+/g, " ").slice(0, 300)
         return
       }
-      this.#log.error(`prompt failed [${job.key}]:`, this.#maskToken(detail))
+      failureDetail = redactSecrets(this.#maskToken(detail)).replace(/\s+/g, " ").slice(0, 300)
       const hint =
         engine === "opencode" && /ECONNREFUSED|UND_ERR_SOCKET|fetch failed/i.test(detail)
           ? "\n\n请确认 opencode serve 已启动（npm run serve）。"
@@ -1826,15 +1831,7 @@ export class TelegramBridge {
           ? this.#agents.registry.modelLabel(engine, cliModel)
           : undefined
       const ms = Date.now() - taskStarted
-      this.#usage.record(job.key, { engine, model: modelLabel, ms, outcome })
-      this.#history.record(job.key, {
-        prompt: job.text,
-        engine,
-        model: modelLabel,
-        ms,
-        outcome,
-        scheduled: job.scheduled,
-      })
+      this.#outcomes.record({ task: job, engine, model: modelLabel, outcome, detail: failureDetail, ms, startedAt: taskStarted })
       if (this.#cancels.get(job.key) === controller) this.#cancels.delete(job.key)
       this.#runningSince.delete(job.key)
       this.#pruneChatState()
@@ -1943,10 +1940,6 @@ export class TelegramBridge {
 
   #cliModelLabel(engine: string, model: string | undefined): string {
     return this.#modelCommands.cliModelLabel(engine, model)
-  }
-
-  #getCurrentModel(key: string): { providerID: string; modelID: string; label: string } {
-    return this.#modelCommands.getCurrentModel(key)
   }
 
   #dirPanel(key: string): Panel {
@@ -2191,7 +2184,6 @@ export class TelegramBridge {
       store: this.#store,
       log: this.#log,
       opencodeAgent: this.#cfg.opencode.agent ?? "assistant",
-      opencodeModel: this.#cfg.opencode.model,
       taskTimeoutMs: this.#cfg.taskTimeoutMs,
       taskMaxTimeoutMs: this.#cfg.taskMaxTimeoutMs,
     }

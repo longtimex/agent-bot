@@ -1,7 +1,6 @@
 ---
 description: Telegram 私人聊天助手，通过 Telegram Bot API 接收消息
 mode: primary
-model: custom/gemini-3.8-flash-high
 permission:
   bash: allow
   edit: allow

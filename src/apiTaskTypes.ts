@@ -11,6 +11,10 @@ export interface ApiTaskView {
   progress?: string
   reply?: string
   error?: string
+  /** Stable machine-readable failure class, also present for cancelled tasks. */
+  errorCode?: ApiTaskErrorCode
+  /** Why a default engine was replaced for this task (e.g. OpenCode was unreachable). */
+  engineNote?: string
   createdAt: number
   startedAt?: number
   finishedAt?: number
@@ -19,6 +23,16 @@ export interface ApiTaskView {
   /** Media produced by the task, mirroring what Telegram receives. */
   media?: ApiTaskMediaView[]
 }
+
+export type ApiTaskErrorCode =
+  | "ENGINE_UNAVAILABLE"
+  | "CLI_ARGUMENT_INVALID"
+  | "AUTH_FAILED"
+  | "MODEL_UNAVAILABLE"
+  | "TASK_TIMEOUT"
+  | "TASK_CANCELLED"
+  | "ATTACHMENT_FAILED"
+  | "UNKNOWN"
 
 export interface ApiTaskMediaView {
   index: number
@@ -41,6 +55,8 @@ export interface ApiTaskMedia {
 export interface ApiTask extends Omit<ApiTaskView, "media"> {
   key: string
   controller?: AbortController
+  /** True only when neither the request nor the session stored an engine choice. */
+  autoEngine?: boolean
   /** Attachments saved to the inbox at submit time; the base64 payload is never retained. */
   savedAttachments?: SavedAttachment[]
   media?: ApiTaskMedia[]

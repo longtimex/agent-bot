@@ -210,7 +210,7 @@ test("TaskHistoryStore keeps a recent entry in a chat that also has stale ones",
 test("formatHistoryMarkdown renders a standalone document with quoted prompts", () => {
   const entries = [
     { at: Date.UTC(2026, 0, 2, 3, 30), prompt: "第一行\n第二行", engine: "opencode", model: "Gemini 3.8", ms: 12_345, outcome: "ok" },
-    { at: Date.UTC(2026, 0, 1, 9, 0), prompt: "```json\n{}\n```", engine: "claude", ms: 500, outcome: "failed", scheduled: true },
+    { at: Date.UTC(2026, 0, 1, 9, 0), prompt: "```json\n{}\n```", engine: "claude", ms: 500, outcome: "failed", errorCode: "CLI_ARGUMENT_INVALID", detail: "unexpected argument '-C'", scheduled: true },
   ]
   const doc = formatHistoryMarkdown(entries, { source: "App (api:app)", timeZone: "Asia/Shanghai" })
   assert.match(doc, /# Agent Bot 任务历史/)
@@ -218,6 +218,8 @@ test("formatHistoryMarkdown renders a standalone document with quoted prompts", 
   assert.match(doc, /共 2 条（成功 1 · 失败 1 · 取消 0）/)
   assert.match(doc, /✅ 01-02 11:30/)
   assert.match(doc, /❌ 01-01 17:00/)
+  assert.match(doc, /CLI_ARGUMENT_INVALID/)
+  assert.match(doc, /失败详情：unexpected argument/)
   assert.match(doc, /定时/)
   // multi-line prompts are blockquoted line by line, and fences cannot break layout
   assert.match(doc, /^> 第一行$/m)
@@ -254,6 +256,28 @@ test("TaskHistoryStore sorts out-of-order files newest-first on load", () => {
     // record 之后仍保持 newest-first
     store.record("tg:1", { prompt: "newer still", engine: "e", ms: 1, outcome: "ok" }, 400)
     assert.equal(store.list("tg:1", 5)[0]?.prompt, "newer still")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+
+test("TaskHistoryStore keeps failure metadata across reload and sanitises it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-history-error-"))
+  try {
+    const path = join(dir, "history.json")
+    const store = new TaskHistoryStore(path, log)
+    store.record("tg:1", {
+      prompt: "failed run",
+      engine: "codex",
+      ms: 10,
+      outcome: "failed",
+      errorCode: "CLI_ARGUMENT_INVALID",
+      detail: "  unexpected   argument\napi_key=SECRET123  ",
+    })
+    const entry = new TaskHistoryStore(path, log).list("tg:1", 1)[0]!
+    assert.equal(entry.errorCode, "CLI_ARGUMENT_INVALID")
+    assert.equal(entry.detail, "unexpected argument api_key=***")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

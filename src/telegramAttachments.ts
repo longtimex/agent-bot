@@ -1,12 +1,12 @@
-import { unlinkSync } from "node:fs"
 import type { Bot } from "grammy"
 import type { Message } from "grammy/types"
-import { buildAttachmentSections, MAX_ATTACH_TOTAL_BYTES } from "./attachmentInput.js"
+import { buildAttachmentSections } from "./attachmentInput.js"
 import {
+  attachmentKind,
   isTextAttachment,
   pruneInbox,
   readTextAttachment,
-  saveAttachment,
+  saveAttachmentStream,
   type AttachmentDescriptor,
   type SavedAttachment,
 } from "./attachments.js"
@@ -25,7 +25,6 @@ import {
 } from "./feishuAttachments.js"
 
 const MAX_ATTACHMENTS = 4
-const MAX_ATTACH_FILE_BYTES = 10 * 1024 * 1024
 const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
 export interface AttachmentCommandDeps {
@@ -34,7 +33,7 @@ export interface AttachmentCommandDeps {
   oc: Opencode
   maskToken: (text: string) => string
   log: Logger
-  feishuDownload?: (ref: FeishuResourceRef, signal?: AbortSignal) => Promise<Buffer>
+  feishuStream?: (ref: FeishuResourceRef, signal?: AbortSignal) => Promise<AsyncIterable<Uint8Array>>
 }
 
 export class TelegramAttachments {
@@ -68,7 +67,7 @@ export class TelegramAttachments {
       const mime = doc.mime_type ?? "application/octet-stream"
       attachments.push({
         fileId: doc.file_id,
-        kind: mime.startsWith("image/") ? "image" : mime.startsWith("audio/") ? "audio" : "document",
+        kind: attachmentKind(mime, doc.file_name),
         name: doc.file_name ?? `document-${doc.file_id.slice(-8)}${extensionFromMime(mime)}`,
         mime,
         size: doc.file_size,
@@ -101,7 +100,7 @@ export class TelegramAttachments {
       const mime = message.video.mime_type ?? "video/mp4"
       attachments.push({
         fileId: message.video.file_id,
-        kind: "document",
+        kind: "video",
         name: message.video.file_name ?? `video-${message.video.file_id.slice(-8)}${extensionFromMime(mime) || ".mp4"}`,
         mime,
         size: message.video.file_size,
@@ -114,17 +113,14 @@ export class TelegramAttachments {
   async downloadAttachment(chatId: number, att: AttachmentDescriptor, signal?: AbortSignal): Promise<SavedAttachment> {
     const feishuRef = decodeFeishuFileId(att.fileId)
     if (feishuRef) {
-      if (!this.#deps.feishuDownload) throw new Error("飞书附件下载器未配置")
-      const data = await this.#deps.feishuDownload(feishuRef, signal)
+      if (!this.#deps.feishuStream) throw new Error("飞书附件下载器未配置")
+      const source = await this.#deps.feishuStream(feishuRef, signal)
+      const saved = await saveAttachmentStream(this.#deps.cfg.inboxDir, chatId, att.name, source)
       if (signal?.aborted) throw new Error("已取消下载")
-      if (data.byteLength > this.#deps.cfg.maxInputBytes) {
-        throw new Error(`超过 ${Math.round(this.#deps.cfg.maxInputBytes / 1024 / 1024)}MB 上限`)
-      }
-      const saved = saveAttachment(this.#deps.cfg.inboxDir, chatId, att.name, data)
-      const result: SavedAttachment = { ...att, path: saved.path, bytes: data.byteLength }
+      const result: SavedAttachment = { ...att, path: saved.path, bytes: saved.bytes }
       if (isTextAttachment(att.mime, saved.name)) {
         try {
-          const { text, truncated } = readTextAttachment(saved.path)
+          const { text, truncated } = readTextAttachment(result.path)
           result.text = text
           result.truncated = truncated
         } catch {
@@ -151,16 +147,30 @@ export class TelegramAttachments {
       await res.body?.cancel().catch(() => {})
       throw new Error(`下载失败 (HTTP ${res.status})`)
     }
-    const data = Buffer.from(await res.arrayBuffer())
-    // MAX_INPUT_MB may be raised for Feishu's 100MB message-resource API; the
-    // Bot API's getFile endpoint still refuses anything over 20MB.
-    const telegramLimit = Math.min(this.#deps.cfg.maxInputBytes, TELEGRAM_DOWNLOAD_LIMIT)
-    if (data.byteLength > telegramLimit) {
-      throw new Error(`超过 ${Math.round(telegramLimit / 1024 / 1024)}MB 上限`)
+    // Stream the response into the inbox. Buffering the whole file first defeated
+    // the point of the streaming parser and made a near-20MB Telegram file consume
+    // its size on the Node heap before it ever reached disk.
+    const body = res.body
+    if (!body) throw new Error("下载失败：Telegram 返回了空响应")
+    const maxBytes = this.#deps.cfg.maxInputBytes
+    let bytes = 0
+    const limited = async function* (): AsyncGenerator<Uint8Array> {
+      for await (const chunk of body) {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        bytes += data.byteLength
+        // The Bot API refuses getFile above 20MB before this code sees the bytes.
+        // Keep that platform boundary visible instead of presenting it as our cap.
+        if (bytes > TELEGRAM_DOWNLOAD_LIMIT) {
+          throw new Error("Telegram Bot API 单文件下载上限为 20MB，超过后无法通过 getFile 获取")
+        }
+        if (maxBytes > 0 && bytes > maxBytes) {
+          throw new Error(`超过配置的 ${Math.round(maxBytes / 1024 / 1024)}MB 下载上限（MAX_INPUT_MB，0 表示不限）`)
+        }
+        yield data
+      }
     }
-
-    const saved = saveAttachment(this.#deps.cfg.inboxDir, chatId, att.name, data)
-    const result: SavedAttachment = { ...att, path: saved.path, bytes: data.byteLength }
+    const saved = await saveAttachmentStream(this.#deps.cfg.inboxDir, chatId, att.name, limited())
+    const result: SavedAttachment = { ...att, path: saved.path, bytes: saved.bytes }
     if (isTextAttachment(att.mime, saved.name)) {
       try {
         const { text, truncated } = readTextAttachment(saved.path)
@@ -176,27 +186,10 @@ export class TelegramAttachments {
   async buildAttachmentInput(job: Job, model?: ModelRef, signal?: AbortSignal): Promise<{ text: string; files: PromptFile[] }> {
     const saved: SavedAttachment[] = []
     const failed: string[] = []
-    let totalBytes = 0
 
     for (const att of job.attachments ?? []) {
-      if (totalBytes + (att.size ?? 0) > MAX_ATTACH_TOTAL_BYTES) {
-        failed.push(`${att.name}: 附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
-        continue
-      }
       try {
-        const item = await this.downloadAttachment(job.chatId, att, signal)
-        if (totalBytes + item.bytes > MAX_ATTACH_TOTAL_BYTES) {
-          failed.push(`${att.name}: 附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限`)
-          // The copy is already on disk; drop it so oversized batches do not fill the inbox
-          try {
-            unlinkSync(item.path)
-          } catch {
-            // already gone
-          }
-          continue
-        }
-        totalBytes += item.bytes
-        saved.push(item)
+        saved.push(await this.downloadAttachment(job.chatId, att, signal))
       } catch (err) {
         // Telegram client errors can quote the API URL, which contains the bot token
         const detail = this.#deps.maskToken(redactSecrets(err instanceof Error ? err.message : String(err)))
@@ -206,7 +199,7 @@ export class TelegramAttachments {
     pruneInbox(this.#deps.cfg.inboxDir)
 
     const caps = model ? await this.#deps.oc.inputCapabilities(model) : undefined
-    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps, maxBytes: MAX_ATTACH_FILE_BYTES })
+    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps })
     failed.push(...stt.errors)
     return buildAttachmentSections(job.text, { saved: stt.saved, failed, modelCapabilities: caps })
   }

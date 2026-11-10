@@ -106,6 +106,29 @@ test("the App only calls ViewModel members that exist", () => {
 })
 
 /**
+ * Both consoles are server-driven: the clickable rows and the names they send come from the
+ * same catalogs the bot executes. A page that renders only read views leaves every write
+ * command invisible (the mislabeled "magpie console" regression), while a fixed name the
+ * server does not list is a dead button after any catalog edit.
+ */
+test("cc-switch and magpie render the server's actionable catalogs", () => {
+  const cc = readFileSync(`${UI_DIR}/CcScreen.kt`, "utf8")
+  const magpie = readFileSync(`${UI_DIR}/MagpieScreen.kt`, "utf8")
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+
+  assert.ok(cc.includes("vm.ccViews.forEach") && cc.includes("vm.ccCommands.isNotEmpty()"), "cc-switch must render both view and exec catalogs")
+  assert.ok(magpie.includes("overview?.views") && magpie.includes("overview?.commands"), "magpie must render both view and exec catalogs")
+  assert.ok(magpie.includes("vm.runMagpieCommand(command.name"), "a listed magpie command needs an executable row")
+  assert.ok(magpie.includes("需要确认"), "destructive magpie commands must be visibly marked and confirmed")
+  assert.ok(viewModel.includes("api.magpieExec("), "the App must call POST /magpie/exec, not only the passthrough")
+  assert.ok(viewModel.includes("refreshCcAfterMutation()"), "provider writes must refresh their catalog")
+  assert.ok(viewModel.includes('val mutating = setOf("sync"'), "a successful magpie write should refresh only state-changing commands")
+  assert.ok(cc.includes("vm.ccCatalogReady"), "a typed /cc must wait for the complete server catalog")
+  assert.ok(viewModel.includes("ccCatalogReady = true"), "a failed catalog read must release a pending /cc request")
+  assert.ok(cc.includes("vm.ccCatalogError"), "a failed catalog read must not resolve against stale rows")
+})
+
+/**
  * The App can only reach what ApiClient.kt names, and the bot only answers what api.ts
  * routes. No compiler looks across that boundary, so these scans keep the two lists aligned:
  * a path the App calls that the server no longer routes fails here, and a server capability
@@ -357,8 +380,60 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
   for (const screen of titled) {
     const source = readFileSync(`${UI_DIR}/${screen}`, "utf8")
     assert.ok(source.includes("ScreenHeader("), `${screen} must use the shared page header`)
-    assert.ok(!/Text\("[^"]+", style = MaterialTheme\.typography\.titleLarge\)/.test(source), `${screen} still has a detached page title`)
+    // Dialog titles also use titleLarge. Only the page body before the first dialog
+    // should be checked: a detached page title there duplicates ScreenHeader.
+    const pageBody = source.split("AlertDialog(", 1)[0]!
+    assert.ok(
+      !/Text\("[^"]+", style = MaterialTheme\.typography\.titleLarge\)/.test(pageBody),
+      `${screen} still has a detached page title`,
+    )
   }
+})
+
+/**
+ * Media is the part a static Kotlin gate cannot exercise. Pin the pieces whose absence is
+ * invisible in source (they still compile): all reply kinds are routed, failures explain
+ * themselves and can retry, and voice/video open in the built-in player instead of depending
+ * on whichever external app a phone happens to have.
+ */
+test("the App renders every reply medium and explains failures", () => {
+  const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  for (const route of ['item.kind == "image" -> ImageMedia', 'item.kind == "video" -> VideoMedia', "else -> MediaCard"]) {
+    assert.ok(chat.includes(route), `AssistantMedia lost a reply kind: ${route}`)
+  }
+  assert.ok(chat.includes("MediaPlayerDialog("), "voice/video needs the built-in player")
+  assert.ok(chat.includes('media.kind == "audio"'), "the player should accept the audio kind alias")
+  assert.ok(chat.includes("图片加载失败，重试"), "a failed image needs an explicit retry action")
+  assert.ok(chat.includes("vm.mediaErrorDetails[key]"), "the bubble must show why media failed")
+  assert.ok(viewModel.includes("mediaErrorDetails"), "media failure details must survive recomposition")
+  assert.ok(viewModel.includes("mediaErrors = mediaErrors - key"), "a retry must clear the previous failure")
+  assert.ok(viewModel.includes("if (retry) {"), "loadMediaImage must have a retry path")
+})
+
+test("a media decodes error stays visible in the player instead of closing the dialog", () => {
+  const player = readFileSync(`${UI_DIR}/MediaPlayerDialog.kt`, "utf8")
+  assert.ok(player.includes("playbackError"), "the player needs a visible playback error state")
+  assert.ok(player.includes("无法播放此媒体"), "a failed decode must explain itself to the user")
+  assert.ok(player.includes("用其他应用打开"), "the player must keep the external-open escape hatch")
+  assert.ok(
+    !/VideoPane\(file, onDismiss\)|AudioPane\(file, title, onDismiss\)/.test(player),
+    "a decoder error must not be treated as a request to close the dialog",
+  )
+})
+
+test("an APK update resumes after the install-permission page", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  assert.ok(viewModel.includes("pendingInstallApk"), "the verified APK has to survive the Settings trip")
+  assert.ok(viewModel.includes("resumePendingInstall()"), "returning to the foreground must continue installation")
+  assert.ok(
+    /if \(!installSettingsOpened\)/.test(viewModel),
+    "a denied permission must not reopen Settings on every foreground return",
+  )
+  assert.ok(
+    viewModel.includes("授权并返回后会自动继续安装"),
+    "the permission prompt has to say installation resumes automatically",
+  )
 })
 
 /**
@@ -500,10 +575,10 @@ test("the Android source gate rejects a chat-writing catch that swallows cancell
 
 /**
  * Picking a video or a disk image used to hand readBytes() a stream of unknown length: the file
- * and its Base64 both land on the heap, so the 15MB limit was reported only after the process had
- * been killed. The gate keeps that idiom out of the App.
+ * and its Base64 both land on the heap, so large uploads could kill the process before any limit
+ * was reported. The gate keeps that idiom out of the App; attachments now stream to disk.
  */
-test("the Android source gate rejects an uncapped stream read", () => {
+test("the Android source gate rejects reading a content stream into memory", () => {
   const dir = mkdtempSync(join(tmpdir(), "agentbot-stream-"))
   try {
     const pkg = join(dir, "com/agentbot/app/data")
@@ -518,18 +593,18 @@ test("the Android source gate rejects an uncapped stream read", () => {
     writeFileSync(join(pkg, "Bad.kt"), violation)
     const bad = runChecker(dir)
     assert.equal(bad.status, 1, "an uncapped stream read must fail the gate")
-    assert.match(bad.output, /Bad\.kt:\d+:.*without a cap/)
+    assert.match(bad.output, /Bad\.kt:\d+:.*stream it to disk instead/)
 
     const capped = [
       "package com.agentbot.app.data",
       "",
-      "fun load(resolver: android.content.ContentResolver, uri: android.net.Uri, limit: Int): ByteArray =",
-      "    resolver.openInputStream(uri)!!.use { readCapped(it, limit) }",
+      "fun save(resolver: android.content.ContentResolver, uri: android.net.Uri, out: java.io.OutputStream) =",
+      "    resolver.openInputStream(uri)!!.use { it.copyTo(out) }",
       "",
     ].join("\n")
     writeFileSync(join(pkg, "Bad.kt"), capped)
     const passed = runChecker(dir)
-    assert.equal(passed.status, 0, `a capped read must pass:\n${passed.output}`)
+    assert.equal(passed.status, 0, `a streamed copy must pass:\n${passed.output}`)
 
     // a File receiver already knows its size; sharing cached bytes out of it is not the bug
     writeFileSync(
@@ -729,28 +804,23 @@ test("the App retries in plaintext whenever the server stops accepting its key",
   assert.match(server, /`解密请求体失败[^`]*`/, "the server has to keep naming the decrypt failure the App falls back past")
 })
 
-/**
- * The App is the only place a user learns their pick was too big. The server does not reject an
- * oversized attachment — it answers with a note that the file was left out — so a cap the App does
- * not share means paying for the upload and then wondering where the image went.
- */
-test("the App refuses attachments exactly where the server would drop them", () => {
+test("the App gives large streamed uploads a long write timeout", () => {
+  const client = readFileSync(CLIENT_SOURCE, "utf8")
+  assert.match(client, /\.writeTimeout\(30, TimeUnit\.MINUTES\)/)
+  assert.match(client, /asRequestBody\(att\.mime\.toMediaTypeOrNull\(\)\)/)
+})
+
+test("the App and server keep only the attachment count cap", () => {
   const store = readFileSync(LOCALSTORE_SOURCE, "utf8")
   const input = readFileSync("src/attachmentInput.ts", "utf8")
-  const kotlinMb = (name: string): number => Number(new RegExp(`const val ${name} = (\\d+) \\* 1024 \\* 1024`).exec(store)?.[1])
-  const serverMb = (name: string): number => Number(new RegExp(`export const ${name} = (\\d+) \\* 1024 \\* 1024`).exec(input)?.[1])
-  assert.ok(kotlinMb("MAX_TOTAL_BYTES") > 0 && serverMb("MAX_ATTACH_TOTAL_BYTES") > 0, "the caps must stay MB literals")
-  assert.equal(kotlinMb("MAX_TOTAL_BYTES"), serverMb("MAX_ATTACH_TOTAL_BYTES"), "the queued-total cap drifted from the server")
-  assert.equal(kotlinMb("MAX_FILE_BYTES"), serverMb("MAX_ATTACH_FILE_BYTES"), "the per-file cap drifted from the server")
-  // The picker reads behind this cap, so no file the server would not attach is ever uploaded.
-  assert.match(store, /val limit = AttachmentLimits\.MAX_FILE_BYTES/)
-  // An empty pick encodes to an empty data field, and the server answers that with a 400 for the
-  // whole request — a failed send keeps its attachments staged, so one placeholder file in the
-  // strip then broke every message the user tried to send afterwards.
-  assert.match(store, /if \(bytes\.isEmpty\(\)\)/)
-  assert.match(
-    readFileSync("src/apiTasks.ts", "utf8"),
-    /附件缺少 name 或 data/,
-    "the server has to keep rejecting the empty attachment the App now refuses",
-  )
+  assert.match(store, /const val MAX_COUNT = 4/)
+  for (const removed of ["MAX_TOTAL_BYTES", "MAX_FILE_BYTES", "MAX_VIDEO_BYTES", "attachmentLimit(", "readCapped("]) {
+    assert.doesNotMatch(store, new RegExp(removed.replace("(", "\\(")), `${removed} must stay removed from the App`)
+  }
+  for (const removed of ["MAX_ATTACH_TOTAL_BYTES", "MAX_ATTACH_FILE_BYTES"]) {
+    assert.doesNotMatch(input, new RegExp(removed), `${removed} must stay removed from the server`)
+  }
+  // An empty pick is still refused before upload; no byte cap is imposed beside it.
+  assert.match(store, /target\.length\(\) == 0L/)
+  assert.match(store, /resolver\.openInputStream\(uri\)\?\.use/)
 })

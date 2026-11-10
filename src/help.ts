@@ -7,7 +7,7 @@ export const HELP = `🤖 *AI 私人助手 · 功能菜单*
 
 *引擎与模型*
 • \`/agent\` 切换 Agent 引擎（推荐 OpenCode）
-• \`/model\` 切换模型（\`/model default\` 恢复默认） · \`/agents\` 安装/卸载 CLI
+• \`/model\` 切换模型（\`/model default\` 清除本会话选择） · \`/agents\` 安装/卸载 CLI
 • \`/dir\` 设置本会话 CLI 工作目录 · \`/status\` 运行状态
 • \`/usage\` 使用统计 · \`/report\` 每日报告 · \`/history\` 任务历史 · \`/export\` 导出历史
 
@@ -41,7 +41,7 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/agents install <id>\` - 通过 npm/pip 安装内置 Agent CLI
 • \`/agents update <id>\` - 更新由 Bot 安装的 CLI（需确认）
 • \`/agents uninstall <id>\` - 卸载由 Bot 安装的 CLI（需确认）
-• \`/model\` - 查看或切换当前引擎的底层模型；\`/model default\` 取消本会话选择、恢复默认模型
+• \`/model\` - 查看或切换当前引擎的底层模型；\`/model default\` 取消本会话选择，之后由引擎自身配置决定
 • \`/dir\` - 查看本会话 CLI 工作目录；\`/dir <路径>\` 切换（支持 \`~\` 与相对路径），\`/dir reset\` 恢复默认
 • \`/new\` 或 \`/reset\` - 重置会话上下文
 • \`/stop\` - 立即停止当前正在执行的任务

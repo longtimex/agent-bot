@@ -315,6 +315,28 @@ test("runClientSetup accepts Android alone and writes a usable pairing configura
   }
 })
 
+test("the Android wizard re-asks when API_BIND is a port", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-setup-android-port-"))
+  try {
+    const envPath = join(dir, ".env")
+    const { deps, pending, lines } = harness(
+      envPath,
+      ["2", "3080", "0.0.0.0", "3080", "http://192.168.1.10:3080", "y"],
+      fakeFetch(undefined, []),
+    )
+
+    const result = await runClientSetup(deps)
+    assert.equal(result.ok, true)
+    assert.equal(pending.length, 0)
+    assert.ok(lines.some((line) => line.includes("这是端口号")), "the hint must name the mistaken field")
+    const env = readFileSync(envPath, "utf8")
+    assert.match(env, /^API_BIND=0\.0\.0\.0$/m)
+    assert.match(env, /^API_PORT=3080$/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("runClientSetup continues into the optional tool stage after saving the client", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-setup-tools-"))
   try {

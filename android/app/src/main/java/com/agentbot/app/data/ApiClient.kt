@@ -15,8 +15,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.IOException
@@ -118,9 +120,14 @@ class ApiClient {
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 16 })
         .build()
 
-    /** Agent installs, git pulls and builds can take many minutes; only those calls use this client. */
+    /**
+     * Attachment uploads stream from disk and are bounded by the phone's uplink, not by a
+     * short socket read timeout. Agent installs, git pulls and builds also take minutes,
+     * so those long-running calls share this client.
+     */
     private val longHttp: OkHttpClient = http.newBuilder()
         .readTimeout(30, TimeUnit.MINUTES)
+        .writeTimeout(30, TimeUnit.MINUTES)
         .build()
 
     private fun url(connection: Connection, path: String): String =
@@ -350,29 +357,63 @@ class ApiClient {
         engine: String? = null,
         model: String? = null,
     ): Task {
-        val body = buildJsonObject {
-            put("text", text)
-            // Per-task overrides: the session default stays untouched.
-            engine?.takeIf { it.isNotBlank() }?.let { put("engine", it) }
-            model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
-            if (attachments.isNotEmpty()) {
-                put(
-                    "attachments",
-                    buildJsonArray {
-                        attachments.forEach { att ->
-                            add(buildJsonObject {
-                                put("name", att.name)
-                                put("mime", att.mime)
-                                put("data", att.base64)
-                            })
-                        }
-                    },
-                )
-            }
+        // With files, POST /task is multipart so the picked bytes stream from disk. The
+        // JSON form stays for text-only requests and for servers that predate multipart.
+        val res = if (attachments.isEmpty()) {
+            send(connection, "POST", "/task", buildJsonObject {
+                put("text", text)
+                engine?.takeIf { it.isNotBlank() }?.let { put("engine", it) }
+                model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
+            })
+        } else {
+            submitMultipart(connection, text, attachments, engine, model)
         }
-        val res = send(connection, "POST", "/task", body)
         val task = res["task"]?.jsonObject ?: throw ApiException(500, "响应缺少 task 字段")
         return json.decodeFromJsonElement(Task.serializer(), task)
+    }
+
+    /** Streams files with OkHttp's multipart writer; no file is buffered as ByteArray/Base64. */
+    private suspend fun submitMultipart(
+        connection: Connection,
+        text: String,
+        attachments: List<PendingAttachment>,
+        engine: String?,
+        model: String?,
+    ): JsonObject = withContext(Dispatchers.IO) {
+        val encKey = connection.encKey?.takeIf { it.isNotBlank() && it != refusedEncKey }
+        // Encryption wraps one JSON string, so multipart uploads stay plaintext exactly
+        // like SSE, media and backups. Document that in Settings so the switch is honest.
+        val multipart = okhttp3.MultipartBody.Builder().setType(okhttp3.MultipartBody.FORM)
+            .addFormDataPart("text", text)
+            .addFormDataPart("attachments", "true")
+            .apply {
+                engine?.takeIf { it.isNotBlank() }?.let { addFormDataPart("engine", it) }
+                model?.takeIf { it.isNotBlank() }?.let { addFormDataPart("model", it) }
+                attachments.forEachIndexed { index, att ->
+                    val body = att.file.asRequestBody(att.mime.toMediaTypeOrNull())
+                    addFormDataPart("file$index", att.name, body)
+                    addFormDataPart("name$index", att.name)
+                    addFormDataPart("mime$index", att.mime)
+                }
+            }
+            .build()
+        val builder = Request.Builder()
+            .url(url(connection, "/task"))
+            .header("Authorization", "Bearer ${connection.token}")
+            .post(multipart)
+        if (encKey != null) {
+            // The server knows this endpoint's file parts are not encrypted; sending the
+            // header would make it try to decrypt a multipart body and answer 400.
+            builder.tag(EncKeyTag::class.java, EncKeyTag(encKey))
+        }
+        openCall(builder.build(), longHttp).use { res ->
+            observeServerClock(res)
+            val body = res.body?.string().orEmpty()
+            if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, body))
+            runCatching { json.parseToJsonElement(body).jsonObject }.getOrElse {
+                throw ApiException(500, "服务器返回的不是 JSON")
+            }
+        }
     }
 
     suspend fun task(connection: Connection, id: String): Task {
@@ -481,6 +522,9 @@ class ApiClient {
                     part.outputStream().use { out -> input.copyTo(out) }
                     // Renaming keeps a dropped connection's half file out of the cache: the caller
                     // treats any existing file as complete and would never re-download it.
+                    // Android refuses renameTo() when the destination exists on some filesystems,
+                    // which is exactly the case after an evicted entry is fetched again.
+                    dest.delete()
                     if (!part.renameTo(dest)) throw ApiException(500, "无法写入媒体缓存")
                     dest
                 } finally {
@@ -927,6 +971,22 @@ class ApiClient {
         }
         val text = executeEncryptedFallback(connection, "POST", "/magpie/run", body, client = longHttp)
         return json.decodeFromJsonElement(MagpieRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
+    /** Runs one server-listed command; its name and target are validated again by the bot. */
+    suspend fun magpieExec(
+        connection: Connection,
+        name: String,
+        target: String? = null,
+        confirm: Boolean = false,
+    ): MagpieExecResult {
+        val body = buildJsonObject {
+            put("name", name)
+            target?.takeIf { it.isNotBlank() }?.let { put("target", it) }
+            if (confirm) put("confirm", true)
+        }
+        val text = executeEncryptedFallback(connection, "POST", "/magpie/exec", body, client = longHttp)
+        return json.decodeFromJsonElement(MagpieExecResult.serializer(), json.parseToJsonElement(text))
     }
 
     /**

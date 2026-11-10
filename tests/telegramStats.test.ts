@@ -8,7 +8,7 @@ interface Button {
   callback_data?: string
 }
 
-function panelsWithHistory(total: number): TelegramStatsPanels {
+function panelsWithHistory(total: number, failed = false): TelegramStatsPanels {
   // Newest first, exactly like the store, and long enough that a 50-entry window cannot
   // fit one Telegram message
   const entries: HistoryEntry[] = Array.from({ length: total }, (_, index) => ({
@@ -16,7 +16,8 @@ function panelsWithHistory(total: number): TelegramStatsPanels {
     prompt: `记录${index + 1}-${"x".repeat(90)}`,
     engine: "codex",
     ms: 1_200,
-    outcome: "ok" as const,
+    outcome: failed ? ("failed" as const) : ("ok" as const),
+    ...(failed ? { errorCode: "ENGINE_UNAVAILABLE" as const } : {}),
   }))
   const deps = {
     agents: { registry: { label: () => "Codex CLI" } },
@@ -66,4 +67,11 @@ test("history panel clamps a stale offset after records are cleared", () => {
   assert.match(panel.text, /第 3-3 条 \/ 共 3 条/)
   assert.match(panel.text, /记录3-/)
   assert.ok(!buttons(panel).some((button) => button.text.includes("更早")))
+})
+
+
+test("history panel exposes the stable failure code next to the status", () => {
+  const panel = panelsWithHistory(1, true).historyPanel("tg:1", 1)
+  assert.match(panel.text, /❌ 失败/)
+  assert.match(panel.text, /ENGINE_UNAVAILABLE/)
 })

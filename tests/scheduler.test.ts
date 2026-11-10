@@ -54,7 +54,6 @@ test("parseScheduleAdd resolves custom CLI engines and models", () => {
     resolveEngine: (raw: string) => (raw === "claude" ? "claude" : raw === "opencode" ? "opencode" : undefined),
     label: (engine: string) => (engine === "claude" ? "Claude Code" : engine),
     resolveModel: (engine: string, raw: string) => (engine === "claude" ? (raw === "sonnet" ? "sonnet" : undefined) : undefined),
-    defaultModel: () => undefined,
   }
 
   const claude = parseScheduleAdd("--engine claude --model sonnet 30m 分析", defaults, now, undefined, resolver)
@@ -77,7 +76,6 @@ test("parseScheduleAdd does not carry another engine's CLI model across --engine
     resolveEngine: (raw: string) => (["claude", "codex"].includes(raw) ? raw : undefined),
     label: (engine: string) => engine,
     resolveModel: (_engine: string, raw: string) => (raw === "sonnet" ? "sonnet" : undefined),
-    defaultModel: (engine: string) => (engine === "codex" ? "gpt-5" : engine === "claude" ? "sonnet" : undefined),
   }
   const claudeDefaults: ScheduleDefaults = { engine: "claude", cliModel: "sonnet" }
 
@@ -87,12 +85,12 @@ test("parseScheduleAdd does not carry another engine's CLI model across --engine
 
   const switched = parseScheduleAdd("--engine codex 30m 检查", claudeDefaults, now, undefined, resolver)
   assert.equal(switched.engine, "codex")
-  assert.equal(switched.cliModel, "gpt-5")
+  assert.equal(switched.cliModel, undefined)
 
   const toOpencode = parseScheduleAdd("--engine opencode 30m 检查", claudeDefaults, now, undefined, resolver)
   assert.equal(toOpencode.engine, "opencode")
   assert.equal(toOpencode.cliModel, undefined)
-  assert.equal(toOpencode.model?.label, "Gemini 3.8 Flash")
+  assert.equal(toOpencode.model, undefined)
 })
 
 test("parseScheduleAdd rejects invalid targets", () => {
@@ -111,7 +109,6 @@ test("scheduleTargetLabel describes the run target", () => {
     resolveEngine: () => undefined,
     label: (engine: string) => (engine === "claude" ? "Claude Code" : engine),
     resolveModel: () => undefined,
-    defaultModel: () => undefined,
   }
   assert.equal(scheduleTargetLabel({ engine: "claude", cliModel: "sonnet" }, resolver), "Claude Code / sonnet")
 })
@@ -511,8 +508,6 @@ test("parseScheduleAdd keeps a chat default that comes from model passthrough", 
     resolveEngine: (raw: string) => (raw === "demo" ? "demo" : undefined),
     label: (engine: string) => engine,
     resolveModel: (_engine: string, raw: string) => (raw === "router" ? "router" : undefined),
-    // no declared default for the engine, yet the chat runs on a passthrough model
-    defaultModel: () => undefined,
   }
   const chatDefaults: ScheduleDefaults = { engine: "demo", cliModel: "router" }
 
@@ -523,7 +518,7 @@ test("parseScheduleAdd keeps a chat default that comes from model passthrough", 
   const switched = parseScheduleAdd("--engine demo 30m 跑一次", { engine: "opencode" }, now, undefined, resolver)
   assert.equal(switched.engine, "demo")
   assert.equal(switched.cliModel, undefined)
-  assert.equal(scheduleTargetLabel(switched, resolver), "demo / CLI 默认")
+  assert.equal(scheduleTargetLabel(switched, resolver), "demo / 由 CLI 决定")
 })
 
 test("ScheduleService pauses a due task whose owner lost bot access", async () => {

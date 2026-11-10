@@ -7,9 +7,9 @@ import type { ApiRequestContext } from "../src/apiCore.js"
 import { routeTasks, type TaskRouteDeps } from "../src/apiTaskRoutes.js"
 import type { ApiTaskManager } from "../src/apiTasks.js"
 
-function makeCtx(method: string, path: string, segments: string[]): ApiRequestContext {
+function makeCtx(method: string, path: string, segments: string[], contentType?: string): ApiRequestContext {
   return {
-    req: {} as IncomingMessage,
+    req: { headers: contentType ? { "content-type": contentType } : {} } as IncomingMessage,
     res: {} as ServerResponse,
     url: new URL(`http://localhost/api/v1${path}`),
     method,
@@ -28,6 +28,11 @@ function makeDeps() {
     submit: (text: string, engine?: string, model?: string) => {
       calls.push(`submit:${text}:${engine ?? ""}:${model ?? ""}`)
       return { id: "t1", text, engine: engine ?? "opencode", model }
+    },
+    parseMultipartTask: async () => ({ text: "multipart", failed: [] }),
+    submitSaved: (text: string, engine?: string, model?: string) => {
+      calls.push(`submitSaved:${text}:${engine ?? ""}:${model ?? ""}`)
+      return { id: "t2", text, engine: engine ?? "opencode", model }
     },
     get: () => undefined,
     clearQueue: () => { calls.push("clear"); return { cleared: [] } },
@@ -91,6 +96,10 @@ function makeRetryDeps(source: { text: string; savedAttachments?: Array<{ name: 
       submitted.push({ text, attachments })
       return { id: "t1" }
     },
+    submitSaved: (text: string, _engine?: string, _model?: string, attachments?: unknown) => {
+      submitted.push({ text, attachments })
+      return { id: "t1" }
+    },
     list: () => [],
     parseAttachments: () => undefined,
     clearQueue: () => ({ cleared: [] }),
@@ -130,4 +139,12 @@ test("retrying an attachments-only task after pruning answers 410", async () => 
     /无法只凭空提示词重试/,
   )
   assert.equal(h.submitted.length, 0, "an empty prompt must never reach an engine")
+})
+
+test("multipart task requests route through submitSaved", async () => {
+  const h = makeDeps()
+  const ctx = makeCtx("POST", "/task", ["task"], "multipart/form-data; boundary=test-boundary")
+  assert.equal(await routeTasks(h.deps, ctx, "task", undefined, undefined, []), true)
+  assert.deepEqual(h.calls, ["submitSaved:multipart::"])
+  assert.equal(h.responses[0]?.status, 202)
 })

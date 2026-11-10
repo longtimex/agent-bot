@@ -8,6 +8,7 @@ import {
   FEISHU_OPEN_ID_RE,
   isConcreteApiBind,
   isLoopbackApiBind,
+  isPortLikeApiBind,
   parseApiPublicUrl,
 } from "./config.js"
 
@@ -452,6 +453,10 @@ export async function runAndroidSetup(deps: SetupDeps): Promise<SetupResult> {
       await deps.ask(`API 监听地址 API_BIND（反向代理填 127.0.0.1） [${suggestedBind}]：`)
     ).trim()
     bind = input || suggestedBind
+    if (isPortLikeApiBind(bind)) {
+      deps.print("⚠️ 这是端口号，不是监听地址。端口请在下一项 API_PORT 填写。")
+      continue
+    }
     if (bind && !/[\s/?#]/.test(bind)) break
     deps.print("⚠️ 监听地址格式不正确，请填写 IP 或主机名，例如 0.0.0.0、127.0.0.1、192.168.1.10。")
   }

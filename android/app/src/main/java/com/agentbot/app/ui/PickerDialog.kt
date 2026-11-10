@@ -59,7 +59,7 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                         secondary = when {
                             !agent.installed -> "未安装"
                             agent.id == vm.session?.engine -> "当前引擎"
-                            else -> agent.desc ?: agent.defaultModel ?: agent.id
+                            else -> agent.desc ?: agent.id
                         },
                         selected = agent.id == vm.session?.engine,
                         onClick = {
@@ -99,8 +99,8 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                 }
                 item {
                     PickerRow(
-                        primary = "恢复默认模型",
-                        secondary = "取消本会话的模型选择",
+                        primary = "清除本会话模型选择",
+                        secondary = "之后由引擎自身配置决定",
                         selected = false,
                         onClick = {
                             vm.resetModel()

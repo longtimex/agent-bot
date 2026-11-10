@@ -24,7 +24,7 @@ export const AVAILABLE_MODELS: Record<string, ModelInfo> = {
     providerID: "custom",
     modelID: "gemini-3.8-flash-high",
     label: "Gemini 3.8 Flash",
-    desc: "响应极快、上下文大（默认均衡模型）",
+    desc: "响应极快、上下文大（均衡模型）",
   },
   argon: {
     providerID: "custom",

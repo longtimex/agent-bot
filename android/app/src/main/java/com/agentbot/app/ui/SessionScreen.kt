@@ -111,7 +111,7 @@ fun SessionScreen(vm: AppViewModel) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            "任务执行中：恢复默认模型、新建会话与改动工作目录需要先停止任务；切换引擎不受影响。",
+                            "任务执行中：清除模型选择、新建会话与改动工作目录需要先停止任务；切换引擎不受影响。",
                             color = TextSecondary,
                             style = MaterialTheme.typography.labelMedium,
                             modifier = Modifier.weight(1f),
@@ -133,7 +133,7 @@ fun SessionScreen(vm: AppViewModel) {
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SecondaryButton(
-                        text = "恢复默认模型",
+                        text = "清除模型选择",
                         modifier = Modifier.weight(1f),
                         onClick = vm::resetModel,
                     )

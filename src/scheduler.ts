@@ -74,7 +74,6 @@ export interface ScheduleEngineResolver {
   resolveEngine(raw: string): string | undefined
   label(engine: string): string
   resolveModel(engine: string, raw: string): string | undefined
-  defaultModel(engine: string): string | undefined
 }
 
 interface ScheduleFile {
@@ -154,13 +153,10 @@ export function parseScheduleAdd(
     }
   }
 
-  if (engine === "opencode") {
-    model ??= modelFromInfo("gemini")
-    cliModel = undefined
-  } else {
-    cliModel ??= resolver?.defaultModel(engine) ?? (engine === "qoder" ? "Qwen3.8-Flash" : undefined)
-    model = undefined
-  }
+  // No model is attached unless the chat explicitly selected one or the task
+  // passed --model. The engine's own configuration is the default.
+  if (engine === "opencode") cliModel = undefined
+  else model = undefined
 
   if (!rest) {
     throw new Error("用法：`/schedule add 30m 检查服务器`，可加 `--engine qoder` 或 `--model deepseek`。")
@@ -185,11 +181,9 @@ export function scheduleTargetLabel(
   task: Pick<ScheduledTask, "engine" | "model" | "cliModel">,
   resolver?: ScheduleEngineResolver,
 ): string {
-  if (task.engine === "opencode") return `OpenCode / ${task.model?.label ?? "默认模型"}`
+  if (task.engine === "opencode") return `OpenCode / ${task.model?.label ?? "由引擎决定"}`
   const label = resolver?.label(task.engine) ?? (task.engine === "qoder" ? "Qoder" : task.engine)
-  const model =
-    task.cliModel ?? resolver?.defaultModel(task.engine) ?? (task.engine === "qoder" ? "Qwen3.8-Flash" : undefined)
-  return `${label} / ${model ?? "CLI 默认"}`
+  return `${label} / ${task.cliModel ?? "由 CLI 决定"}`
 }
 
 function sanitizeModel(value: unknown): ScheduledModel | undefined {
@@ -323,8 +317,8 @@ export class ScheduleStore {
           dueAt: dueAt!,
           createdAt: Number.isFinite(item.createdAt) ? item.createdAt! : dueAt!,
           engine,
-          model: engine === "opencode" ? (model ?? modelFromInfo("gemini")) : undefined,
-          cliModel: engine !== "opencode" ? (cliModel ?? (engine === "qoder" ? "Qwen3.8-Flash" : undefined)) : undefined,
+          model: engine === "opencode" ? model : undefined,
+          cliModel: engine !== "opencode" ? cliModel : undefined,
           repeat: sanitizeRepeat(item.repeat),
           paused: item.paused === true,
           // A persisted runningAt means the bot died mid-run; clear it so the task runs again

@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -69,6 +70,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -122,6 +124,7 @@ import androidx.core.content.FileProvider
 import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.PendingAttachment
 import com.agentbot.app.data.TaskMedia
+import com.agentbot.app.data.mediaMime
 import com.agentbot.app.ui.theme.AccentSoft
 import com.agentbot.app.ui.theme.AppRadius
 import com.agentbot.app.ui.theme.Border
@@ -131,7 +134,6 @@ import com.agentbot.app.ui.theme.SurfaceHigh
 import com.agentbot.app.ui.theme.TextSecondary
 import com.agentbot.app.ui.theme.TextTertiary
 import java.io.File
-import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -924,6 +926,14 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                                         color = MaterialTheme.colorScheme.error,
                                         style = MaterialTheme.typography.bodyMedium,
                                     )
+                                    message.errorCode?.takeIf { it.isNotBlank() && it != "UNKNOWN" }?.let { code ->
+                                        Text(
+                                            "错误码：$code",
+                                            color = TextSecondary,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.padding(top = 4.dp),
+                                        )
+                                    }
                                 }
                                 status == "cancelled" -> Text(
                                     "已停止",
@@ -931,6 +941,14 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                                 else -> MarkdownText(message.text)
+                            }
+                            message.engineNote?.takeIf { it.isNotBlank() }?.let { note ->
+                                Text(
+                                    note,
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(top = 6.dp),
+                                )
                             }
                         }
                     }
@@ -1015,8 +1033,90 @@ private fun AssistantMedia(vm: AppViewModel, taskId: String, media: List<TaskMed
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         media.forEach { item ->
-            if (item.kind == "image") ImageMedia(vm, taskId, item) else MediaCard(vm, taskId, item)
+            when {
+                item.kind == "image" -> ImageMedia(vm, taskId, item)
+                item.kind == "video" -> VideoMedia(vm, taskId, item)
+                else -> MediaCard(vm, taskId, item)
+            }
         }
+    }
+}
+
+/** Videos get a large play surface; audio/files keep the compact card. */
+@Composable
+private fun VideoMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
+    var playbackFile by remember { mutableStateOf<File?>(null) }
+    var loading by remember { mutableStateOf(false) }
+
+    fun playInApp() {
+        if (loading) return
+        loading = true
+        vm.withMediaFile(
+            taskId,
+            media,
+            onReady = { file ->
+                loading = false
+                playbackFile = file
+            },
+            onFailure = { loading = false },
+        )
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .widthIn(max = 300.dp)
+            .fillMaxWidth()
+            .clickable { playInApp() },
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(156.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (loading) {
+                    CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.dp)
+                } else {
+                    Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.9f)) {
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = "播放视频",
+                            tint = Color.Black,
+                            modifier = Modifier.padding(10.dp).size(28.dp),
+                        )
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            ) {
+                Icon(Icons.Filled.Movie, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+                    Text(media.name.ifEmpty { media.label }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("视频 · ${media.sizeLabel} · 点击播放", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Filled.OpenInNew, contentDescription = "用其他应用打开", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp))
+                }
+            }
+        }
+    }
+    playbackFile?.let { file ->
+        MediaPlayerDialog(
+            file = file,
+            mime = mediaMime(media.name).takeIf { it.startsWith("video/") } ?: "video/mp4",
+            title = media.name.ifEmpty { media.label },
+            onOpenExternal = {
+                playbackFile = null
+                vm.openMedia(taskId, media)
+            },
+            onDismiss = { playbackFile = null },
+        )
     }
 }
 
@@ -1025,6 +1125,7 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
     val key = "$taskId/${media.index}"
     val bitmap = vm.mediaImages[key]
     val failed = key in vm.mediaErrors
+    val failure = vm.mediaErrorDetails[key]
     var viewing by remember { mutableStateOf(false) }
     LaunchedEffect(key) { vm.loadMediaImage(taskId, media) }
     if (bitmap != null) {
@@ -1058,11 +1159,22 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
             contentAlignment = Alignment.Center,
         ) {
             if (failed) {
-                QuietButton(
-                    text = "图片加载失败，重试",
-                    icon = Icons.Filled.Refresh,
-                    onClick = { vm.loadMediaImage(taskId, media, retry = true) },
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    QuietButton(
+                        text = "图片加载失败，重试",
+                        icon = Icons.Filled.Refresh,
+                        onClick = { vm.loadMediaImage(taskId, media, retry = true) },
+                    )
+                    failure?.takeIf { it.isNotBlank() }?.let { reason ->
+                        Text(
+                            reason.take(120),
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 4.dp, start = 8.dp, end = 8.dp),
+                        )
+                    }
+                }
             } else {
                 CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
             }
@@ -1072,13 +1184,40 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
 
 @Composable
 private fun MediaCard(vm: AppViewModel, taskId: String, media: TaskMedia) {
+    var playbackFile by remember { mutableStateOf<File?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    val playable = media.kind == "voice" || media.kind == "audio" || media.kind == "video"
+    val mime = run {
+        val byName = mediaMime(media.name)
+        when {
+            byName != "application/octet-stream" -> byName
+            media.kind == "voice" || media.kind == "audio" -> "audio/mp4"
+            media.kind == "video" -> "video/mp4"
+            else -> byName
+        }
+    }
+
+    fun playInApp() {
+        if (loading) return
+        loading = true
+        vm.withMediaFile(
+            taskId,
+            media,
+            onReady = { file ->
+                loading = false
+                playbackFile = file
+            },
+            onFailure = { loading = false },
+        )
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
             .widthIn(max = 300.dp)
             .fillMaxWidth()
-            .clickable { vm.openMedia(taskId, media) },
+            .clickable { if (playable) playInApp() else vm.openMedia(taskId, media) },
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1107,20 +1246,36 @@ private fun MediaCard(vm: AppViewModel, taskId: String, media: TaskMedia) {
                     style = MaterialTheme.typography.labelSmall,
                 )
             }
-            IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.OpenInNew,
-                    contentDescription = "打开",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp),
-                )
+            if (loading) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.OpenInNew,
+                        contentDescription = "用其他应用打开",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
+    }
+    playbackFile?.let { file ->
+        MediaPlayerDialog(
+            file = file,
+            mime = mime,
+            title = media.name.ifEmpty { media.label },
+            onOpenExternal = {
+                playbackFile = null
+                vm.openMedia(taskId, media)
+            },
+            onDismiss = { playbackFile = null },
+        )
     }
 }
 
 private fun mediaIcon(kind: String) = when (kind) {
-    "voice" -> Icons.Filled.GraphicEq
+    "voice", "audio" -> Icons.Filled.GraphicEq
     "video" -> Icons.Filled.Movie
     "image" -> Icons.Filled.Image
     else -> Icons.Filled.Description
@@ -1178,9 +1333,12 @@ private fun AttachmentStrip(attachments: List<PendingAttachment>, onRemove: (Int
 @Composable
 private fun AttachmentChip(att: PendingAttachment, onRemove: () -> Unit) {
     val isImage = att.mime.startsWith("image/", ignoreCase = true)
-    // Hash key: comparing multi-MB base64 strings on every keystroke would be wasteful.
-    val thumb by produceState<ImageBitmap?>(initialValue = null, key1 = att.base64.hashCode()) {
-        value = if (isImage) withContext(Dispatchers.IO) { decodeThumbnail(att.base64) } else null
+    val isVideo = att.mime.startsWith("video/", ignoreCase = true)
+    val isAudio = att.mime.startsWith("audio/", ignoreCase = true)
+    val isPdf = att.mime.equals("application/pdf", ignoreCase = true)
+    // The cache file is stable across recompositions and never loaded into a String.
+    val thumb by produceState<ImageBitmap?>(initialValue = null, key1 = att.path, key2 = att.sizeBytes) {
+        value = if (isImage) withContext(Dispatchers.IO) { decodeThumbnail(att.file) } else null
     }
     Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp)) {
         Row(
@@ -1206,12 +1364,15 @@ private fun AttachmentChip(att: PendingAttachment, onRemove: () -> Unit) {
                 ) {
                     Icon(Icons.Filled.Image, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
                 }
-                else -> Icon(
-                    Icons.Filled.AttachFile,
-                    contentDescription = null,
-                    tint = TextSecondary,
-                    modifier = Modifier.size(18.dp),
-                )
+                else -> {
+                    val icon = when {
+                        isVideo -> Icons.Filled.Movie
+                        isAudio -> Icons.Filled.GraphicEq
+                        isPdf -> Icons.Filled.Description
+                        else -> Icons.Filled.AttachFile
+                    }
+                    Icon(icon, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                }
             }
             Column(modifier = Modifier.padding(start = 8.dp)) {
                 Text(
@@ -1234,22 +1395,25 @@ private fun AttachmentChip(att: PendingAttachment, onRemove: () -> Unit) {
     }
 }
 
-/** Downsampled preview decoded off the main thread; the full-size bytes never reach the UI. */
-private fun decodeThumbnail(base64: String): ImageBitmap? = runCatching {
-    val bytes = Base64.getDecoder().decode(base64)
+/** Downsampled preview decoded straight from the cached file off the main thread. */
+private fun decodeThumbnail(file: java.io.File): ImageBitmap? = runCatching {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
     var sample = 1
     while (bounds.outWidth / (sample * 2) >= 160 && bounds.outHeight / (sample * 2) >= 160) sample *= 2
     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+    BitmapFactory.decodeFile(file.absolutePath, opts)?.asImageBitmap()
 }.getOrNull()
 
-/** Keeps a voice note well inside the server's 15MB attachment budget. */
+/** Voice notes remain short for reliable transcription and mobile recording limits. */
 private const val MAX_VOICE_SECONDS = 120
 
-private fun formatSize(bytes: Int): String =
-    if (bytes >= 1024 * 1024) "${bytes / 1024 / 1024}MB" else "${(bytes + 1023) / 1024}KB"
+private fun formatSize(bytes: Long): String =
+    when {
+        bytes >= 1024L * 1024 * 1024 -> "%.1fGB".format(bytes / 1024.0 / 1024.0 / 1024.0)
+        bytes >= 1024L * 1024 -> "%.1fMB".format(bytes / 1024.0 / 1024.0)
+        else -> "${(bytes + 1023) / 1024}KB"
+    }
 
 /** A slash command that maps a Telegram-style chat command to a local app action. */
 private data class SlashCommand(val name: String, val desc: String, val run: () -> Unit)
@@ -1291,21 +1455,30 @@ private fun ChatInputBar(
     val recorder = remember { mutableStateOf<MediaRecorder?>(null) }
     val voiceFile = remember { mutableStateOf<File?>(null) }
 
-    fun stopRecorder() {
-        recorder.value?.let { active ->
-            runCatching { active.stop() }
-            active.release()
-        }
+    fun stopRecorder(): Boolean {
+        val active = recorder.value ?: return true
+        val stopped = runCatching { active.stop() }.isSuccess
+        runCatching { active.release() }
         recorder.value = null
         recording = false
+        return stopped
     }
 
     fun finishRecording() {
         val file = voiceFile.value
         val seconds = recordSeconds
-        stopRecorder()
+        val stopped = stopRecorder()
         voiceFile.value = null
-        if (file == null || file.length() <= 0) return
+        if (!stopped) {
+            file?.let { runCatching { it.delete() } }
+            vm.connectionError = "录音结束时出错，未能生成语音文件，请重试"
+            return
+        }
+        if (file == null || file.length() <= 0) {
+            file?.let { runCatching { it.delete() } }
+            vm.showToast("录音没有生成音频，请检查麦克风后重试")
+            return
+        }
         if (seconds < 1) {
             runCatching { file.delete() }
             vm.showToast("录音太短，请按住麦克风说久一点")
@@ -1386,6 +1559,9 @@ private fun ChatInputBar(
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
         if (uri != null) stage(context, vm, uri)
     }
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
+        if (uri != null) stage(context, vm, uri)
+    }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) stage(context, vm, uri)
     }
@@ -1434,7 +1610,7 @@ private fun ChatInputBar(
         SlashCommand("/schedule", "查看定时任务") { vm.navigate(Screen.Schedules) },
         SlashCommand("/agents", "引擎管理") { vm.navigate(Screen.Agents) },
         SlashCommand("/model", "模型与会话设置") { vm.navigate(Screen.Session) },
-        SlashCommand("/dir", "工作目录与模型默认值") { vm.navigate(Screen.Session) },
+        SlashCommand("/dir", "工作目录与会话设置") { vm.navigate(Screen.Session) },
         SlashCommand("/status", "运行状态与用量") { vm.navigate(Screen.Status) },
         SlashCommand("/usage", "用量统计") { vm.navigate(Screen.Status) },
         SlashCommand("/cc", "cc-switch 控制台") { vm.navigate(Screen.Cc) },
@@ -1567,7 +1743,7 @@ private fun ChatInputBar(
                         ComposerNotice(
                             icon = Icons.Filled.Tune,
                             tint = MaterialTheme.colorScheme.primary,
-                            text = "本条交给「$overrideLabel」，发送后恢复默认",
+                            text = "本条交给「$overrideLabel」，仅生效一次",
                             onClear = { vm.updateOneOffEngine(null) },
                         )
                     }
@@ -1633,6 +1809,16 @@ private fun ChatInputBar(
                                     onClick = {
                                         attachMenu = false
                                         photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("视频") },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Movie, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    },
+                                    onClick = {
+                                        attachMenu = false
+                                        videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                                     },
                                 )
                                 DropdownMenuItem(
@@ -1734,7 +1920,7 @@ private fun ChatInputBar(
                             vm.agents.filter { it.installed }.forEach { agent ->
                                 EngineOptionRow(
                                     label = agent.label,
-                                    detail = if (agent.id == defaultEngine) "会话默认" else agent.defaultModel ?: agent.desc,
+                                    detail = if (agent.id == defaultEngine) "会话默认" else agent.desc,
                                     selected = vm.oneOffEngine != null && vm.oneOffEngine == agent.id,
                                 ) {
                                     vm.updateOneOffEngine(agent.id)
@@ -1747,8 +1933,8 @@ private fun ChatInputBar(
                                     modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
                                 )
                                 EngineOptionRow(
-                                    label = "跟随引擎默认",
-                                    detail = vm.agents.firstOrNull { it.id == vm.oneOffEngine }?.defaultModel,
+                                    label = "跟随引擎配置",
+                                    detail = "不指定模型，由该引擎自行决定",
                                     selected = vm.oneOffModel == null,
                                 ) {
                                     vm.updateOneOffModel(null)
@@ -1757,7 +1943,7 @@ private fun ChatInputBar(
                                     Text(
                                         vm.oneOffModelHint?.let {
                                             "该引擎不列出可选模型，可在聊天里发送 /model! <模型ID>（提示：$it）"
-                                        } ?: "该引擎不列出可选模型，留空即使用默认。",
+                                        } ?: "该引擎不列出可选模型，留空即由该引擎自身配置决定。",
                                         color = TextSecondary,
                                         style = MaterialTheme.typography.bodyMedium,
                                         modifier = Modifier.padding(vertical = 6.dp),

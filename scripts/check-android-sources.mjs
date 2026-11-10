@@ -41,6 +41,7 @@ const REQUIRED = [
   "com/agentbot/app/data/TaskNotifier.kt",
   "com/agentbot/app/ui/AppViewModel.kt",
   "com/agentbot/app/ui/ChatScreen.kt",
+  "com/agentbot/app/ui/MediaPlayerDialog.kt",
   "com/agentbot/app/ui/SlashCommands.kt",
 ]
 
@@ -199,9 +200,10 @@ function main(argv) {
       if (/\bTODO\s*\(/.test(line)) problems.push(`${file}:${index + 1}: TODO() placeholder is not allowed`)
       if (/[^.\w]println\s*\(/.test(line)) problems.push(`${file}:${index + 1}: println() is not allowed (use a logger)`)
       // A content-URI stream is as large as whatever the user picked: readBytes() on one puts the
-      // file and its Base64 on the heap before any limit can be reported, i.e. an OOM crash.
+      // whole file on the heap before it can be streamed to disk, i.e. an OOM crash. File
+      // attachments are copied chunk by chunk and uploaded without a ByteArray/Base64 copy.
       if (UNBOUNDED_STREAM_READ.test(line)) {
-        problems.push(`${file}:${index + 1}: reading a stream without a cap (see LocalStore.readCapped)`)
+        problems.push(`${file}:${index + 1}: reading a content stream into memory (stream it to disk instead)`)
       }
     }
   }

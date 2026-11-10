@@ -57,6 +57,20 @@ test("loadConfig treats a concrete API bind as an Android control client", () =>
   assert.throws(() => loadConfig({ API_ENABLED: "0", API_BIND: "192.168.1.10" }), /尚未配置可用的控制端/)
 })
 
+test("loadConfig rejects a bare port in API_BIND before listen() can fail", () => {
+  for (const bind of ["3080", " 443 ", "65535"]) {
+    assert.throws(
+      () => loadConfig({ API_BIND: bind, API_PORT: "3080" }),
+      /API_BIND.*端口号.*API_PORT/,
+      `${bind} must not be parsed as an IPv4 shorthand`,
+    )
+  }
+  assert.equal(
+    loadConfig({ API_BIND: "127.0.0.1", API_PORT: "3080", API_PUBLIC_URL: "https://bot.example.com" }).api.bind,
+    "127.0.0.1",
+  )
+})
+
 test("loadConfig accepts mixed-case Feishu app ids but still rejects malformed ids", () => {
   const cfg = loadConfig({
     FEISHU_APP_ID: "cli_AbCdEf0123456789",
@@ -257,7 +271,7 @@ test("loadConfig treats empty numeric env vars as unset", () => {
   })
   assert.equal(cfg.maxReplyLength, 1500)
   assert.equal(cfg.maxMediaBytes, 20 * 1024 * 1024)
-  assert.equal(cfg.maxInputBytes, 20 * 1024 * 1024)
+  assert.equal(cfg.maxInputBytes, 0, "an unset MAX_INPUT_MB must disable the project-level ceiling")
   assert.equal(cfg.taskMaxTimeoutMs, cfg.taskTimeoutMs)
 })
 

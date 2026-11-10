@@ -44,6 +44,7 @@ import com.agentbot.app.ui.theme.TextTertiary
 fun MagpieScreen(vm: AppViewModel) {
     var running by remember { mutableStateOf(false) }
     var targetFor by remember { mutableStateOf<MagpieSpec?>(null) }
+    var commandTarget by remember { mutableStateOf<MagpieSpec?>(null) }
     val overview = vm.magpie
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
@@ -175,6 +176,43 @@ fun MagpieScreen(vm: AppViewModel) {
                 }
             }
 
+            val commands = overview?.commands.orEmpty()
+            if (overview?.available == true && commands.isNotEmpty()) {
+                item {
+                    SectionHeader(
+                        title = "可执行命令",
+                        subtitle = "命令由服务器下发，危险操作会再次确认",
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                commands.forEach { command ->
+                    item(key = "command-${command.name}") {
+                        AppCard(contentPadding = PaddingValues(0.dp)) {
+                            SettingsRow(
+                                title = command.label,
+                                subtitle = if (command.needsTarget) "需要${command.targetLabel}" else null,
+                                onClick = if (!vm.magpieBusy) {
+                                    {
+                                        when {
+                                            command.needsTarget -> commandTarget = command
+                                            command.confirm -> vm.requestMagpieCommand(command)
+                                            else -> vm.runMagpieCommand(command.name)
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                                trailing = if (command.confirm) {
+                                    { StatusPill(text = "需确认", tone = StatusTone.Warning) }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             vm.magpieOutput.takeIf { it.isNotBlank() }?.let { output ->
                 item {
                     AppCard {
@@ -245,6 +283,24 @@ fun MagpieScreen(vm: AppViewModel) {
         )
     }
 
+    commandTarget?.let { command ->
+        TextPromptDialog(
+            title = command.label,
+            hint = "输入${command.targetLabel}；服务器会再次校验目标。",
+            confirmLabel = "继续",
+            placeholder = command.targetLabel,
+            onDismiss = { commandTarget = null },
+            onConfirm = { value ->
+                val target = value.trim()
+                commandTarget = null
+                if (target.isNotEmpty()) {
+                    if (command.confirm) vm.requestMagpieCommand(command, target)
+                    else vm.runMagpieCommand(command.name, target)
+                }
+            },
+        )
+    }
+
     vm.magpieConfirmation?.let { words ->
         AlertDialog(
             onDismissRequest = vm::dismissMagpieRun,
@@ -258,6 +314,30 @@ fun MagpieScreen(vm: AppViewModel) {
             text = {
                 Text(
                     "服务器要求确认这条 magpie 命令：\n\n$words\n\n确认后会原样执行。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+        )
+    }
+
+    vm.magpieCommandConfirmation?.let { (command, target) ->
+        AlertDialog(
+            onDismissRequest = vm::dismissMagpieCommand,
+            confirmButton = {
+                TextButton(onClick = vm::confirmMagpieCommand) { Text("确认执行") }
+            },
+            dismissButton = {
+                TextButton(onClick = vm::dismissMagpieCommand) { Text("取消") }
+            },
+            title = { Text("需要确认", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Text(
+                    buildString {
+                        append("即将执行「${command.label}」")
+                        if (target != null) append("（$target）")
+                        append("。\n\n这会修改服务器上的 magpie 配置或进程状态。")
+                    },
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )

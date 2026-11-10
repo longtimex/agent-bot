@@ -154,7 +154,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 - **Telegram 官方 Bot**：长轮询，无需公网地址，无需扫码。
 - **飞书自建应用 Bot**：通过长连接接收私聊消息，无需公网地址；命令、面板、附件、提醒、定时任务、运维与访问控制与 Telegram 端完全共用。面板按钮需要可选的公网 HTTP 卡片回调（飞书 SDK 长连接不分发卡片回调），不启用时文字命令仍可用。飞书单聊中 @ 机器人或直接发命令均可；群聊默认忽略。
-- **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/文件附件、语音消息、单条消息临时换引擎、图片/文件回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
+- **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/视频/文件附件、语音消息、单条消息临时换引擎、图片/视频/语音回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
 - **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 或飞书聊天里发 `/api` 查看配对信息。
 - **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等 14 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
@@ -168,7 +168,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - **重试与队列**：失败消息附带的「重试」按钮只重发**它那一条**任务（不会被之后的新消息顶掉）；`/retry` 重发上一条任务，但若中途发过 `/stop`，排队的 `/retry` 会一起作废，不会把已取消的活儿再跑一遍；`/queue` 可逐条取消或一键清空排队消息。
 - **命令自动补全**：启动时注册 Telegram 的 `/` 菜单（`src/help.ts` 的 `BOT_MENU_COMMANDS`，与等价写法 `BOT_COMMAND_ALIASES` 一起通过 `GET /help` 下发给安卓 App），输入 `/` 即可看到全部命令与说明；测试会校验菜单与 `/help full` 保持一致，并校验 App 的命令表覆盖同样的命令。
 - **网络代理**：聊天内添加 HTTP/HTTPS/SOCKS4/SOCKS5 代理，自动测试连通性，可启用、停用、删除；远程媒体、Agent CLI 子进程与 Agent 网络命令自动使用。
-- **附件接收**：可直接发送图片、文件、语音；文本/代码文件会读取内容，图片/PDF/音频按当前模型能力附加。
+- **附件接收**：可直接发送图片、视频、文件、语音；文本/代码文件会读取内容，图片/视频/PDF/音频按当前模型能力附加，MIME 缺失时按扩展名识别。
 - **原生附件**：模型通过 `[[image:...]]` 等指令发送图片、视频、语音、文档。
 - **白名单**：Telegram 数字用户 ID 与飞书 `open_id` 各自独立；任一控制端启用时必须配置对应白名单（或显式 allow-all），日常增删用 `/access`，立即生效且不会把自己移出。
 - **仅私聊**：只响应私聊消息，群组/频道消息直接忽略，避免误触发。
@@ -215,8 +215,8 @@ npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 | 想做什么 | 怎么做 |
 | --- | --- |
 | 和 AI 对话、派任务 | 直接发文字；超过 2 秒的任务会出现进度卡片，可点「停止任务」 |
-| 发图片 / 文件 / 语音 | 直接作为附件发送，可附一句说明当作提示词 |
-| 让 AI 产出图片 / 文件 | 直接提要求，结果以原生消息回传（图片直接显示、文件可下载） |
+| 发图片 / 视频 / 文件 / 语音 | 直接作为附件发送，可附一句说明当作提示词 |
+| 让 AI 产出图片 / 视频 / 文件 | 直接提要求，结果以原生消息回传（图片直接显示，语音/视频可在 App 内播放，文件可下载） |
 | 切换引擎 / 模型 | `/agent`、`/model`，都有按钮面板 |
 | 换个项目目录 | `/dir /path/to/project` |
 | 定时提醒 | `/remind 30m 喝水`、`/remind 每天 08:30 打卡` |
@@ -416,7 +416,7 @@ npm run smoke:app -- --base https://3080-<机器ID>.instabox.tech \
 
 #### App 在线更新
 
-App「设置 → 应用更新」会读取服务器上的 `GET /android/release?versionCode=<当前版本>`，显示最新版本、大小、更新说明与是否有新版；点击「下载并安装」后流式下载 `GET /android/release/apk` 到缓存 `.part` 文件，校验清单中的大小与 SHA-256，再交给 Android 系统安装器。APK 是原始字节，即使开启 `API_ENCRYPTION=1` 也不会套消息级加密；下载仍需要 Bearer Token。更新清单缺失或未配置时，App 只显示提示，不影响服务器更新与聊天。
+App「设置 → 应用更新」会读取服务器上的 `GET /android/release?versionCode=<当前版本>`，显示最新版本、大小、更新说明与是否有新版；点击「下载并安装」后流式下载 `GET /android/release/apk` 到缓存 `.part` 文件，校验清单中的大小与 SHA-256，再交给 Android 系统安装器。首次安装需允许「安装未知来源应用」；App 会记住已校验的 APK，授权后返回 App 即自动继续安装，无需再次下载或点击。APK 是原始字节，即使开启 `API_ENCRYPTION=1` 也不会套消息级加密；下载仍需要 Bearer Token。更新清单缺失或未配置时，App 只显示提示，不影响服务器更新与聊天。
 
 发布服务器更新包：
 
@@ -447,7 +447,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/agents install <id>` | 通过 npm/pip 安装内置 Agent CLI（需确认） |
 | `/agents update <id>` | 更新由 Bot 安装的 CLI（需确认） |
 | `/agents uninstall <id>` | 卸载由 Bot 安装的 CLI（需确认） |
-| `/model` | 查看或切换当前引擎的模型，支持按引擎分组的按钮；`/model default`（或面板上的「↩️ 恢复默认模型」）取消本会话选择、回到配置的默认模型并重置上下文 |
+| `/model` | 查看或切换当前引擎的模型，支持按引擎分组的按钮；`/model default`（或面板上的「↩️ 清除模型选择」）取消本会话选择，之后由对应引擎自身的配置决定模型，并重置上下文 |
 | `/model <模型ID>` | 为当前 Agent CLI 指定模型（如 `/model sonnet`；OpenCode 仍走 `/model` 面板） |
 | `/dir` | 查看本会话 CLI 引擎的工作目录（默认是 Bot 自身所在目录），面板上有「恢复默认目录」按钮 |
 | `/dir <路径>` | 让本会话的 CLI 引擎在另一个项目里执行，支持 `~`、相对路径与引号；目录必须存在，切换会重置该会话的 CLI 上下文。OpenCode 的目录由其服务端决定，不受此设置影响 |
@@ -478,7 +478,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/cc use <id>` / `/cc test [id]` | 切换 Provider / 测试端点速度与连通性 |
 | `/cc mcp [sync]` / `/cc prompts` / `/cc env` / `/cc proxy` | 查看 MCP、同步配置、提示词预设、本地工具与代理状态 |
 | `/cc model add <简称> <provider>/<modelID> [名称] [参数]` | 添加自定义模型并同步 `opencode.json`（参数：`--attachment`、`--context N`、`--output N`） |
-| `/cc model del <简称> [force]` | 删除自定义模型（需在聊天内点按确认；被 agent、`opencode.json` 或某个聊天选用时需 `force`；强制删除会清除这些 agent 的 `model:` 绑定，并把会话的模型选择重置为引擎默认） |
+| `/cc model del <简称> [force]` | 删除自定义模型（需在聊天内点按确认；被 agent、`opencode.json` 或某个聊天选用时需 `force`；强制删除会清除这些 agent 的 `model:` 绑定，并清除会话的模型选择，之后由引擎自身配置决定） |
 | `/cc model assign <agent\|self> <模型>` | 为 Bot 或其他 agent 指定模型 |
 | `/ops` | 运维中心：诊断、日志、更新、重启、服务与配置 |
 | `/diag` | 查看 Node、Git、OpenCode、cc-switch、磁盘与日志状态 |
@@ -517,7 +517,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /help` | 与聊天端共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记）；`commands` 是全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`） |
 | `GET /session` | 当前引擎/模型/工作目录；OpenCode 额外给出 `modelRef`，CLI 只给模型名。配套 `POST /agent` 切换引擎，`POST /model` 切换模型（复位词与聊天端一致），`POST /new` 重置会话。切换或恢复模型会清空上一个模型的上下文；`POST /model`、`POST /new`、`POST /dir`、`POST /peers/follow` 在任务排队/执行时返回 409；`POST /agent` 不影响当前上下文 |
 | `GET /peers` · `POST /peers/follow {scope}` | 列出 App 与当前 owner 聊天（Telegram 或飞书）的引擎/模型/目录及用量；不返回内部会话键或聊天正文，也无法读取聊天端的队列深度。`follow` 只让 App 单向对齐该会话，不会反向修改聊天端设置 |
-| `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；附件为 `{name, mime, data(base64)}` 数组，最多 4 个共 15MB，文本内联、图片/音频/PDF 直连模型；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；队列与 Telegram 同深度（最多 4 条待处理，超出返回 409「待处理消息过多…」）；返回 202 与 taskId |
+| `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；JSON 请求中的附件为 `{name, mime, data(base64)}` 数组，也可用 `multipart/form-data` 的 `text`、`engine?`、`model?` 与 `file0…file3` 字段流式上传，最多 4 个，默认不限制单文件字节数，文本内联、图片/音频/视频/PDF 按模型能力直连；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；队列与 Telegram 同深度（最多 4 条待处理，超出返回 409「待处理消息过多…」）；返回 202 与 taskId |
 | `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`GET /tasks` 按时间倒序返回内存里保留的任务记录（默认 50 条、上限 200，含已结束的任务，`limit` 非法时回落到默认而不是空列表），App 的「最近任务」就靠它拿到可重试的旧任务 ID；`POST /stop` 停止全部 |
 | `POST /task/:id/stop` · `GET /queue` · `POST /queue/clear` | 停止单个任务（排队中直接丢弃、执行中中止）；查看当前排队/执行中的任务；一键清空排队（仅取消 queued，不影响执行中的任务） |
 | `GET /task/:id/events` | SSE 事件流：实时推送任务进度行与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
@@ -623,7 +623,6 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 ```json
 {
   "agents": {
-    "claude": { "defaultModel": "opus" },
     "myagent": {
       "label": "My Agent",
       "bin": "/opt/myagent/bin/myagent",
@@ -647,6 +646,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 
 字段说明：
 
+- 项目不设置任何 Agent 的默认模型。`models` 只用于 `/model` 面板与别名解析；没有显式选择时，Bot 不会向 OpenCode 或 CLI 传入模型参数，由该引擎自己的配置决定。旧的 `defaultModel` 字段会被忽略。
 - `sessionMode`：`preassign` / `capture` / `stateless`；`parse`：`text` / `json-result` / `jsonl-result` / `claude-json` / `codex-jsonl` / `gemini-stream`。
 - `args` 支持 `base`、`resumeBase`（续接时替换 `base`）、`newSession`、`resumeSession`、`cwd`、`model`、`prompt`；占位符为 `{workDir}`、`{sessionId}`、`{model}`、`{prompt}`。消息正文若以 `-` 开头（例如粘贴的 `- 项目符号` 列表），会自动补一个空格，避免它被 CLI 当成命令行开关。
 - `models` 可为 `{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`；`strictModels: true` 时只接受列表内模型，否则模型 ID 透传给 CLI——但不接受以 `-` 开头或含控制字符、超过 120 字符的值，这类值会被视为非法模型而拒绝，避免它被 CLI 解析成额外的命令行开关。
@@ -795,7 +795,7 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `FEISHU_CALLBACK_BIND` / `FEISHU_CALLBACK_PORT` / `FEISHU_CALLBACK_PATH`：回调服务的监听地址、端口与路径，默认 `127.0.0.1:3081/feishu/card`。放在 nginx/Caddy 后时通常保持回环监听，仅暴露反向代理路径。
 - `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY`：开放平台回调配置中的验签凭据，至少配置一项；属于密钥，不能经 `/env` 查看。
 - `TASK_TIMEOUT_MS` / `TASK_MAX_TIMEOUT_MS`：无活动超时与任务绝对上限，默认均为 10 分钟，所有引擎共用。
-- `MAX_MEDIA_MB` / `MAX_INPUT_MB`：出站单文件与入站附件下载上限，默认均为 20MB（可设 1–100）。实际渠道限制更严格：Telegram 下载受 Bot API 的 20MB 限制；飞书图片超过约 10MB 会自动改按文件发送，文件超过约 30MB 无法发送。入站附件送入模型时另有单附件 10MB、单条合计 15MB 上限，调大这两个变量不会绕过这些限制。
+- `MAX_MEDIA_MB` / `MAX_INPUT_MB`：前者限制出站媒体下载/发送，默认 20MB；后者是**项目级**入站下载上限，默认 `0` 表示关闭（可设 `0–100000`）。项目不再按 10MB/15MB 或附件总字节数拒绝单视频、图片和普通文件，单条消息只限制最多 4 个附件。实际平台边界仍然存在：Telegram Bot API 的 `getFile` 约 20MB；飞书图片超过约 10MB 会自动改按文件发送，文件超过约 30MB 无法发送；OpenCode 对单个直连附件有约 20MB 限制，超过时文件完整落盘并以绝对路径交给模型。
 - `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接访问本机/内网地址；仅在本地调试时设为 `1`。
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
 - `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL` / `STT_LANGUAGE`：可选的语音转写服务（OpenAI 兼容 `/audio/transcriptions`，如 OpenAI、Groq 或本地 whisper）。`STT_BASE_URL` 留空关闭；配置后，当前模型不支持音频输入时，发来的语音自动转写为文字交给模型（`STT_API_KEY` 属密钥，只能写 `.env`，不能经 `/env` 查看或修改）。
@@ -1019,9 +1019,9 @@ Telegram/飞书凭据、API Key、密码与账号凭据等永远不会在 `/env`
 - 单条回复最多 5 个附件；默认单文件上限 20MB（`MAX_MEDIA_MB`）。飞书图片超过约 10MB 会自动改按文件发送，文件超过约 30MB 会被拒绝。
 - 远程链接默认拒绝回环/私网/链路本地地址（含重定向后的每一跳），并把已通过校验的域名钉死在解析到的地址上（防止 DNS 重绑定），同时限制下载体积；调试内网地址需显式设置 `MEDIA_ALLOW_PRIVATE_URLS=1`（此时不做地址校验，也不钉死解析）。走 `/proxy` 代理下载时由代理服务器负责解析。
 - 下载失败时只回显链接的 `协议://主机/路径`，不带查询参数（签名、令牌常放在 query 里），并做密钥脱敏；关闭或删除代理会立即断开已建立的代理隧道。
-- Android 端同样消费这些指令：图片直接显示在气泡里，其余类型显示为可点击卡片，通过 `GET /task/:id/media/:index` 下载，防护规则与聊天端一致。
+- Android 端同样消费这些指令：图片直接显示在气泡里，语音与视频点击后在 App 内播放（也可交给其他应用），其余文件显示为可点击卡片；媒体统一通过 `GET /task/:id/media/:index` 下载并缓存到本机，防护规则与聊天端一致。
 
-## 接收图片 / 文件 / 语音
+## 接收图片 / 视频 / 语音 / 文件
 
 直接发送附件即可，可附带文字说明作为提示词：
 
@@ -1029,13 +1029,14 @@ Telegram/飞书凭据、API Key、密码与账号凭据等永远不会在 `/env`
 | --- | --- |
 | 文本/代码文件（`.txt`/`.md`/`.json`/`.ts`/`.log` 等） | 读取内容并随提示词发送（最多 6 万字，超出截断） |
 | 图片 | 保存到 `data/inbox/`；当前模型声明支持图片时作为附件发送 |
+| 视频 | 保存到 `data/inbox/`；当前模型声明支持视频时直接附加，否则保留绝对路径并明确提示可用 `ffprobe`/`ffmpeg` 读取，不会静默丢弃 |
 | PDF | 同上（按模型的 PDF 能力） |
 | 语音/音频 | 保存到 `data/inbox/`；模型支持音频时直接附加；不支持但配置了 `STT_BASE_URL` 时自动转写为文字（OpenAI 兼容 `/audio/transcriptions`，Groq、本地 whisper 等均可），转写失败回退为"无法转写"提示 |
 
-- 附件保存在 `data/inbox/`，超过 24 小时自动清理；下载上限默认 20MB（`MAX_INPUT_MB`，可设 1–100），单条消息附件合计仍为 15MB、内联文本合计 10 万字。进入模型时，二进制附件（图片/音频/PDF）另有单文件 10MB 上限；超过后仍会留在 inbox，并以路径与“未直接附加”的说明交给模型。入站附件以 `0600` 写入、目录以 `0700` 创建，同机其他账户无法读取。
-- 飞书入站附件沿用同一套下载与模型输入限制；图片、文件、语音/音频均可接收。语音建议使用 Ogg/Opus，其他音频会按文件保存，必要时交给 `STT_BASE_URL` 转写。
-- 能力检测来自 opencode 的 `GET /provider`。当前环境中的 custom/grok 模型未开启视觉/音频输入，因此图片与语音会以“路径 + 不支持”提示交给模型。
-- 想启用视觉/音频：换用支持多模态的 provider/模型，并在 `opencode.json` 对应模型上设置 `"attachment": true` 与 `"capabilities": { "input": ["text","image","audio","pdf"] }`。
+- 附件保存在 `data/inbox/`，超过 24 小时自动清理；`MAX_INPUT_MB` 默认 `0`，即关闭项目级单文件与总量字节上限（可显式设 `0–100000`）。单条消息最多 4 个附件，内联文本合计最多 10 万字，但视频和其他文件不再有项目自设的 10MB/15MB 限制。进入模型时，OpenCode 对单个直连附件有约 20MB 的平台限制；超过后文件仍完整保存在 inbox，并以路径与“未直接附加”的说明交给模型。Android 端选择文件后流式复制到缓存并通过 multipart 上传，不再先读入内存或转 Base64。入站附件以 `0600` 写入、目录以 `0700` 创建，同机其他账户无法读取。
+- 飞书入站附件沿用同一套流式下载与分类逻辑；默认不设项目级单文件/总量字节上限，图片、文件、视频、语音/音频均可接收。语音建议使用 Ogg/Opus，其他音频会按文件保存，必要时交给 `STT_BASE_URL` 转写。部分客户端把 MP4/M4A 标成 `application/octet-stream`（甚至不给 MIME），服务端会按扩展名恢复为视频/音频/图片，而不是降级成普通文件。
+- 能力检测来自 opencode 的 `GET /provider`。当前环境中的 custom/grok 模型未开启视觉/音频/视频输入，因此对应媒体会以“路径 + 不支持”提示交给模型。
+- 想启用视觉/音频/视频：换用支持多模态的 provider/模型，并在 `opencode.json` 对应模型上设置 `"attachment": true` 与 `"capabilities": { "input": ["text","image","audio","video","pdf"] }`。
 - 每个会话最多排队 4 条消息，超出会提示等待；`/stop` 会同时清空排队。
 
 ## 网络代理
@@ -1177,7 +1178,7 @@ npm run models -- assign self argon2
 - 自定义模型保存在 `data/models.json`（权限 600），`add` 会同步写入 `opencode.json` 对应 provider 的 `models`，`/model` 立即可选。`/cc model add` 支持 `--attachment`（声明支持图片输入）、`--context 200000`（上下文窗口）与 `--output 64000`（输出上限），效果与 CLI 的 `--attach` / `--context` 相同。
 - `assign self` 指向 Bot 使用的 agent（默认 `assistant`），同时把当前聊天切到该模型；其他 agent 只修改 `.opencode/agent/<name>.md` 的 `model` 字段。
 - 删除仍被 agent 或 `opencode.json` 引用的模型会被拒绝，确认后才可加 `force` / `--force`。
-- 强制删除时，被删模型所在 agent 文件 frontmatter 的 `model:` 行会被清除（该 agent 回落到引擎默认模型），引用它的会话选择同样被重置；`opencode.json` 的 `model` / `small_model` 仍指向它时只提示、不自动改动。
+- 强制删除时，被删模型所在 agent 文件 frontmatter 的 `model:` 行会被清除（该 agent 不再绑定模型，由引擎自身配置决定），引用它的会话选择同样被清除；`opencode.json` 的 `model` / `small_model` 仍指向它时只提示、不自动改动。
 - Bot 按文件 mtime 自动重载 `data/models.json`，无需重启；新会话生效。文件被写坏（JSON 无效）时不会清空已加载的自定义模型，修好后自动恢复。
 
 ## magpie 集成（可选）
@@ -1265,14 +1266,14 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 
 | 现象 | 处理 |
 | --- | --- |
-| `请求失败: ECONNREFUSED` | 本地 `opencode serve` 未启动；执行 `npm run bot -- start`（会启动受管 OpenCode），或手工运行 `npm run serve` |
+| `请求失败: ECONNREFUSED` | 本地 `opencode serve` 未启动；执行 `npm run bot -- start`（会启动受管 OpenCode），或手工运行 `npm run serve`。未显式选择引擎的新会话会自动回退到已安装的 Codex/CLI，App 气泡会注明回退原因 |
 | `请求失败: UND_ERR_SOCKET` | 服务端连接被关闭；查看 opencode serve 日志与上游模型状态 |
 | `fetch failed` | 已自动解包底层 `ECONNREFUSED` / `ETIMEDOUT` / socket 错误码；按对应原因处理 |
 | `-> 404` 会话不存在 | Bot 会自动新建会话，上下文清空 |
 | 启动报白名单 / Token 错误 | 运行 `npm run clients` 重选出错的渠道重新校验，或手动检查：Telegram 的 `TELEGRAM_ALLOW_USERS` / `TELEGRAM_BOT_TOKEN`（也可显式设置 `TELEGRAM_ALLOW_ALL_USERS=1`）；飞书的 `FEISHU_APP_ID` 是否为 `cli_` + 16 位十六进制字符、`FEISHU_APP_SECRET` 是否已填、`FEISHU_ALLOW_OPEN_IDS` 是否为 `ou_` 开头。Bot 已运行时让任一白名单用户发送 `/access add <你的 ID>` |
 | 飞书完全无响应 | 确认应用已启用「机器人」能力；事件配置使用**长连接**并订阅 `im.message.receive_v1`；消息收发与资源读取权限已发布并通过审核；`FEISHU_APP_ID` / `FEISHU_APP_SECRET` 正确，且 `open_id` 在 `FEISHU_ALLOW_OPEN_IDS` 中（或开启 `FEISHU_ALLOW_ALL_USERS=1`）。用 `/logs 100` 查看长连接或鉴权错误；也可重跑 `npm run clients` 重新校验凭据 |
 | 飞书文字可用但按钮无响应 | 检查 `FEISHU_CALLBACK_ENABLED=1`；开放平台回调地址使用公网 HTTPS，路径与 `FEISHU_CALLBACK_PATH` 完全一致；反向代理转发到 `FEISHU_CALLBACK_BIND:FEISHU_CALLBACK_PORT`（默认 `127.0.0.1:3081`）；`FEISHU_CALLBACK_VERIFICATION_TOKEN` 或 `FEISHU_CALLBACK_ENCRYPT_KEY` 与开放平台一致。未配置回调时请改用文字命令 |
-| 飞书图片 / 文件发送失败或被降级 | 图片超过约 10MB 会自动按文件发送，单文件超过约 30MB 无法发送；入站附件送入模型仍受单文件 10MB、单条合计 15MB 限制。大文件请压缩、拆分或改用可下载链接 |
+| 飞书图片 / 文件发送失败或被降级 | 出站图片超过约 10MB 会自动按文件发送，单文件超过约 30MB 无法发送；入站默认不设项目级字节上限，单条消息最多 4 个附件。若传送大文件失败，通常是平台接口、反向代理或磁盘空间限制，请查看 Bot 日志 |
 | 飞书语音没有按语音播放 | 语音建议使用 Ogg/Opus；其他音频格式可能上传失败并回退为文件附件，转成 Opus 后重试 |
 | 首次启动没有出现向导 | 当前不是交互式终端（systemd/CI），或已有任一可用控制端；按输出提示手动配置，或在终端运行 `npm run setup` / `npm run clients` |
 | Telegram 向导识别不到用户 ID | 确认已给 Bot 发送消息；若提示 409 Conflict，先停止其他轮询实例或移除 Webhook，再手动输入 ID |
@@ -1280,8 +1281,8 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | 仅安卓端时提醒或定时任务返回 409 | 这些功能需要向 Telegram 或飞书 owner 聊天推送。运行 `npm run clients` 添加聊天控制端，并与 Bot 私聊发送一次 `/start` |
 | 启动提示已有实例（PID） | 说明旧进程仍在运行；用 `npm run bot -- restart` 重启，或先结束该 PID（锁文件会校验 PID 启动时间，不会误杀复用 PID 的进程） |
 | 群组中发消息无响应 | 预期行为：Bot 只处理私聊 |
-| 图片/语音提示不支持 | 当前模型未声明对应输入能力；换用多模态模型或在 `opencode.json` 中开启 `attachment` |
-| 附件下载失败 / 超过 20MB | Telegram Bot API 的 `getFile` 下载限制；压缩后重发，或改用飞书发送（消息资源接口支持更大文件）。单条消息总附件仍受 15MB 上限约束 |
+| 图片/视频/语音提示不支持 | 当前模型未声明对应输入能力；换用多模态模型或在 `opencode.json` 中开启 `attachment` 并声明 `video`/`audio` 能力 |
+| 附件下载失败 / 超过 20MB | Telegram Bot API 的 `getFile` 约 20MB 的平台下载限制；压缩后重发，或改用飞书/安卓 App（默认不设项目级字节上限，单条最多 4 个附件）。反向代理还可能有自己的 body/timeout 限制 |
 | agent 不存在 / 400 | 确认 `OPENCODE_AGENT` 与 `.opencode/agent/*.md` 名称一致，并重启 opencode serve |
 
 ## 安全说明

@@ -32,7 +32,6 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     parse: "text",
     supportsModel: true,
     strictModels: true,
-    defaultModel: "Qwen3.8-Flash",
     modelHint: "deepseek / qwen",
     models: QODER_MODELS,
     args: {
@@ -97,7 +96,6 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
       ],
-      cwd: ["-C", "{workDir}"],
       model: ["-m", "{model}"],
       prompt: ["{prompt}"],
     },

@@ -30,7 +30,6 @@ export interface BotConfig {
     username: string
     password?: string
     agent?: string
-    model?: ModelRef
   }
   taskTimeoutMs: number
   taskMaxTimeoutMs: number
@@ -148,6 +147,18 @@ export function isConcreteApiBind(bind: string): boolean {
   return !isLoopbackApiBind(host)
 }
 
+/**
+ * `API_BIND=3080` is the other half of the address/port pair, not a host. Node will
+ * parse the bare number as an IPv4 shorthand (`0.0.12.8`) and fail only inside
+ * listen(), after startup has already reported the bot as running.
+ */
+export function isPortLikeApiBind(bind: string): boolean {
+  const value = bind.trim()
+  if (!/^\d{1,5}$/.test(value)) return false
+  const port = Number(value)
+  return Number.isInteger(port) && port >= 1 && port <= 65535
+}
+
 export interface ControlClientEvidence {
   telegram: boolean
   feishu: boolean
@@ -241,6 +252,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const apiEnabled = bool(env.API_ENABLED, true)
   const apiPort = int(env.API_PORT, 3080, 1, 65535)
   const apiBind = pick(env.API_BIND) ?? "127.0.0.1"
+  if (isPortLikeApiBind(apiBind)) {
+    throw new StartupConfigError(
+      `拒绝启动：API_BIND=${apiBind} 是端口号，不是监听地址。监听地址请填 IP 或主机名（例如 127.0.0.1、0.0.0.0），端口请填 API_PORT。`,
+    )
+  }
   const apiPublicUrl = parseApiPublicUrl(pick(env.API_PUBLIC_URL))
   const apiToken = pick(env.API_TOKEN)
   // The API is on by default, but the sample .env binds it to loopback. Treating that as a
@@ -298,8 +314,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     )
   }
 
-  const providerID = pick(env.OPENCODE_MODEL_PROVIDER)
-  const modelID = pick(env.OPENCODE_MODEL_ID)
   const dataDir = resolve(pick(env.DATA_DIR) ?? "./data")
   const taskTimeoutMs = int(pick(env.TASK_TIMEOUT_MS) ?? env.OPENCODE_TIMEOUT_MS, 600_000, 10_000)
   const taskMaxTimeoutMs = int(env.TASK_MAX_TIMEOUT_MS, taskTimeoutMs, taskTimeoutMs)
@@ -340,7 +354,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       username: pick(env.OPENCODE_SERVER_USERNAME) ?? "opencode",
       password: pick(env.OPENCODE_SERVER_PASSWORD),
       agent: pick(env.OPENCODE_AGENT) ?? "assistant",
-      model: providerID && modelID ? { providerID, modelID } : undefined,
     },
     taskTimeoutMs,
     taskMaxTimeoutMs,
@@ -366,8 +379,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     maxReplyLength: int(env.MAX_REPLY_LENGTH, 1500, 100, 4000),
     maxMediaBytes: int(env.MAX_MEDIA_MB, 20, 1, 100) * 1024 * 1024,
     mediaAllowPrivateUrls: bool(env.MEDIA_ALLOW_PRIVATE_URLS, false),
-    // Telegram serves files up to 20MB via getFile; Feishu's message-resource API accepts 100MB.
-    maxInputBytes: int(env.MAX_INPUT_MB, 20, 1, 100) * 1024 * 1024,
+    // 0 means no application-level ceiling. Telegram's getFile endpoint still has
+    // its own 20MB limit; that is reported by the channel instead of being hidden
+    // behind this setting.
+    maxInputBytes: parseInputLimitBytes(env.MAX_INPUT_MB),
     dataDir,
     outboxDir: resolve(dataDir, "outbox"),
     inboxDir: resolve(dataDir, "inbox"),
@@ -382,6 +397,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       enabled: bool(env.API_ENCRYPTION, false),
     },
   }
+}
+
+/** `MAX_INPUT_MB=0` disables the project-level inbound ceiling. */
+export function parseInputLimitBytes(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 0
+  return int(value, 0, 0, 100_000) * 1024 * 1024
 }
 
 /** magpie's local gateway is informational: only protocol+host[:port], no path/query. */

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { acquireLock } from "../src/lock.js"
+import { acquireLock, withFileLock } from "../src/lock.js"
 import { createLogger } from "../src/logger.js"
 
 const log = createLogger("error")
@@ -98,6 +98,60 @@ test("acquireLock reclaims a lock whose PID was recycled", { skip: !existsSync("
     assert.notEqual(content, `${process.pid} 0`)
   } finally {
     release()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("withFileLock runs a transaction, returns its value and removes the lock", () => {
+  const { dir } = tempLockDir()
+  const lock = join(dir, "sessions.json.lock")
+  try {
+    const value = withFileLock(lock, log, () => {
+      assert.equal(existsSync(lock), true, "the lock must exist for the whole transaction")
+      return 42
+    })
+    assert.equal(value, 42)
+    assert.equal(existsSync(lock), false)
+    assert.deepEqual(readdirSync(dir), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("withFileLock releases the lock when the transaction throws", () => {
+  const { dir } = tempLockDir()
+  const lock = join(dir, "sessions.json.lock")
+  try {
+    assert.throws(() => withFileLock(lock, log, () => {
+      throw new Error("transaction failed")
+    }), /transaction failed/)
+    assert.equal(existsSync(lock), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("withFileLock reclaims a lock left by a dead process", () => {
+  const { dir } = tempLockDir()
+  const lock = join(dir, "sessions.json.lock")
+  const dead = spawnSync(process.execPath, ["-e", ""])
+  assert.ok(dead.pid && dead.pid > 0)
+  writeFileSync(lock, String(dead.pid))
+  try {
+    assert.equal(withFileLock(lock, log, () => "reclaimed"), "reclaimed")
+    assert.equal(existsSync(lock), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("withFileLock waits for a live owner and reports a timeout", () => {
+  const { dir } = tempLockDir()
+  const lock = join(dir, "sessions.json.lock")
+  writeFileSync(lock, String(process.pid))
+  try {
+    assert.throws(() => withFileLock(lock, log, () => "never", 40, 60_000), /等待状态文件锁超时/)
+  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })

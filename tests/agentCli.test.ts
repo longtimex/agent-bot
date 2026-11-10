@@ -80,8 +80,9 @@ test("registry resolves strict and open models per profile", () => {
 
   assert.equal(registry.modelLabel("claude", "sonnet"), "Claude Sonnet")
   assert.equal(registry.modelLabel("claude", "custom"), "custom")
-  assert.equal(registry.defaultModel("qoder"), "Qwen3.8-Flash")
-  assert.equal(registry.defaultModel("claude"), undefined)
+  assert.equal(profileById(registry, "qoder").models?.some((model) => model.id === "Qwen3.8-Flash"), true)
+  assert.equal("defaultModel" in profileById(registry, "qoder"), false)
+  assert.equal("defaultModel" in profileById(registry, "claude"), false)
 })
 
 test("model ids cannot smuggle extra CLI flags into argv", () => {
@@ -117,9 +118,7 @@ test("registry loads custom profiles, overrides builtins and ignores invalid ent
             desc: "custom",
             args: { prompt: ["--ask", "{prompt}"] },
             models: { fast: "Fast Mode" },
-            defaultModel: "fast",
           },
-          qoder: { defaultModel: "DeepSeek-Flash" },
           "Bad Id": { bin: "x" },
           badplaceholder: { bin: "x", args: { prompt: ["{nope}"] } },
           badinstall: { bin: "x", installSpec: { method: "npm", package: "foo; rm -rf /" } },
@@ -132,12 +131,12 @@ test("registry loads custom profiles, overrides builtins and ignores invalid ent
     const custom = profileById(registry, "mycli")
     assert.equal(custom.label, "My CLI")
     assert.equal(custom.supportsModel, true)
-    assert.equal(custom.defaultModel, "fast")
+    assert.equal("defaultModel" in custom, false)
     assert.deepEqual(custom.args.prompt, ["--ask", "{prompt}"])
     assert.equal(registry.resolveModel("mycli", "fast mode"), "fast")
     assert.equal(registry.resolveModel("mycli", "anything-else"), "anything-else")
 
-    assert.equal(profileById(registry, "qoder").defaultModel, "DeepSeek-Flash")
+    assert.equal("defaultModel" in profileById(registry, "qoder"), false)
     assert.equal(registry.resolveModel("qoder", "qwen"), "Qwen3.8-Flash")
 
     assert.equal(registry.get("bad id"), undefined)
@@ -294,8 +293,6 @@ test("buildCliArgs renders placeholders in a stable order", () => {
     "--json",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
-    "-C",
-    "/repo",
     "hi",
   ])
   assert.deepEqual(buildCliArgs(codex, { workDir: "/repo", sessionId: "t-9", prompt: "again" }, false), [
@@ -305,8 +302,6 @@ test("buildCliArgs renders placeholders in a stable order", () => {
     "--json",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
-    "-C",
-    "/repo",
     "again",
   ])
 

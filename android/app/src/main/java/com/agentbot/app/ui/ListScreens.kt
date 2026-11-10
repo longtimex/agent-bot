@@ -300,15 +300,33 @@ fun HistoryScreen(vm: AppViewModel) {
         selected?.let { entry ->
             AlertDialog(
                 onDismissRequest = { selected = null },
-                title = { Text("任务提示词") },
+                title = { Text("任务详情") },
                 text = {
-                    Text(
-                        entry.prompt,
-                        style = MaterialTheme.typography.bodyMedium,
+                    Column(
                         modifier = Modifier
-                            .heightIn(max = 320.dp)
+                            .heightIn(max = 380.dp)
                             .verticalScroll(rememberScrollState()),
-                    )
+                    ) {
+                        Text(entry.prompt, style = MaterialTheme.typography.bodyMedium)
+                        if (entry.outcome != "ok") {
+                            entry.errorCode?.takeIf { it.isNotBlank() }?.let { code ->
+                                Text(
+                                    code,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(top = 12.dp),
+                                )
+                            }
+                            entry.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                                Text(
+                                    detail,
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 6.dp),
+                                )
+                            }
+                        }
+                    }
                 },
                 confirmButton = {
                     TextButton(onClick = {

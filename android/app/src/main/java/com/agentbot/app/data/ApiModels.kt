@@ -12,6 +12,10 @@ data class Task(
     val progress: String? = null,
     val reply: String? = null,
     val error: String? = null,
+    /** Stable server-side failure class, e.g. ENGINE_UNAVAILABLE. */
+    val errorCode: String? = null,
+    /** Why the implicit OpenCode default was replaced for this task. */
+    val engineNote: String? = null,
     val createdAt: Long = 0,
     val startedAt: Long? = null,
     val finishedAt: Long? = null,
@@ -65,7 +69,7 @@ data class Session(
 ) {
     /** The model line Telegram's /session shows: the label, with its address underneath. */
     val modelLine: String
-        get() = model?.let { name -> modelRef?.let { "$name（${it.address}）" } ?: name } ?: "-"
+        get() = model?.let { name -> modelRef?.let { "$name（${it.address}）" } ?: name } ?: "由引擎决定"
 }
 
 /**
@@ -121,7 +125,6 @@ data class AgentInfo(
     /** "session" / "preassign" / "capture" / "stateless": whether context carries over. */
     val sessionMode: String? = null,
     val supportsModel: Boolean? = null,
-    val defaultModel: String? = null,
     /** The models this CLI offers, sent only for engines that can switch them. */
     val models: List<AgentModelOption> = emptyList(),
     val experimental: Boolean? = null,
@@ -460,6 +463,10 @@ data class HistoryEntry(
     val model: String? = null,
     val ms: Long = 0,
     val outcome: String = "failed",
+    /** Stable server-side failure class, e.g. ENGINE_UNAVAILABLE. */
+    val errorCode: String? = null,
+    /** Redacted, single-line failure summary stored with the run. */
+    val detail: String? = null,
     val scheduled: Boolean? = null,
 )
 
@@ -703,6 +710,15 @@ data class MagpieOverview(
 /** One read-only magpie command's output. */
 @Serializable
 data class MagpieViewResult(
+    val name: String = "",
+    val label: String = "",
+    val text: String = "",
+)
+
+/** Answer to one allowlisted magpie command from the server's console catalog. */
+@Serializable
+data class MagpieExecResult(
+    val ok: Boolean = false,
     val name: String = "",
     val label: String = "",
     val text: String = "",

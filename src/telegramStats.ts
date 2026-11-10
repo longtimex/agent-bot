@@ -22,7 +22,7 @@ export interface StatsPanelDeps {
   timezone: () => string
   startedAt: () => number
   pendingCount: (key: string) => number
-  currentModel: (key: string) => { providerID: string; modelID: string; label: string }
+  currentModel: (key: string) => { providerID: string; modelID: string; label: string } | undefined
   cliModelLabel: (engine: string, model: string | undefined) => string
   encryptionEnabled: () => boolean
   runningSince: Map<string, number>
@@ -133,9 +133,10 @@ export class TelegramStatsPanels {
       const engine = this.#deps.agents.registry.label(entry.engine)
       const target = entry.model ? `${engine} / ${entry.model}` : engine
       const tag = entry.scheduled ? " · 🗓 定时" : ""
+      const code = entry.errorCode && entry.outcome !== "ok" ? ` · \`${entry.errorCode}\`` : ""
       const prompt = entry.prompt ? `\n   _${escapeMarkdown(clip(entry.prompt, 100) ?? "")}_` : ""
       const line =
-        `• ${formatDateTime(entry.at, this.#deps.timezone())} · ${status} · ${formatDuration(entry.ms)}\n` +
+        `• ${formatDateTime(entry.at, this.#deps.timezone())} · ${status} · ${formatDuration(entry.ms)}${code}\n` +
         `   ${escapeMarkdown(target)}${tag}${prompt}`
       if (length + line.length > 3200) break
       lines.push(line)
@@ -162,9 +163,9 @@ export class TelegramStatsPanels {
     const engine = this.#deps.store.getEngine(key)
     const model =
       engine === "opencode"
-        ? this.#deps.currentModel(key).label
+        ? (this.#deps.currentModel(key)?.label ?? "由 OpenCode 决定")
         : this.#deps.cliModelLabel(engine, this.#deps.store.getCliModel(key, engine))
-    // Tells the user whether the model came from this chat or from the config default
+    // Tells the user whether this chat explicitly picked a model
     const ownSelection = engine === "opencode" ? this.#deps.store.getModel(key) : this.#deps.store.getCliModel(key, engine)
     const since = this.#deps.runningSince.get(key)
     // #pending is what the queue panel shows, so status must not count cancelled-ahead slots
@@ -180,7 +181,7 @@ export class TelegramStatsPanels {
       // Both come from data files the operator edits (agents.json labels, custom model
       // labels), so an underscore in one would break the whole status panel
       `📊 *运行状态*\n• 引擎: *${escapeMarkdown(this.#deps.agents.registry.label(engine))}*\n` +
-        `• 模型: *${escapeMarkdown(model)}*${ownSelection ? "" : "（默认）"}\n` +
+        `• 模型: *${escapeMarkdown(model)}*${ownSelection ? "" : "（本会话未选择）"}\n` +
       `• 当前任务: ${running}\n• 待处理队列: ${pending} 条\n• 今日任务: ${today} 条\n` +
       `• Agent CLI: ${detected} 个已安装\n` +
       `• 待触发提醒: ${reminders} 条\n• 定时任务: ${schedules} 个\n` +

@@ -1,5 +1,6 @@
 import type { ModelRef } from "./config.js"
 import { clip } from "./messages.js"
+import { pathToFileURL } from "node:url"
 
 export class OpencodeError extends Error {
   /** HTTP status when the failure came from a responded request, otherwise undefined. */
@@ -32,12 +33,19 @@ interface PromptResponse {
 export interface PromptFile {
   mime: string
   filename: string
-  data: Buffer
+  /** Absolute local path. OpenCode materializes it itself via a file:// attachment. */
+  path: string
+  /** Known size, used only to respect OpenCode's own attachment ceiling. */
+  size?: number
 }
+
+/** OpenCode refuses a single direct attachment above this; it is an upstream bound, not ours. */
+export const OPENCODE_ATTACHMENT_LIMIT = 20 * 1024 * 1024
 
 export interface ModelInputs {
   image: boolean
   audio: boolean
+  video: boolean
   pdf: boolean
 }
 
@@ -201,6 +209,7 @@ export class Opencode {
             next.set(`${provider.id}/${id}`, {
               image: input?.image === true,
               audio: input?.audio === true,
+              video: input?.video === true,
               pdf: input?.pdf === true,
             })
           }
@@ -376,12 +385,18 @@ export class Opencode {
   async prompt(sessionID: string, text: string, options: PromptOptions = {}): Promise<string> {
     const parts: Array<Record<string, unknown>> = [{ type: "text", text }]
     for (const file of options.files ?? []) {
+      // OpenCode rejects direct attachments above its own 20MB ceiling. For a
+      // larger file the manifest still carries its absolute path, and the agent
+      // can read it with its normal file tools instead of the whole task failing.
+      if (file.size !== undefined && file.size > OPENCODE_ATTACHMENT_LIMIT) continue
       parts.push({
         // mime 受上游白名单约束;兜底 octet-stream 防 data URL 被空值截断
         type: "file",
         mime: file.mime || "application/octet-stream",
         filename: file.filename,
-        url: `data:${file.mime || "application/octet-stream"};base64,${file.data.toString("base64")}`,
+        // OpenCode reads the local file itself. Keeping the bytes out of this JSON
+        // avoids a second full-size Base64 string (and its JSON copy) on the bot.
+        url: pathToFileURL(file.path).href,
       })
     }
 

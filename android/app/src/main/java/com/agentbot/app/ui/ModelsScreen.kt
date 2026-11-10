@@ -159,7 +159,7 @@ fun ModelsScreen(vm: AppViewModel) {
             title = { Text("删除模型 $key？", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Text(
-                    "删除后，指向该模型的会话会被重置为默认模型；仍被 agent 引用时会提示是否强制删除。",
+                    "删除后，指向该模型的会话会清除模型选择，之后由引擎自身配置决定；仍被 agent 引用时会提示是否强制删除。",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             },

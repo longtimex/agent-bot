@@ -18,7 +18,7 @@ export interface CorePanelDeps {
   schedules: ScheduleService
   runningSince: Map<string, number>
   pendingCount: (key: string) => number
-  currentModel: (key: string) => { providerID: string; modelID: string; label: string }
+  currentModel: (key: string) => { providerID: string; modelID: string; label: string } | undefined
   cliModelLabel: (engine: string, model: string | undefined) => string
 }
 
@@ -33,7 +33,7 @@ export class TelegramCorePanels {
     const engine = this.#deps.store.getEngine(key)
     const model =
       engine === "opencode"
-        ? this.#deps.currentModel(key).label
+        ? (this.#deps.currentModel(key)?.label ?? "由 OpenCode 决定")
         : this.#deps.cliModelLabel(engine, this.#deps.store.getCliModel(key, engine))
     const detected = this.#deps.agents.registry
       .list()
@@ -60,7 +60,7 @@ export class TelegramCorePanels {
     const engine = this.#deps.store.getEngine(key)
     const model =
       engine === "opencode"
-        ? this.#deps.currentModel(key).label
+        ? (this.#deps.currentModel(key)?.label ?? "由 OpenCode 决定")
         : this.#deps.cliModelLabel(engine, this.#deps.store.getCliModel(key, engine))
     const since = this.#deps.runningSince.get(key)
     const pending = this.#deps.pendingCount(key)
@@ -248,7 +248,7 @@ export class TelegramCorePanels {
         }
       }
 
-      const current = this.#deps.store.getCliModel(key, engine) ?? profile.defaultModel
+      const current = this.#deps.store.getCliModel(key, engine)
       const keyboard = new InlineKeyboard()
       if (profile.supportsModel && profile.models?.length) {
         profile.models.slice(0, 30).forEach((model, index) => {
@@ -266,13 +266,15 @@ export class TelegramCorePanels {
         if (profile.models.slice(0, 30).length % 2 === 1) keyboard.row()
       }
       if (this.#deps.store.getCliModel(key, engine)) {
-        keyboard.text("↩️ 恢复默认模型", `cmodelreset:${engine}`).row()
+        keyboard.text("↩️ 清除模型选择", `cmodelreset:${engine}`).row()
       }
       keyboard.text("🤖 切换引擎", "show:agent").text("🔄 刷新", "show:model")
       keyboard.row().text("⬅️ 主菜单", "show:menu")
 
       const modelLine = profile.supportsModel
-        ? this.#deps.cliModelLabel(engine, current)
+        ? current
+          ? this.#deps.cliModelLabel(engine, current)
+          : "未指定（由 CLI 自身配置决定）"
         : "由 CLI 自身配置"
       const hint = profile.supportsModel
         ? profile.models?.length
@@ -289,36 +291,38 @@ export class TelegramCorePanels {
 
     reloadCustomModels()
     const current = this.#deps.currentModel(key)
-    const currentInfo = Object.values(AVAILABLE_MODELS).find(
-      (item) => item.providerID === current.providerID && item.modelID === current.modelID,
-    )
+    const currentInfo = current
+      ? Object.values(AVAILABLE_MODELS).find(
+          (item) => item.providerID === current.providerID && item.modelID === current.modelID,
+        )
+      : undefined
     const keyboard = new InlineKeyboard()
     const entries = Object.entries(AVAILABLE_MODELS)
     const limit = 40
     let models = entries.slice(0, limit)
     if (entries.length > limit) {
       const currentIndex = entries.findIndex(
-        ([, info]) => info.providerID === current.providerID && info.modelID === current.modelID,
+        ([, info]) => info.providerID === current?.providerID && info.modelID === current?.modelID,
       )
       if (currentIndex >= limit) models = [...entries.slice(0, limit - 1), entries[currentIndex]!]
     }
     models.forEach(([modelKey, info], index) => {
-      const isCurrent = info.providerID === current.providerID && info.modelID === current.modelID
+      const isCurrent = info.providerID === current?.providerID && info.modelID === current?.modelID
       keyboard.text(clip(`${isCurrent ? "✅ " : ""}${info.label}`, 60) ?? "", `model:${modelKey}`)
       if (index % 2 === 1) keyboard.row()
     })
     if (models.length % 2 === 1) keyboard.row()
     if (this.#deps.store.getModel(key)) {
-      keyboard.text("↩️ 恢复默认模型", "model:reset").row()
+      keyboard.text("↩️ 清除模型选择", "model:reset").row()
     }
     keyboard.text("🔌 模型管理", "cc:model").text("🤖 切换引擎", "show:agent")
     keyboard.row().text("🔄 刷新", "show:model").text("⬅️ 主菜单", "show:menu")
     const hidden =
       entries.length > models.length ? `\n_另有 ${entries.length - models.length} 个模型未显示，可用 \`/model 简称\` 直接切换。_` : ""
     const text =
-      `🧠 *OpenCode 模型*\n\n当前：*${escapeMarkdown(current.label)}*` +
+      `🧠 *OpenCode 模型*\n\n当前：*${escapeMarkdown(current?.label ?? "由 OpenCode 决定")}*` +
       `${currentInfo ? `\n_${escapeMarkdown(currentInfo.desc)}_` : ""}\n\n` +
-      `点击下方按钮切换，或发送 \`/model 简称\`（\`/model default\` 恢复默认）。\n切换后会重置当前会话上下文。${hidden}`
+      `点击下方按钮切换，或发送 \`/model 简称\`。未指定时由 OpenCode 自身配置决定。\n切换后会重置当前会话上下文。${hidden}`
     return { text, keyboard }
   }
 

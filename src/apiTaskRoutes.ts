@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs"
+import { accessSync, constants } from "node:fs"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { clampLimit } from "./apiHttp.js"
 import { MAX_TASK_RECORDS, type ApiTaskManager } from "./apiTasks.js"
+import { multipartBoundary } from "./multipart.js"
 
 export interface TaskRouteDeps {
   tasks: ApiTaskManager
@@ -22,6 +23,16 @@ export async function routeTasks(
 ): Promise<boolean> {
   const { method } = ctx
   if (resource === "task" && method === "POST" && !id) {
+      const boundary = multipartBoundary(ctx.req.headers["content-type"])
+      if (boundary) {
+        const form = await deps.tasks.parseMultipartTask(ctx.req, boundary)
+        const text = form.text.trim()
+        if (!text && (form.attachments?.length ?? 0) === 0) throw new ApiError(400, "缺少 text 字段")
+        if (text.length > 12_000) throw new ApiError(400, "消息太长（上限 12000 字），请分段发送")
+        const task = deps.tasks.submitSaved(deps.expandAlias(text), form.engine, form.model, form.attachments, form.failed)
+        deps.json(ctx.res, 202, { task: deps.tasks.view(task) })
+        return true
+      }
       const body = await deps.readJsonBody(ctx.req)
       const text = typeof body.text === "string" ? body.text.trim() : ""
       const attachments = deps.tasks.parseAttachments(body.attachments)
@@ -77,24 +88,23 @@ export async function routeTasks(
       }
       // Telegram's /retry replays the captured prompt, so reuse the stored text,
       // engine, model pin and attachments instead of a text-only client copy.
-      // Attachments were saved to the inbox at submit time; re-read them into base64.
+      // The inbox copies remain file-backed; never read them into Base64 here.
       const source = failed.savedAttachments ?? []
-      let unreadable = 0
-      const attachments = source.flatMap((saved) => {
+      const readable: typeof source = []
+      for (const saved of source) {
         try {
-          return [{ name: saved.name, mime: saved.mime, data: readFileSync(saved.path).toString("base64") }]
+          accessSync(saved.path, constants.R_OK)
+          readable.push(saved)
         } catch {
-          // inbox pruning deletes copies older than a day; the retry must not look like a
-          // clean run to someone watching it finish without the file they sent
-          unreadable++
-          return []
+          // inbox pruning deletes copies older than a day
         }
-      })
-      if (!failed.text.trim() && attachments.length === 0) {
+      }
+      const unreadable = source.length - readable.length
+      if (!failed.text.trim() && readable.length === 0) {
         throw new ApiError(410, "任务的附件已从收件目录清理，无法只凭空提示词重试")
       }
       const note = unreadable > 0 ? `${failed.text}\n\n[附件处理失败]\n${unreadable} 个附件已从收件目录清理，本次重试无法读取` : failed.text
-      const task = deps.tasks.submit(note, failed.engine, failed.model, attachments.length > 0 ? attachments : undefined)
+      const task = deps.tasks.submitSaved(note, failed.engine, failed.model, readable.length > 0 ? readable : undefined)
       deps.json(ctx.res, 202, { ok: true, retriedFrom: id, task: deps.tasks.view(task) })
       return true
     }

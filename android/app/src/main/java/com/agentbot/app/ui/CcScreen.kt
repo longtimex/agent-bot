@@ -70,17 +70,32 @@ fun CcScreen(vm: AppViewModel) {
     var pendingLink by remember { mutableStateOf<String?>(null) }
 
     // `/cc provider del foo` typed in the chat box resolves here, once the server tables load
-    LaunchedEffect(vm.ccRunRequested, vm.ccViews.size, vm.ccCommands.size) {
+    LaunchedEffect(
+        vm.ccRunRequested,
+        vm.ccCatalogReady,
+        vm.ccCatalogError,
+        vm.ccStatus,
+        vm.ccViews.size,
+        vm.ccCommands.size,
+    ) {
         val query = vm.ccRunRequested ?: return@LaunchedEffect
+        if (!vm.ccCatalogReady) return@LaunchedEffect
+        if (vm.ccCatalogError != null) {
+            vm.clearCcRunRequest()
+            vm.showToast("cc-switch 读取失败，请点右上角刷新后重试")
+            return@LaunchedEffect
+        }
         val status = vm.ccStatus
-        if (status != null && !status.available) {
+        if (status == null) {
+            vm.clearCcRunRequest()
+            vm.showToast("cc-switch 读取失败，请点右上角刷新后重试")
+            return@LaunchedEffect
+        }
+        if (!status.available) {
             vm.clearCcRunRequest()
             vm.showToast("cc-switch 当前不可用，无法执行「$query」")
             return@LaunchedEffect
         }
-        // ccStatus 非空即服务器表已加载;views/commands 为空列表是合法状态
-        // (可用但无自定义视图/命令),不能再当作"未加载"而悬挂请求
-        if (vm.ccStatus == null) return@LaunchedEffect
         vm.clearCcRunRequest()
         when (val match = matchCcQuery(query, vm.ccViews, vm.ccCommands)) {
             // Words the server's tables do not name are still what Telegram runs: cc-switch

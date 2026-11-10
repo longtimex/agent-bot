@@ -582,8 +582,10 @@ test("ops env rejects unknown keys, invalid values and newlines", () => {
     assert.equal(ops.envSet("LOG_LEVEL", "verbose").ok, false)
     assert.equal(ops.envSet("REMINDER_TIMEZONE", "Mars/Olympus").ok, false)
     assert.equal(ops.envSet("OPENCODE_AGENT", "assistant\nrm -rf /").ok, false)
-    assert.equal(ops.envSet("MAX_INPUT_MB", "500").ok, false)
-    assert.equal(ops.envSet("MAX_INPUT_MB", "20").ok, true)
+    assert.equal(ops.envSet("MAX_INPUT_MB", "0").ok, true)
+    assert.equal(ops.envSet("MAX_INPUT_MB", "500").ok, true)
+    assert.equal(ops.envSet("MAX_INPUT_MB", "100000").ok, true)
+    assert.equal(ops.envSet("MAX_INPUT_MB", "100001").ok, false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
