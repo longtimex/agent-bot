@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import type { Logger } from "../src/logger.js"
-import { maskProxyUrl, parseProxyUrl, ProxyService, socksCredentials } from "../src/proxy.js"
+import { maskProxyUrl, parseProxyUrl, proxyTestUrl, ProxyService, socksCredentials } from "../src/proxy.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -73,6 +73,17 @@ test("maskProxyUrl hides credentials", () => {
   assert.equal(maskProxyUrl("http://127.0.0.1:7890"), "http://127.0.0.1:7890")
   assert.equal(maskProxyUrl("http://user:secret@proxy.example.com:8080"), "http://user:***@proxy.example.com:8080")
   assert.equal(maskProxyUrl("socks5://proxy.example.com:1080"), "socks5://proxy.example.com:1080")
+})
+
+test("proxyTestUrl ignores blank overrides and trims a configured URL", () => {
+  const fallback = "https://www.gstatic.com/generate_204"
+  assert.equal(proxyTestUrl({}), fallback)
+  assert.equal(proxyTestUrl({ PROXY_TEST_URL: "" }), fallback)
+  assert.equal(proxyTestUrl({ PROXY_TEST_URL: " \t\n " }), fallback)
+  assert.equal(
+    proxyTestUrl({ PROXY_TEST_URL: "  https://example.com/health  " }),
+    "https://example.com/health",
+  )
 })
 
 test("ProxyService adds after a successful test and persists state", async () => {

@@ -70,6 +70,14 @@ fun MagpieScreen(vm: AppViewModel) {
         if (vm.magpieBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 10.dp))
         }
+        vm.magpieError?.let { error ->
+            InlineNotice(
+                text = error,
+                modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 6.dp),
+                tone = MaterialTheme.colorScheme.error,
+                icon = Icons.Filled.Error,
+            )
+        }
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -92,7 +100,9 @@ fun MagpieScreen(vm: AppViewModel) {
                                 modifier = Modifier.padding(top = 2.dp),
                             )
                         }
-                        if (overview?.available == true) {
+                        if (overview == null && vm.magpieError != null) {
+                            StatusPill(text = "读取失败", tone = StatusTone.Error)
+                        } else if (overview?.available == true) {
                             StatusPill(
                                 text = if (overview.healthy) "可达" else "不可达",
                                 tone = if (overview.healthy) StatusTone.Success else StatusTone.Error,
@@ -105,7 +115,7 @@ fun MagpieScreen(vm: AppViewModel) {
                     when {
                         overview == null -> {
                             InlineNotice(
-                                text = "尚未读取 magpie 状态。",
+                                text = if (vm.magpieBusy) "正在读取 magpie 状态…" else "尚未读取 magpie 状态。",
                                 modifier = Modifier.padding(top = 12.dp),
                                 icon = Icons.Filled.Info,
                             )

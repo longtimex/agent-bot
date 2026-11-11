@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs"
+import { chmodSync, mkdirSync } from "node:fs"
 import { resolve } from "node:path"
 import { ApiServer, resolveApiToken, resolveEncKey } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
@@ -80,8 +80,13 @@ async function main(): Promise<void> {
   botToken = cfg.telegram.token
   const log = createLogger(cfg.logLevel)
   mkdirSync(cfg.dataDir, { recursive: true })
-  mkdirSync(cfg.outboxDir, { recursive: true })
-  mkdirSync(cfg.inboxDir, { recursive: true })
+  // Reply artifacts and inbound files can carry private chats or configs. The startup
+  // directories must not inherit a permissive host umask, and `mode` alone does not
+  // tighten an existing directory from an older release.
+  mkdirSync(cfg.outboxDir, { recursive: true, mode: 0o700 })
+  chmodSync(cfg.outboxDir, 0o700)
+  mkdirSync(cfg.inboxDir, { recursive: true, mode: 0o700 })
+  chmodSync(cfg.inboxDir, 0o700)
 
   const migration = migrateDataDirectory(cfg.dataDir, log)
   if (!migration.ok) log.warn(migration.message)

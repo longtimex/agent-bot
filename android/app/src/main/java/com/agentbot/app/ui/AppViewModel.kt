@@ -156,6 +156,14 @@ class AppViewModel(
     var helpView by mutableStateOf<HelpView?>(null)
         private set
 
+    /** A failed help read must not leave the page spinning on "正在加载帮助…". */
+    var helpError by mutableStateOf<String?>(null)
+        private set
+
+    /** Distinguishes first load from a failed refresh when [helpView] is still null. */
+    var helpBusy by mutableStateOf(false)
+        private set
+
     /** Selected `/help` tab: basic, full or cc. */
     var helpSection by mutableStateOf("basic")
         private set
@@ -173,6 +181,14 @@ class AppViewModel(
      * local failures into it (microphone, camera, export), so the setter stays open.
      */
     var connectionError by mutableStateOf<String?>(null)
+
+    /**
+     * Why the last pairing probe failed. Kept beside the address and token fields so a typo or
+     * a rotated token is explained where it can be fixed. A failed probe must not write
+     * [connectionError]: the previously saved pairing is still live, so the chat should not
+     * look offline because someone tried a new address.
+     */
+    var connectionProbeError by mutableStateOf<String?>(null)
 
     var session by mutableStateOf<Session?>(null)
         private set
@@ -221,7 +237,18 @@ class AppViewModel(
     var agents by mutableStateOf<List<AgentInfo>>(emptyList())
         private set
 
+    /** A failed engine read must not look like a bot that has no engines. */
+    var agentsError by mutableStateOf<String?>(null)
+        private set
+
     var modelChoices by mutableStateOf(ModelChoices())
+        private set
+
+    /** A failed model read must not look like an engine that supports no models. */
+    var modelsError by mutableStateOf<String?>(null)
+        private set
+
+    var modelsLoading by mutableStateOf(false)
         private set
 
     /** The session engine's switchable models; `hint` explains an engine that lists none. */
@@ -231,10 +258,25 @@ class AppViewModel(
     var customModels by mutableStateOf<List<CustomModel>>(emptyList())
         private set
 
+    /** Only a completed read may show "还没有自定义模型". */
+    var customModelsError by mutableStateOf<String?>(null)
+        private set
+
+    /** A rejected add/bind/delete stays on the model page, where the action was started. */
+    var modelActionError by mutableStateOf<String?>(null)
+
+    /** The last add/bind failure came from the form itself, so its dialog shows the reason. */
+    var modelDraftRejected by mutableStateOf(false)
+        private set
+
     var agentBindings by mutableStateOf<List<AgentBinding>>(emptyList())
         private set
 
     var modelBusy by mutableStateOf(false)
+        private set
+
+    /** First custom-model read is in flight; the empty state is withheld until it finishes. */
+    var customModelsBusy by mutableStateOf(false)
         private set
 
     /** Set when a delete is blocked by in-use bindings; the dialog offers a force delete. */
@@ -284,6 +326,11 @@ class AppViewModel(
     // ---- magpie ----
     var magpie by mutableStateOf<MagpieOverview?>(null)
     var magpieBusy by mutableStateOf(false)
+
+    /** A failed overview read must not render as "not installed" or "not loaded yet". */
+    var magpieError by mutableStateOf<String?>(null)
+        private set
+
     var magpieTitle by mutableStateOf("")
     var magpieOutput by mutableStateOf("")
     /** Words awaiting the user's confirmation (the server refused with 「需要确认」). */
@@ -310,11 +357,25 @@ class AppViewModel(
     var hermesMessage by mutableStateOf<String?>(null)
         private set
 
+    /** Why the memory page has no state, distinct from a memory that loaded successfully. */
+    var hermesError by mutableStateOf<String?>(null)
+        private set
+
     var configView by mutableStateOf<ConfigView?>(null)
         private set
 
     var configBusy by mutableStateOf(false)
         private set
+
+    /** A failed .env read must not look like a server with no configuration. */
+    var configError by mutableStateOf<String?>(null)
+        private set
+
+    /** A rejected .env write stays on the config page, where the edit was started. */
+    var configActionError by mutableStateOf<String?>(null)
+
+    /** The last config write failed in the prompt itself, so its dialog shows the reason. */
+    var configDraftRejected by mutableStateOf(false)
 
     var history by mutableStateOf<List<HistoryEntry>>(emptyList())
         private set
@@ -327,10 +388,39 @@ class AppViewModel(
     var historyTotal by mutableStateOf(0)
         private set
 
+    /** A failed history read keeps the last rows visible and reports the refresh failure. */
+    var historyError by mutableStateOf<String?>(null)
+        private set
+
+    /** True while the history page is reading its first page, so it can withhold the empty state. */
+    var historyBusy by mutableStateOf(false)
+        private set
+
     var reminders by mutableStateOf<List<Reminder>>(emptyList())
         private set
 
     var schedules by mutableStateOf<List<Schedule>>(emptyList())
+        private set
+
+    /** Why an automation page has no rows, when the read itself failed instead of returning []. */
+    var remindersError by mutableStateOf<String?>(null)
+        private set
+
+    var schedulesError by mutableStateOf<String?>(null)
+        private set
+
+    /** First page read is in flight; the empty state must wait for it. */
+    var remindersBusy by mutableStateOf(false)
+        private set
+
+    var schedulesBusy by mutableStateOf(false)
+        private set
+
+    /** A 409 is not a transient read failure: no chat channel can receive this automation. */
+    var remindersUnavailable by mutableStateOf<String?>(null)
+        private set
+
+    var schedulesUnavailable by mutableStateOf<String?>(null)
         private set
 
     var usage by mutableStateOf<Usage?>(null)
@@ -346,7 +436,27 @@ class AppViewModel(
     var status by mutableStateOf<Status?>(null)
         private set
 
+    /** Why the status dashboard has no numbers, kept on the page instead of only in the banner. */
+    var statusError by mutableStateOf<String?>(null)
+        private set
+
+    var statusBusy by mutableStateOf(false)
+        private set
+
     var dirInfo by mutableStateOf<DirInfo?>(null)
+        private set
+
+    /** Session settings are read from four endpoints; this reports the first failed one. */
+    var sessionError by mutableStateOf<String?>(null)
+        private set
+
+    /** A rejected directory/timezone/follow write stays on the session page. */
+    var sessionActionError by mutableStateOf<String?>(null)
+
+    /** The last session write was rejected by the prompt itself, so its dialog shows it inline. */
+    var sessionDraftRejected by mutableStateOf(false)
+
+    var sessionBusy by mutableStateOf(false)
         private set
 
     /** Where the working-directory picker is standing; null while it is closed. */
@@ -370,7 +480,17 @@ class AppViewModel(
     var recentTasks by mutableStateOf<List<Task>>(emptyList())
         private set
 
+    /** A failed queue read must not look like an idle queue. */
+    var queueError by mutableStateOf<String?>(null)
+
+    /** Why the last queue action failed, while the previously loaded list stays on screen. */
+    var queueActionError by mutableStateOf<String?>(null)
+
     var diagnostics by mutableStateOf<Diagnostics?>(null)
+        private set
+
+    /** Why the last diagnostics load failed, shown inside the ops screen instead of only as a banner. */
+    var diagnosticsError by mutableStateOf<String?>(null)
         private set
 
     var logTail by mutableStateOf<LogTail?>(null)
@@ -386,6 +506,14 @@ class AppViewModel(
         private set
 
     var serviceStatus by mutableStateOf<ServiceStatus?>(null)
+        private set
+
+    /** Why the service card is missing or stale, instead of a silent keep-last-successful read. */
+    var serviceStatusError by mutableStateOf<String?>(null)
+        private set
+
+    /** Why the log panel kept its previous tail instead of showing a fresh read. */
+    var logError by mutableStateOf<String?>(null)
         private set
 
     var opsResult by mutableStateOf<OpsResult?>(null)
@@ -445,16 +573,39 @@ class AppViewModel(
     var aliases by mutableStateOf<List<AliasEntry>>(emptyList())
         private set
 
+    var aliasesError by mutableStateOf<String?>(null)
+        private set
+
+    /** A rejected shortcut create/delete stays on the shortcut page. */
+    var aliasesActionError by mutableStateOf<String?>(null)
+
+    /** The last alias rejection came from the draft itself, so its prompt shows it inline. */
+    var aliasesDraftRejected by mutableStateOf(false)
+
     var accessUsers by mutableStateOf<List<String>>(emptyList())
         private set
 
     var allowAllUsers by mutableStateOf(false)
         private set
 
+    /** Why the whitelist page is empty, when its read failed instead of returning no users. */
+    var accessError by mutableStateOf<String?>(null)
+        private set
+
+    /** A rejected add/remove stays on the whitelist page instead of the chat banner. */
+    var accessActionError by mutableStateOf<String?>(null)
+
+    /** The last whitelist rejection came from the draft itself, so its prompt shows it inline. */
+    var accessDraftRejected by mutableStateOf(false)
+
     var proxies by mutableStateOf<List<ProxyInfo>>(emptyList())
         private set
 
     var activeProxyId by mutableStateOf<Int?>(null)
+        private set
+
+    /** Why the proxy list is empty, when its read failed instead of returning no proxies. */
+    var proxiesError by mutableStateOf<String?>(null)
         private set
 
     var proxyBusy by mutableStateOf(false)
@@ -463,6 +614,12 @@ class AppViewModel(
     /** Result of the last proxy connectivity test, shown above the list. */
     var proxyTestMessage by mutableStateOf<String?>(null)
         private set
+
+    /** Add/test/enable/remove failures stay on the proxy page, not the chat banner. */
+    var proxyActionError by mutableStateOf<String?>(null)
+
+    /** The last add was rejected before any request could be sent. */
+    var proxyDraftRejected by mutableStateOf(false)
 
     var toast by mutableStateOf<String?>(null)
         private set
@@ -486,6 +643,13 @@ class AppViewModel(
     var oneOffChoices by mutableStateOf(ModelChoices())
         private set
 
+    var oneOffChoicesLoading by mutableStateOf(false)
+        private set
+
+    /** A failed read for the pinned engine must not look like that engine has no models. */
+    var oneOffModelsError by mutableStateOf<String?>(null)
+        private set
+
     val oneOffModels: List<ModelEntry> get() = oneOffChoices.models
     val oneOffModelHint: String? get() = oneOffChoices.modelHint
 
@@ -496,13 +660,75 @@ class AppViewModel(
         oneOffEngine = engine?.takeIf { it.isNotBlank() }
         oneOffModel = null
         oneOffChoices = ModelChoices()
+        oneOffModelsError = null
         val pinned = oneOffEngine ?: return
         // A pin may target another engine than the session, so ask for that engine's list
-        silent { oneOffChoices = api.models(conn(), pinned) }
+        silent {
+            val requestEngine = pinned
+            oneOffChoicesLoading = true
+            try {
+                val choices = api.models(conn(), requestEngine)
+                // Switching engines quickly leaves the older request in flight. A response
+                // for an engine the user already left must not overwrite the new list.
+                if (oneOffEngine == requestEngine) oneOffChoices = choices
+            } catch (err: Exception) {
+                if (oneOffEngine == requestEngine) {
+                    oneOffModelsError = "无法加载该引擎的模型：${err.message}"
+                }
+            } finally {
+                if (oneOffEngine == requestEngine) oneOffChoicesLoading = false
+            }
+        }
     }
+
+    /** The engine a one-off model belongs to: the pin, else the session's current engine. */
+    val oneOffModelEngine: String?
+        get() = oneOffEngine ?: session?.engine
+
+    /** Retries the pinned engine's list without clearing the engine or the chosen model. */
+    fun reloadOneOffModels() {
+        val pinned = oneOffEngine ?: return
+        silent {
+            oneOffChoicesLoading = true
+            try {
+                val choices = api.models(conn(), pinned)
+                if (oneOffEngine == pinned) {
+                    oneOffChoices = choices
+                    oneOffModelsError = null
+                }
+            } catch (err: Exception) {
+                if (oneOffEngine == pinned) {
+                    oneOffModelsError = "无法加载该引擎的模型：${err.message}"
+                }
+            } finally {
+                if (oneOffEngine == pinned) oneOffChoicesLoading = false
+            }
+        }
+    }
+
+    /** Models for the picker's model section, with an empty list only after a successful read. */
+    val pinPickerModels: List<ModelEntry>
+        get() = if (oneOffEngine != null) oneOffModels else models
+
+    val pinPickerModelHint: String?
+        get() = if (oneOffEngine != null) oneOffModelHint else modelHint
+
+    val pinPickerModelsError: String?
+        get() = if (oneOffEngine != null) oneOffModelsError else modelsError
+
+    val pinPickerModelsLoading: Boolean
+        get() = if (oneOffEngine != null) oneOffChoicesLoading else modelsLoading
 
     fun updateOneOffModel(model: String?) {
         oneOffModel = model?.takeIf { it.isNotBlank() }
+    }
+
+    /** Clears the next message's overrides without touching the session's saved defaults. */
+    fun clearOneOffPin() {
+        oneOffEngine = null
+        oneOffModel = null
+        oneOffChoices = ModelChoices()
+        oneOffModelsError = null
     }
 
     val oneOffModelLabel: String?
@@ -670,9 +896,7 @@ class AppViewModel(
             Screen.Reminders -> refreshReminders()
             Screen.Schedules -> refreshSchedules()
             Screen.Session -> {
-                refreshDir()
-                refreshTimezone()
-                refreshPeers()
+                refreshSessionSettings()
             }
             Screen.Queue -> refreshQueue()
             Screen.Agents -> refreshAgents()
@@ -714,15 +938,16 @@ class AppViewModel(
             configured = true
             health = probedHealth
             session = probedSession
+            serverInfo = runCatching { api.info(candidate) }.getOrNull()
             connectionError = null
-            screen = Screen.Chat
+            connectionProbeError = null
             Result.success(Unit)
         } catch (err: CancellationException) {
             throw err
         } catch (err: Exception) {
             // The saved repository and the live health/session state belong to the old pairing;
             // a typo in a new address must not make a working connection look offline.
-            connectionError = if (err is NotConfiguredException) err.message else "连接失败：${err.message}"
+            connectionProbeError = if (err is NotConfiguredException) err.message else "连接失败：${err.message}"
             Result.failure(err)
         }
     }
@@ -735,7 +960,11 @@ class AppViewModel(
      * Cancellation is not a failure: leaving the Activity clears the ViewModel scope while a
      * request is mid-flight, and catching that as an error would report a healthy call as broken.
      */
-    private fun guarded(label: String, block: suspend () -> Unit): Job = viewModelScope.launch {
+    private fun guarded(
+        label: String,
+        onError: ((Throwable) -> Unit)? = null,
+        block: suspend () -> Unit,
+    ): Job = viewModelScope.launch {
         try {
             block()
         } catch (err: CancellationException) {
@@ -744,6 +973,7 @@ class AppViewModel(
             // A rejected token already arrives here as UNAUTHORIZED_HINT: ApiException is built
             // from serverFailure(), so no branch has to special-case the server's raw 401 text.
             connectionError = if (err is NotConfiguredException) err.message else "${label}失败：${err.message}"
+            onError?.invoke(err)
         }
     }
 
@@ -751,78 +981,114 @@ class AppViewModel(
         guarded("连接") {
             health = api.health(conn())
             session = api.session(conn())
+            // /info is supplemental. A server that is healthy but older or briefly failing
+            // this endpoint must still count as connected; the pages fall back to their
+            // own reads.
+            serverInfo = runCatching { api.info(conn()) }.getOrNull()
             connectionError = null
         }
     }
 
     fun refreshPeers() {
-        guarded("加载对端会话") { peers = api.peers(conn()) }
+        guarded("加载对端会话", onError = { sessionError = "无法加载对端会话：${it.message}" }) {
+            sessionError = null
+            peers = api.peers(conn())
+        }
+    }
+
+    /** Reloads the four reads behind 会话设置 together so Retry means the whole page. */
+    fun refreshSessionSettings() {
+        if (sessionBusy) return
+        sessionBusy = true
+        sessionError = null
+        viewModelScope.launch {
+            try {
+                val loadedDir = api.dir(conn())
+                val loadedTimezone = api.timezone(conn())
+                val loadedPeers = api.peers(conn())
+                dirInfo = loadedDir
+                timezone = loadedTimezone
+                peers = loadedPeers
+                sessionError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                sessionError =
+                    if (err is NotConfiguredException) err.message else "无法加载会话设置：${err.message}"
+            } finally {
+                sessionBusy = false
+            }
+        }
     }
 
     /**
      * Takes the other end's engine, model and work dir for this App. Nothing is pushed to
      * Telegram — the two sessions stay separate, and this only aligns the App with it.
      */
-    fun followPeer(scope: String) {
-        guarded("跟随对端会话") {
-            toast = api.followPeer(conn(), scope)
-            session = api.session(conn())
-            peers = api.peers(conn())
+    fun followPeer(scope: String, onResult: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                sessionActionError = null
+                toast = api.followPeer(conn(), scope)
+                session = api.session(conn())
+                peers = api.peers(conn())
+                onResult(true)
+            } catch (err: Exception) {
+                sessionActionError = "跟随对端会话失败：${err.message}"
+                onResult(false)
+            }
         }
     }
 
-    /** Refreshes the visible tab after the app returns to the foreground; failures stay silent. */
+    /** Refreshes the visible tab after the app returns to the foreground. */
     fun onForeground() {
         resumePendingInstall()
-        silent { health = api.health(conn()); session = api.session(conn()) }
+        refreshConnectionQuietly()
         when (screen) {
-            Screen.History -> silent { loadHistory() }
-            Screen.Reminders -> silent { reminders = api.reminders(conn()) }
-            Screen.Schedules -> silent { schedules = api.schedules(conn()) }
+            Screen.History -> refreshHistoryQuietly()
+            Screen.Reminders -> refreshRemindersQuietly()
+            Screen.Schedules -> refreshSchedulesQuietly()
             Screen.Queue -> pollQueue()
-            Screen.Agents -> silent { agents = api.agents(conn()) }
-            Screen.Models -> silent { modelChoices = api.models(conn()) }
-            Screen.Session -> {
-                silent { dirInfo = api.dir(conn()) }
-                silent { timezone = api.timezone(conn()) }
-                silent { peers = api.peers(conn()) }
-            }
-            Screen.Status -> silent {
-                status = api.status(conn())
-                val (summary, days) = api.usage(conn())
-                usage = summary
-                trend = days
-                dailyReport = api.usageReport(conn())
-                serverInfo = api.info(conn())
-            }
-            Screen.Proxy -> silent {
-                val list = api.proxies(conn())
-                proxies = list.proxies
-                activeProxyId = list.active
-            }
-            Screen.Aliases -> silent { aliases = api.aliases(conn()) }
-            Screen.Access -> silent {
-                val info = api.access(conn())
-                accessUsers = info.users
-                allowAllUsers = info.allowAll
-            }
-            Screen.Cc -> if (!ccBusy) silent { reloadCcTables() }
-            Screen.Magpie -> if (!magpieBusy) silent { reloadMagpie() }
-            Screen.Config -> silent { configView = api.config(conn()) }
-            Screen.Help -> silent { helpView = api.help(conn()) }
+            Screen.Agents -> refreshAgents()
+            Screen.Models -> refreshCustomModels()
+            Screen.Session -> refreshSessionSettings()
+            Screen.Status -> refreshStatus()
+            Screen.Proxy -> refreshProxiesQuietly()
+            Screen.Aliases -> refreshAliasesQuietly()
+            Screen.Access -> refreshAccessQuietly()
+            Screen.Cc -> refreshCcQuietly()
+            Screen.Magpie -> if (!magpieBusy) refreshMagpieQuietly()
+            Screen.Config -> refreshConfigQuietly()
+            Screen.Help -> refreshHelp()
             Screen.Ops -> if (opsActionBusy == null) {
-                silent { diagnostics = api.diagnostics(conn()) }
-                silent {
-                    val release = api.releaseInfo(conn())
-                    releaseInfo = release.release
-                    startupCheck = release.startup
-                }
-                silent { serviceStatus = api.opsService(conn()) }
-                silent { logTail = api.logs(conn(), logSource, logLines) }
+                refreshDiagnosticsQuietly()
+                refreshOpsServiceQuietly()
+                refreshLogsQuietly()
             }
-            Screen.Settings -> silent { androidRelease = api.androidRelease(conn(), appVersionCode.toInt()) }
+            Screen.Settings -> refreshAndroidReleaseQuietly()
             else -> Unit
         }
+    }
+
+    /** A background read that still owns its page's error state, so stale rows are labelled. */
+    private fun quietly(
+        failure: (String?) -> Unit,
+        block: suspend () -> Unit,
+    ) = viewModelScope.launch {
+        try {
+            block()
+        } catch (err: CancellationException) {
+            throw err
+        } catch (err: Exception) {
+            failure(if (err is NotConfiguredException) err.message else err.message ?: "读取失败")
+        }
+    }
+
+    private fun refreshConnectionQuietly() = quietly({ connectionError = "重新连接失败：$it" }) {
+        health = api.health(conn())
+        session = api.session(conn())
+        serverInfo = runCatching { api.info(conn()) }.getOrNull()
+        connectionError = null
     }
 
     /** Like [guarded] but for background refreshes where a banner would only be noise. */
@@ -836,29 +1102,47 @@ class AppViewModel(
     }
 
     fun refreshAgents() {
-        guarded("加载引擎") { agents = api.agents(conn()) }
+        guarded("加载引擎", onError = { agentsError = "无法加载引擎：${it.message}" }) {
+            agentsError = null
+            agents = api.agents(conn())
+        }
     }
 
     fun refreshCustomModels() {
-        guarded("加载自定义模型") {
-            val result = api.customModels(conn())
-            customModels = result.models
-            agentBindings = result.agents
+        if (customModelsBusy) return
+        customModelsBusy = true
+        guarded(
+            "加载自定义模型",
+            onError = { customModelsError = "无法加载自定义模型：${it.message}" },
+        ) {
+            customModelsError = null
+            try {
+                val result = api.customModels(conn())
+                customModels = result.models
+                agentBindings = result.agents
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                customModelsError = "无法加载自定义模型：${err.message}"
+            }
+            customModelsBusy = false
         }
     }
 
     /** Input format matches `/cc model add 简称 provider/modelID [显示名]`. */
-    fun addCustomModel(input: String) {
+    fun addCustomModel(input: String): Boolean {
         val tokens = input.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (tokens.size < 2) {
-            connectionError = "用法：简称 provider/modelID [显示名] [--attachment] [--context N] [--output N]"
-            return
+            modelActionError = "用法：简称 provider/modelID [显示名] [--attachment] [--context N] [--output N]"
+            modelDraftRejected = true
+            return false
         }
         val key = tokens[0]
         val slash = tokens[1].indexOf('/')
         if (slash <= 0 || slash == tokens[1].length - 1) {
-            connectionError = "第二项必须是 provider/modelID，例如 custom/my-model-id"
-            return
+            modelActionError = "第二项必须是 provider/modelID，例如 custom/my-model-id"
+            modelDraftRejected = true
+            return false
         }
         val providerID = tokens[1].substring(0, slash)
         val modelID = tokens[1].substring(slash + 1)
@@ -881,20 +1165,21 @@ class AppViewModel(
 
                 "--context", "--ctx" -> {
                     val raw = inline ?: tokens.getOrNull(index + 1)
-                    contextWindow = positiveLimit(name, raw) ?: return
+                    contextWindow = positiveLimit(name, raw) ?: return false
                     index += if (inline == null) 2 else 1
                 }
 
                 "--output", "--max-output" -> {
                     val raw = inline ?: tokens.getOrNull(index + 1)
-                    outputLimit = positiveLimit(name, raw) ?: return
+                    outputLimit = positiveLimit(name, raw) ?: return false
                     index += if (inline == null) 2 else 1
                 }
 
                 else -> {
                     if (token.startsWith("-")) {
-                        connectionError = "未知参数：$token"
-                        return
+                        modelActionError = "未知参数：$token"
+                        modelDraftRejected = true
+                        return false
                     }
                     labelParts.add(token)
                     index += 1
@@ -906,22 +1191,27 @@ class AppViewModel(
             modelBusy = true
             try {
                 val result = api.addCustomModel(conn(), key, providerID, modelID, label, attachment, contextWindow, outputLimit)
+                modelActionError = null
+                modelDraftRejected = false
                 toast = result.message ?: "已添加模型"
                 refreshCustomModels()
                 refreshModels()
             } catch (err: Exception) {
-                connectionError = "添加模型失败：${err.message}"
+                modelActionError = "添加模型失败：${err.message}"
+                modelDraftRejected = false
             } finally {
                 modelBusy = false
             }
         }
+        return true
     }
 
     /** `--context 200000` and `--output 64000` take a positive integer, or the dialog says so. */
     private fun positiveLimit(flag: String, raw: String?): Int? {
         val value = raw?.toIntOrNull()
         if (value == null || value <= 0) {
-            connectionError = "$flag 需要一个正整数，例如 `$flag 200000`。"
+            modelActionError = "$flag 需要一个正整数，例如 $flag 200000。"
+            modelDraftRejected = true
             return null
         }
         return value
@@ -934,21 +1224,27 @@ class AppViewModel(
             modelBusy = true
             try {
                 val result = api.assignAgent(conn(), agent, model)
+                modelActionError = null
+                modelDraftRejected = false
                 toast = result.sessionMessage?.let { "${result.message} $it" } ?: result.message
                 refreshCustomModels()
                 refreshSession()
             } catch (err: Exception) {
-                connectionError = "绑定 Agent 模型失败：${err.message}"
+                modelActionError = "绑定 Agent 模型失败：${err.message}"
+                modelDraftRejected = false
             } finally {
                 modelBusy = false
             }
         }
     }
 
-    fun removeCustomModel(key: String, force: Boolean = false) {        viewModelScope.launch {
+    fun removeCustomModel(key: String, force: Boolean = false) {
+        viewModelScope.launch {
             modelBusy = true
             try {
                 toast = api.removeCustomModel(conn(), key, force)
+                modelActionError = null
+                modelDraftRejected = false
                 modelDeleteBlocked = null
                 modelDeleteBlockedKey = null
                 refreshCustomModels()
@@ -959,10 +1255,10 @@ class AppViewModel(
                     modelDeleteBlocked = err.message
                     modelDeleteBlockedKey = key
                 } else {
-                    connectionError = "删除模型失败：${err.message}"
+                    modelActionError = "删除模型失败：${err.message}"
                 }
             } catch (err: Exception) {
-                connectionError = "删除模型失败：${err.message}"
+                modelActionError = "删除模型失败：${err.message}"
             } finally {
                 modelBusy = false
             }
@@ -1006,6 +1302,14 @@ class AppViewModel(
         ccCatalogReady = false
         ccCatalogError = null
         guarded("加载 cc-switch") {
+            reloadCcTables()
+        }
+    }
+
+    private fun refreshCcQuietly() {
+        if (ccBusy) return
+        ccCatalogReady = false
+        quietly({ ccCatalogError = "无法读取 cc-switch：$it" }) {
             reloadCcTables()
         }
     }
@@ -1439,7 +1743,38 @@ class AppViewModel(
     // ---- magpie ----
 
     fun refreshMagpie() {
-        guarded("加载 magpie") { reloadMagpie() }
+        if (magpieBusy) return
+        magpieBusy = true
+        magpieError = null
+        guarded("加载 magpie", onError = { magpieError = "无法加载 magpie 状态：${it.message}" }) {
+            try {
+                reloadMagpie()
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                magpieError = if (err is NotConfiguredException) err.message else "无法加载 magpie 状态：${err.message}"
+                throw err
+            } finally {
+                magpieBusy = false
+            }
+        }
+    }
+
+    private fun refreshMagpieQuietly() {
+        if (magpieBusy) return
+        magpieBusy = true
+        viewModelScope.launch {
+            try {
+                reloadMagpie()
+                magpieError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                magpieError = if (err is NotConfiguredException) err.message else "无法加载 magpie 状态：${err.message}"
+            } finally {
+                magpieBusy = false
+            }
+        }
     }
 
     private suspend fun reloadMagpie() {
@@ -1588,12 +1923,14 @@ class AppViewModel(
     fun refreshHermes() {
         if (hermesBusy) return
         hermesBusy = true
+        hermesError = null
         viewModelScope.launch {
             try {
                 hermes = api.hermes(conn())
+                hermesError = null
                 connectionError = null
             } catch (err: Exception) {
-                connectionError = if (err is NotConfiguredException) err.message else "读取 Hermes 记忆失败：${err.message}"
+                hermesError = if (err is NotConfiguredException) err.message else "无法加载 Hermes 记忆：${err.message}"
             } finally {
                 hermesBusy = false
             }
@@ -1639,21 +1976,41 @@ class AppViewModel(
     // ---- env config ----
 
     fun refreshConfig() {
-        guarded("加载配置") { configView = api.config(conn()) }
+        guarded("加载配置", onError = { configError = "无法加载配置：${it.message}" }) {
+            configError = null
+            configView = api.config(conn())
+        }
     }
 
-    fun addConfig(input: String) {
+    private fun refreshConfigQuietly() = quietly({ configError = "无法加载配置：$it" }) {
+        configView = api.config(conn())
+        configError = null
+    }
+
+    /** Returns false when the draft itself is malformed, so its prompt can stay open. */
+    fun addConfig(input: String, onResult: (Boolean) -> Unit = {}): Boolean {
         val trimmed = input.trim()
         val space = trimmed.indexOfFirst { it.isWhitespace() }
         if (space <= 0) {
-            connectionError = "用法：KEY 值，例如 LOG_LEVEL debug"
-            return
+            configActionError = "用法：KEY 值，例如 LOG_LEVEL debug"
+            configDraftRejected = true
+            onResult(false)
+            return false
         }
-        setConfig(trimmed.substring(0, space), trimmed.substring(space + 1).trim())
+        return setConfig(trimmed.substring(0, space), trimmed.substring(space + 1).trim(), onResult)
     }
 
-    fun setConfig(key: String, value: String) {
-        if (configBusy) return
+    /**
+     * The server validates asynchronously, so a prompt closes only from [onResult]'s success.
+     * Its draft stays in the dialog while a 400 is showing, exactly like ModelsScreen.
+     */
+    fun setConfig(key: String, value: String, onResult: (Boolean) -> Unit = {}): Boolean {
+        if (configBusy) {
+            onResult(false)
+            return false
+        }
+        configActionError = null
+        configDraftRejected = false
         viewModelScope.launch {
             configBusy = true
             try {
@@ -1661,24 +2018,34 @@ class AppViewModel(
                 configView = result.config
                 toast = result.message.ifBlank { "已更新 $key" }
                 if (key.uppercase() == "REMINDER_TIMEZONE") refreshTimezone()
+                onResult(true)
             } catch (err: Exception) {
-                connectionError = "更新配置失败：${err.message}"
+                configActionError = "更新配置失败：${err.message}"
+                configDraftRejected = true
+                onResult(false)
             } finally {
                 configBusy = false
             }
         }
+        return true
     }
 
-    fun unsetConfig(key: String) {
-        if (configBusy) return
+    fun unsetConfig(key: String, onResult: (Boolean) -> Unit = {}) {
+        if (configBusy) {
+            onResult(false)
+            return
+        }
+        configActionError = null
         viewModelScope.launch {
             configBusy = true
             try {
                 val result = api.unsetConfig(conn(), key)
                 configView = result.config
                 toast = result.message.ifBlank { "已删除 $key" }
+                onResult(true)
             } catch (err: Exception) {
-                connectionError = "删除配置失败：${err.message}"
+                configActionError = "删除配置失败：${err.message}"
+                onResult(false)
             } finally {
                 configBusy = false
             }
@@ -1686,17 +2053,62 @@ class AppViewModel(
     }
 
     fun refreshModels() {
-        guarded("加载模型") { modelChoices = api.models(conn()) }
+        if (modelsLoading) return
+        modelsLoading = true
+        viewModelScope.launch {
+            try {
+                modelsError = null
+                modelChoices = api.models(conn())
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                modelsError = if (err is NotConfiguredException) err.message else "无法加载模型：${err.message}"
+            } finally {
+                modelsLoading = false
+            }
+        }
     }
 
     fun refreshHistory() {
-        guarded("加载历史") { loadHistory() }
+        if (historyBusy) return
+        historyBusy = true
+        historyError = null
+        guarded("加载历史", onError = { historyError = "无法加载任务历史：${it.message}" }) {
+            try {
+                loadHistory()
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                historyError = if (err is NotConfiguredException) err.message else "无法加载任务历史：${err.message}"
+                throw err
+            } finally {
+                historyBusy = false
+            }
+        }
+    }
+
+    /** Foreground/return refresh: same failure marker, without a duplicated global banner. */
+    private fun refreshHistoryQuietly() {
+        if (historyBusy) return
+        historyBusy = true
+        viewModelScope.launch {
+            try {
+                loadHistory()
+                historyError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                historyError = if (err is NotConfiguredException) err.message else "无法加载任务历史：${err.message}"
+            } finally {
+                historyBusy = false
+            }
+        }
     }
 
     fun updateHistoryLimit(limit: Int) {
         if (limit == historyLimit) return
         historyLimit = limit
-        guarded("加载历史") { loadHistory() }
+        refreshHistory()
     }
 
     private suspend fun loadHistory() {
@@ -1777,34 +2189,124 @@ class AppViewModel(
 
     fun clearHistory() {
         guarded("清空历史") {
-            api.clearHistory(conn())
+            val cleared = api.clearHistory(conn())
             history = emptyList()
             historyTotal = 0
-            toast = "历史已清空"
+            toast = if (cleared > 0) "已清空 $cleared 条历史" else "没有可清空的历史"
         }
     }
 
     fun refreshReminders() {
-        guarded("加载提醒") { reminders = api.reminders(conn()) }
+        if (remindersBusy) return
+        remindersBusy = true
+        guarded("加载提醒", onError = {
+            remindersError = if (it.pushUnavailable()) null else "无法加载提醒：${it.message}"
+            remindersBusy = false
+        }) {
+            remindersError = null
+            remindersUnavailable = null
+            try {
+                // /info may have been read before a chat channel was paired. A 409 from the list
+                // is authoritative, so retrying here also refreshes the reason the page shows.
+                serverInfo = api.info(conn())
+                reminders = api.reminders(conn())
+            } catch (err: Exception) {
+                remindersUnavailable = err.pushUnavailableReason()
+                throw err
+            } finally {
+                remindersBusy = false
+            }
+        }
+    }
+
+    private fun refreshRemindersQuietly() = quietly({ remindersError = "无法加载提醒：$it" }) {
+        try {
+            serverInfo = api.info(conn())
+            reminders = api.reminders(conn())
+            remindersError = null
+            remindersUnavailable = null
+        } catch (err: Exception) {
+            remindersUnavailable = err.pushUnavailableReason()
+            throw err
+        }
     }
 
     fun refreshSchedules() {
-        guarded("加载定时任务") { schedules = api.schedules(conn()) }
+        if (schedulesBusy) return
+        schedulesBusy = true
+        guarded("加载定时任务", onError = {
+            schedulesError = if (it is ApiException && it.code == 409) null else "无法加载定时任务：${it.message}"
+            schedulesBusy = false
+        }) {
+            schedulesError = null
+            schedulesUnavailable = null
+            try {
+                serverInfo = api.info(conn())
+                schedules = api.schedules(conn())
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                schedulesUnavailable = err.pushUnavailableReason()
+                throw err
+            } finally {
+                schedulesBusy = false
+            }
+        }
     }
 
-    fun refreshStatus() {
-        guarded("加载状态") {
-            status = api.status(conn())
-            val (summary, days) = api.usage(conn())
-            usage = summary
-            trend = days
-            dailyReport = api.usageReport(conn())
+    private fun refreshSchedulesQuietly() = quietly({ schedulesError = "无法加载定时任务：$it" }) {
+        try {
             serverInfo = api.info(conn())
+            schedules = api.schedules(conn())
+            schedulesError = null
+            schedulesUnavailable = null
+        } catch (err: Exception) {
+            schedulesUnavailable = err.pushUnavailableReason()
+            throw err
+        }
+    }
+
+    /** The server's 409 here means the deployment has no chat delivery target. */
+    private fun Throwable.pushUnavailableReason(): String? =
+        if (this is ApiException && code == 409) message else null
+
+    private fun Throwable.pushUnavailable(): Boolean = this is ApiException && code == 409
+
+    fun refreshStatus() {
+        if (statusBusy) return
+        statusBusy = true
+        guarded("加载状态", onError = { statusError = "无法加载运行状态：${it.message}" }) {
+            statusError = null
+            try {
+                status = api.status(conn())
+                val (summary, days) = api.usage(conn())
+                usage = summary
+                trend = days
+                dailyReport = api.usageReport(conn())
+                serverInfo = api.info(conn())
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                statusError = "无法加载运行状态：${err.message}"
+            }
+            statusBusy = false
         }
     }
 
     fun refreshHelp() {
-        guarded("加载帮助") { loadHelp() }
+        if (helpBusy) return
+        helpBusy = true
+        guarded("加载帮助", onError = { helpError = "无法加载帮助：${it.message}" }) {
+            helpError = null
+            try {
+                loadHelp()
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                helpError = "无法加载帮助：${err.message}"
+            }
+            helpBusy = false
+        }
     }
 
     /** The help copy and the command list come from one endpoint, so they never drift apart. */
@@ -1821,7 +2323,10 @@ class AppViewModel(
     }
 
     fun refreshDir() {
-        guarded("加载工作目录") { dirInfo = api.dir(conn()) }
+        guarded("加载工作目录", onError = { sessionError = "无法加载工作目录：${it.message}" }) {
+            sessionError = null
+            dirInfo = api.dir(conn())
+        }
     }
 
     /** Opens the picker on the session's own directory, or wherever the caller names. */
@@ -1858,39 +2363,91 @@ class AppViewModel(
         setWorkDir(path)
     }
 
-    fun setWorkDir(path: String) {
-        guarded("切换工作目录") {
-            dirInfo = api.setDir(conn(), path)
-            session = api.session(conn())
-            toast = "工作目录已更新"
+    /** Returns false for an empty draft; [onResult] reports the server outcome. */
+    fun setWorkDir(path: String, onResult: (Boolean) -> Unit = {}): Boolean {
+        if (path.isBlank()) {
+            sessionActionError = "填写服务器上的目录路径，例如 /data/workspace/project"
+            sessionDraftRejected = true
+            onResult(false)
+            return false
         }
+        sessionActionError = null
+        sessionDraftRejected = false
+        viewModelScope.launch {
+            try {
+                dirInfo = api.setDir(conn(), path)
+                session = api.session(conn())
+                toast = "工作目录已更新"
+                onResult(true)
+            } catch (err: Exception) {
+                sessionActionError = "切换工作目录失败：${err.message}"
+                sessionDraftRejected = true
+                onResult(false)
+            }
+        }
+        return true
     }
 
     fun resetWorkDir() {
-        guarded("恢复默认目录") {
-            dirInfo = api.resetDir(conn())
-            session = api.session(conn())
-            toast = "已恢复默认工作目录"
+        sessionActionError = null
+        viewModelScope.launch {
+            try {
+                dirInfo = api.resetDir(conn())
+                session = api.session(conn())
+                toast = "已恢复默认工作目录"
+            } catch (err: Exception) {
+                sessionActionError = "恢复默认目录失败：${err.message}"
+            }
         }
     }
 
     fun refreshTimezone() {
-        guarded("加载时区") { timezone = api.timezone(conn()) }
-    }
-
-    fun changeTimezone(zone: String) {
-        guarded("切换时区") {
-            val message = api.setTimezone(conn(), zone)
+        guarded("加载时区", onError = { sessionError = "无法加载时区：${it.message}" }) {
+            sessionError = null
             timezone = api.timezone(conn())
-            session = api.session(conn())
-            toast = message
         }
     }
 
+    /** Returns false for an empty draft; [onResult] reports the server outcome. */
+    fun changeTimezone(zone: String, onResult: (Boolean) -> Unit = {}): Boolean {
+        if (zone.isBlank()) {
+            sessionActionError = "填写 IANA 时区名，例如 Asia/Shanghai"
+            sessionDraftRejected = true
+            onResult(false)
+            return false
+        }
+        sessionActionError = null
+        sessionDraftRejected = false
+        viewModelScope.launch {
+            try {
+                val message = api.setTimezone(conn(), zone)
+                timezone = api.timezone(conn())
+                session = api.session(conn())
+                toast = message
+                onResult(true)
+            } catch (err: Exception) {
+                sessionActionError = "切换时区失败：${err.message}"
+                sessionDraftRejected = true
+                onResult(false)
+            }
+        }
+        return true
+    }
+
     fun refreshQueue() {
-        guarded("加载队列") {
-            queue = api.queue(conn())
-            recentTasks = api.tasks(conn()).filterNot { it.isRunning }
+        guarded("加载队列", onError = { queueError = "无法加载任务队列：${it.message}" }) {
+            try {
+                val nextQueue = api.queue(conn())
+                val nextRecent = api.tasks(conn()).filterNot { it.isRunning }
+                queue = nextQueue
+                recentTasks = nextRecent
+                queueError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                queueError = if (err is NotConfiguredException) err.message else "无法加载任务队列：${err.message}"
+                throw err
+            }
         }
     }
 
@@ -1899,17 +2456,26 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 val records = api.tasks(conn())
-                queue = api.queue(conn())
+                val nextQueue = api.queue(conn())
+                queue = nextQueue
                 recentTasks = records.filterNot { it.isRunning }
-            } catch (_: Exception) {
+                // A successful poll proves the read works again. Keep a prior failure visible
+                // only until this point; the initial read sets it, later polls must not erase it
+                // before the corresponding data actually arrives.
+                queueError = null
+            } catch (err: Exception) {
+                if (queue.isEmpty() && recentTasks.isEmpty()) {
+                    queueError = if (err is NotConfiguredException) err.message else "无法加载任务队列：${err.message}"
+                }
             }
         }
     }
 
     fun stopTask(id: String) {
-        guarded("停止任务") {
+        guarded("停止任务", onError = { queueActionError = "停止任务失败：${it.message}" }) {
             try {
                 api.stopTask(conn(), id)
+                queueActionError = null
                 toast = "已请求停止"
             } catch (err: ApiException) {
                 // The queue list is refreshed asynchronously, so a row can have settled between
@@ -1941,6 +2507,7 @@ class AppViewModel(
                 }
                 persistMessages()
                 pollTask(task.id)
+                toast = "已重新提交任务"
             } catch (err: ApiException) {
                 // The server prunes old tasks; then only the local history can help,
                 // at the cost of attachments and the model pin
@@ -1977,8 +2544,9 @@ class AppViewModel(
                 persistMessages()
                 pollTask(task.id)
                 refreshQueue()
+                toast = "已重新提交任务，结果可在聊天中查看"
             } catch (err: Exception) {
-                connectionError = "重试失败：${err.message}"
+                queueActionError = "重试失败：${err.message}"
             } finally {
                 retrying.remove(taskId)
             }
@@ -2019,35 +2587,76 @@ class AppViewModel(
     }
 
     fun refreshAccess() {
-        guarded("加载白名单") {
+        guarded("加载白名单", onError = { accessError = "无法加载白名单：${it.message}" }) {
+            accessError = null
             val info = api.access(conn())
             accessUsers = info.users
             allowAllUsers = info.allowAll
         }
     }
 
-    fun addAccess(id: String) {
-        val trimmed = id.trim()
-        if (trimmed.isEmpty()) return
-        guarded("添加白名单") {
-            val result: AccessResult = api.addAccess(conn(), trimmed)
-            accessUsers = result.users
-            allowAllUsers = result.allowAll
-            toast = result.message ?: "已加入白名单"
-        }
+    private fun refreshAccessQuietly() = quietly({ accessError = "无法加载白名单：$it" }) {
+        val info = api.access(conn())
+        accessUsers = info.users
+        allowAllUsers = info.allowAll
+        accessError = null
     }
 
-    fun removeAccess(id: String) {
-        guarded("移除白名单") {
-            val result: AccessResult = api.removeAccess(conn(), id)
-            accessUsers = result.users
-            allowAllUsers = result.allowAll
-            toast = result.message ?: "已移出白名单"
+    /** Returns false for an empty/invalid draft; [onResult] reports the server outcome. */
+    fun addAccess(id: String, onResult: (Boolean) -> Unit = {}): Boolean {
+        val trimmed = id.trim()
+        if (trimmed.length !in 1..20 || !trimmed.all(Char::isDigit)) {
+            accessActionError = "用户 ID 只能是 20 位以内的数字"
+            accessDraftRejected = true
+            onResult(false)
+            return false
+        }
+        accessActionError = null
+        accessDraftRejected = false
+        viewModelScope.launch {
+            try {
+                val result: AccessResult = api.addAccess(conn(), trimmed)
+                accessUsers = result.users
+                allowAllUsers = result.allowAll
+                toast = result.message ?: "已加入白名单"
+                accessDraftRejected = false
+                onResult(true)
+            } catch (err: Exception) {
+                accessActionError = "添加白名单失败：${err.message}"
+                accessDraftRejected = true
+                onResult(false)
+            }
+        }
+        return true
+    }
+
+    fun removeAccess(id: String, onResult: (Boolean) -> Unit = {}) {
+        accessActionError = null
+        viewModelScope.launch {
+            try {
+                val result: AccessResult = api.removeAccess(conn(), id)
+                accessUsers = result.users
+                allowAllUsers = result.allowAll
+                toast = result.message ?: "已移出白名单"
+                onResult(true)
+            } catch (err: Exception) {
+                accessActionError = "移除白名单失败：${err.message}"
+                accessDraftRejected = true
+                onResult(false)
+            }
         }
     }
 
     fun refreshAliases() {
-        guarded("加载快捷指令") { aliases = api.aliases(conn()) }
+        guarded("加载快捷指令", onError = { aliasesError = "无法加载快捷指令：${it.message}" }) {
+            aliasesError = null
+            aliases = api.aliases(conn())
+        }
+    }
+
+    private fun refreshAliasesQuietly() = quietly({ aliasesError = "无法加载快捷指令：$it" }) {
+        aliases = api.aliases(conn())
+        aliasesError = null
     }
 
     /** Silent refresh for the chat palette; a failed lookup must not paint an error banner. */
@@ -2060,61 +2669,106 @@ class AppViewModel(
     }
 
     /** Input format matches `/alias add 名称 指令内容`: first word is the name. */
-    fun addAlias(input: String) {
+    fun addAlias(input: String, onResult: (Boolean) -> Unit = {}): Boolean {
         val trimmed = input.trim()
         val name = trimmed.substringBefore(' ').removePrefix("/")
         val expansion = trimmed.substringAfter(' ', "").trim()
         if (name.isEmpty() || expansion.isEmpty()) {
-            connectionError = "用法：名称 指令内容，例如：code 审查当前目录的代码"
-            return
+            aliasesActionError = "用法：名称 指令内容，例如：code 审查当前目录的代码"
+            aliasesDraftRejected = true
+            onResult(false)
+            return false
         }
-        guarded("创建快捷指令") {
-            toast = api.addAlias(conn(), name, expansion)
-            refreshAliases()
+        aliasesActionError = null
+        aliasesDraftRejected = false
+        viewModelScope.launch {
+            try {
+                toast = api.addAlias(conn(), name, expansion)
+                refreshAliases()
+                onResult(true)
+            } catch (err: Exception) {
+                aliasesActionError = "创建快捷指令失败：${err.message}"
+                aliasesDraftRejected = true
+                onResult(false)
+            }
         }
+        return true
     }
 
-    fun deleteAlias(name: String) {
-        guarded("删除快捷指令") {
-            api.deleteAlias(conn(), name)
-            refreshAliases()
-            toast = "已删除 /$name"
+    fun deleteAlias(name: String, onResult: (Boolean) -> Unit = {}) {
+        aliasesActionError = null
+        viewModelScope.launch {
+            try {
+                api.deleteAlias(conn(), name)
+                refreshAliases()
+                toast = "已删除 /$name"
+                onResult(true)
+            } catch (err: Exception) {
+                aliasesActionError = "删除快捷指令失败：${err.message}"
+                aliasesDraftRejected = true
+                onResult(false)
+            }
         }
     }
 
     fun refreshProxies() {
-        guarded("加载代理") {
+        guarded("加载代理", onError = { proxiesError = "无法加载代理：${it.message}" }) {
+            proxiesError = null
             val list = api.proxies(conn())
             proxies = list.proxies
             activeProxyId = list.active
         }
     }
 
-    fun addProxy(input: String) {
+    private fun refreshProxiesQuietly() = quietly({ proxiesError = "无法加载代理：$it" }) {
+        val list = api.proxies(conn())
+        proxies = list.proxies
+        activeProxyId = list.active
+        proxiesError = null
+    }
+
+    /** Returns false for an empty draft; [onResult] reports the server outcome. */
+    fun addProxy(input: String, onResult: (Boolean) -> Unit = {}): Boolean {
         val trimmed = input.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty()) {
+            proxyActionError = "填写代理地址，例如 socks5://127.0.0.1:1080"
+            proxyDraftRejected = true
+            onResult(false)
+            return false
+        }
         val url = trimmed.substringBefore(' ')
         val name = trimmed.substringAfter(' ', "").trim().ifEmpty { null }
-        guarded("添加代理") {
+        proxyActionError = null
+        proxyDraftRejected = false
+        viewModelScope.launch {
             proxyBusy = true
             try {
                 val result = api.addProxy(conn(), url, name)
                 toast = result.message ?: "代理已添加"
                 refreshProxies()
+                onResult(true)
+            } catch (err: Exception) {
+                proxyActionError = "添加代理失败：${err.message}"
+                proxyDraftRejected = true
+                onResult(false)
             } finally {
                 proxyBusy = false
             }
         }
+        return true
     }
 
     fun useProxy(id: Int) {
-        guarded("启用代理") {
+        proxyActionError = null
+        viewModelScope.launch {
             proxyBusy = true
             try {
                 val result = api.useProxy(conn(), id)
                 toast = result.message ?: "代理已启用"
                 proxyTestMessage = null
                 refreshProxies()
+            } catch (err: Exception) {
+                proxyActionError = "启用代理失败：${err.message}"
             } finally {
                 proxyBusy = false
             }
@@ -2122,6 +2776,7 @@ class AppViewModel(
     }
 
     fun testProxy(id: Int) {
+        proxyActionError = null
         viewModelScope.launch {
             proxyBusy = true
             try {
@@ -2130,19 +2785,25 @@ class AppViewModel(
                 proxyTestMessage = (if (result.ok) "连接正常" else "连接失败") + latency +
                     (result.message?.takeIf { !result.ok }?.let { "：$it" } ?: "")
             } catch (err: Exception) {
-                proxyTestMessage = "测试失败：${err.message}"
+                proxyTestMessage = null
+                proxyActionError = "测试代理失败：${err.message}"
             } finally {
                 proxyBusy = false
             }
         }
     }
 
-    fun removeProxy(id: Int) {
-        guarded("删除代理") {
+    fun removeProxy(id: Int, onResult: (Boolean) -> Unit = {}) {
+        proxyActionError = null
+        viewModelScope.launch {
             proxyBusy = true
             try {
                 toast = api.removeProxy(conn(), id)
                 refreshProxies()
+                onResult(true)
+            } catch (err: Exception) {
+                proxyActionError = "删除代理失败：${err.message}"
+                onResult(false)
             } finally {
                 proxyBusy = false
             }
@@ -2150,7 +2811,8 @@ class AppViewModel(
     }
 
     fun disableProxy() {
-        guarded("停用代理") {
+        proxyActionError = null
+        viewModelScope.launch {
             proxyBusy = true
             try {
                 toast = api.disableProxy(conn())
@@ -2165,17 +2827,28 @@ class AppViewModel(
     fun refreshDiagnostics() {
         viewModelScope.launch {
             opsBusy = true
+            diagnosticsError = null
             try {
                 diagnostics = api.diagnostics(conn())
                 val release = api.releaseInfo(conn())
                 releaseInfo = release.release
                 startupCheck = release.startup
             } catch (err: Exception) {
-                connectionError = "加载诊断失败：${err.message}"
+                diagnostics = null
+                diagnosticsError = "加载诊断失败：${err.message ?: err.javaClass.simpleName}"
             } finally {
                 opsBusy = false
             }
         }
+    }
+
+    private fun refreshDiagnosticsQuietly() = quietly({ diagnosticsError = "加载诊断失败：$it" }) {
+        val loaded = api.diagnostics(conn())
+        val release = api.releaseInfo(conn())
+        diagnostics = loaded
+        releaseInfo = release.release
+        startupCheck = release.startup
+        diagnosticsError = null
     }
 
     fun refreshAndroidRelease() {
@@ -2187,6 +2860,11 @@ class AppViewModel(
                 appUpdateError = "检查更新失败：${err.message}"
             }
         }
+    }
+
+    private fun refreshAndroidReleaseQuietly() = quietly({ appUpdateError = "检查更新失败：$it" }) {
+        androidRelease = api.androidRelease(conn(), appVersionCode.toInt())
+        appUpdateError = null
     }
 
     /**
@@ -2304,7 +2982,15 @@ class AppViewModel(
     }
 
     fun refreshOpsService() {
-        guarded("加载服务状态") { serviceStatus = api.opsService(conn()) }
+        guarded("加载服务状态", onError = { serviceStatusError = "无法加载服务状态：${it.message}" }) {
+            serviceStatus = api.opsService(conn())
+            serviceStatusError = null
+        }
+    }
+
+    private fun refreshOpsServiceQuietly() = quietly({ serviceStatusError = "无法加载服务状态：$it" }) {
+        serviceStatus = api.opsService(conn())
+        serviceStatusError = null
     }
 
     /** Runs an /ops action; update/check/restart can take minutes and block the button. */
@@ -2355,12 +3041,18 @@ class AppViewModel(
             opsBusy = true
             try {
                 logTail = api.logs(conn(), source, lines)
+                logError = null
             } catch (err: Exception) {
-                connectionError = "加载日志失败：${err.message}"
+                logError = "加载日志失败：${err.message}"
             } finally {
                 opsBusy = false
             }
         }
+    }
+
+    private fun refreshLogsQuietly() = quietly({ logError = "加载日志失败：$it" }) {
+        logTail = api.logs(conn(), logSource, logLines)
+        logError = null
     }
 
     /** Installs, updates or uninstalls an Agent CLI; the caller confirms first. */
@@ -2481,11 +3173,13 @@ class AppViewModel(
             return
         }
         guarded("设置一次性模型") {
-            val choices = api.models(conn(), oneOffEngine ?: session?.engine)
+            val choices = api.models(conn(), oneOffModelEngine)
             if (oneOffEngine != null) {
                 oneOffChoices = choices
+                oneOffModelsError = null
             } else {
                 modelChoices = choices
+                modelsError = null
             }
             val hit = choices.models.matchModel(wanted)
             // A CLI that lists nothing but names a format takes the word as typed, like Telegram
@@ -2567,7 +3261,10 @@ class AppViewModel(
         if (raw.startsWith("/") && runSlash(raw)) return true
         if (busy) return false
         val attachments = pendingAttachments
-        val engine = oneOffEngine
+        // A model pin without an engine pin still belongs to the session engine. Passing the
+        // engine explicitly prevents the server from interpreting an unpinned model (which may
+        // be a CLI-only id) as an OpenCode model.
+        val engine = oneOffEngine ?: oneOffModel?.let { session?.engine }
         val model = oneOffModel
         if (raw.isEmpty() && attachments.isEmpty()) return false
         // busy 在 launch 外置位:协程要等调度才跑,窗口内快速连发会双双通过检查
@@ -2972,13 +3669,14 @@ class AppViewModel(
         guarded("立即执行定时任务") {
             api.runSchedule(conn(), id)
             refreshSchedules()
-            toast = "已开始执行定时任务 #$id，结果会发送到 Telegram"
+            toast = "已开始执行定时任务 #$id，结果会发送到当前聊天渠道"
         }
     }
 
     fun clearQueue() {
-        guarded("清空队列") {
+        guarded("清空队列", onError = { queueActionError = "清空队列失败：${it.message}" }) {
             val cleared = api.clearQueue(conn())
+            queueActionError = null
             refreshQueue()
             toast = if (cleared.isEmpty()) "队列已经是空的" else "已取消 ${cleared.size} 条排队任务"
         }

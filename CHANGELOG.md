@@ -29,6 +29,15 @@
 
 ## [未发布]
 
+### Android 1.1.4
+
+- **附件大小一致**：待发送附件与已发送气泡共用 `formatFileSize()`；小于 1KB 的文件显示精确字节数（例如 `34B`），不会再出现待发送时 `1KB`、发送后 `34B`。
+- **队列读失败保留旧数据**：刷新任务队列时，只有 `queue` 与最近任务都成功读取后才替换列表；任一读取失败会保留旧行并显示原因，空列表冷启动失败时给出完整错误与重试。
+- **操作失败留在原页面**：配置、白名单、代理、快捷指令、会话设置、模型、队列与定时任务等写操作失败时在各自页面展示原因，不关闭正在编辑的弹窗；删除和清空操作先确认。
+- **发送失败不丢输入**：App 发送失败会把提示词放回草稿，并保留本次选择的一次性引擎/模型，避免重试时悄悄换引擎；新增契约测试固定这一行为。
+- **配对与凭据页面**：配对失败会留在设置页说明旧配置是否保留，令牌与加密密钥默认遮蔽并可显式查看；地址字段支持较长的 Instabox 主机名。
+- **发布门禁**：Android 标签必须与 `android/app/build.gradle.kts` 的 `versionName` 一致；发布工作流先跑完整项目检查，再签名构建并校验 APK 签名。
+
 ### 新增
 
 - **统一生命周期 CLI**：新增 `npm run bot -- <command>`，统一 `install`、`setup`、`doctor`、`status`、`logs`、`run`、`start`、`stop`、`restart`、`update`、`opencode` 与 `uninstall`。script/systemd supervisor、PID/锁身份、current release、安装清单和健康检查共用 `src/runtime.ts`，旧 `npm run restart`、`scripts/restart.sh`、`scripts/apply-release.sh`、`scripts/run-current.sh` 保留为兼容入口。

@@ -56,6 +56,18 @@ const skipEncryption = (path) => {
   return segments.includes("events") || segments.includes("media") || segments.includes("export") || segments.at(-1) === "backup"
 }
 
+/** ApiClient.awaitOpsJob: the hosted tunnel cuts a sync POST, so every poll is a short request. */
+async function waitForOp(id, ms = 60_000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const { json } = await call(`/ops/actions/${encodeURIComponent(id)}`, { ms: 10_000 })
+    const job = json.job ?? {}
+    if (job.state === "done") return job.result
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+  }
+  throw new Error(`运维任务 ${id} 在 ${Math.round(ms / 1000)} 秒内没有完成`)
+}
+
 async function call(path, { method = "GET", body, ms = 20_000 } = {}) {
   const headers = { authorization: `Bearer ${token}` }
   const paired = key !== null && !skipEncryption(path)
@@ -106,6 +118,30 @@ await step("GET /health 连接、版本与加密一致性", async () => {
   const { json, answered } = await call("/health")
   if (key && !answered) throw new Error("带了配对密钥，服务端却回明文：API_ENCRYPTION 与二维码里的密钥不是同一把")
   return `${json.name ?? "agent-bot"} ${json.version ?? ""} engine=${json.engine ?? "?"}`.trim()
+})
+await step("GET /ops/actions/latest 检查运维任务重连入口", async () => {
+  let res
+  try {
+    res = await fetch(`${API}/ops/actions/latest?label=check`, {
+      headers: { authorization: `Bearer ${token}`, ...(key ? { "x-enc": "v1" } : {}) },
+    })
+  } catch (err) {
+    throw new Error(`GET /ops/actions/latest 连不上 ${API}：${err.message}`)
+  }
+  // No job yet is normal on a fresh process; an unknown route would mean the App loses a
+  // check whose POST the tunnel cut. A 400 is not: this URL always includes the label.
+  if (res.status !== 200 && res.status !== 404) throw new Error(`GET /ops/actions/latest：HTTP ${res.status}`)
+  return res.status === 200 ? "已有可重连任务" : "暂无任务（正常）"
+})
+await step("GET /ops/check-update?async=1 短请求后轮询结果", async () => {
+  const { json } = await call("/ops/check-update?async=1", { ms: 10_000 })
+  if (!json.job?.id) {
+    // An older server answers synchronously; the App handles that too, so this is not a failure.
+    if (json.result) return "旧服务端同步响应（兼容）"
+    throw new Error("缺少 job.id 或 result")
+  }
+  const result = await waitForOp(json.job.id)
+  return result?.ok ? "检查更新通过" : `检查更新返回：${String(result?.message ?? "").slice(0, 80)}`
 })
 if (!results[0]?.ok) {
   console.log(`\n连不上 ${API}：Bot 是否在跑、端口是否放行、手机/这台机器是否与它同网段（或隧道/VPN 是否已开）。`)

@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -95,6 +96,15 @@ fun OpsScreen(vm: AppViewModel) {
         ) {
             item { OpsActionsCard(vm) { path, label -> pending = path to label } }
             vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.pid, status.url) { path, label -> pending = path to label } } }
+            vm.serviceStatusError?.let { message ->
+                item {
+                    InlineNotice(
+                        text = message,
+                        tone = MaterialTheme.colorScheme.error,
+                        icon = Icons.Filled.Warning,
+                    )
+                }
+            }
             vm.opsResult?.let { result -> item { OpsResultCard(result, vm::clearOpsResult) } }
             item { ReleaseCard(vm) { path, label -> pending = path to label } }
             val diag = vm.diagnostics
@@ -103,8 +113,8 @@ fun OpsScreen(vm: AppViewModel) {
             } else if (!vm.opsBusy) {
                 item {
                     Text(
-                        "暂无诊断数据，点击刷新重试。",
-                        color = TextSecondary,
+                        vm.diagnosticsError ?: "暂无诊断数据，点击刷新重试。",
+                        color = if (vm.diagnosticsError != null) MaterialTheme.colorScheme.error else TextSecondary,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(vertical = 8.dp),
                     )
@@ -392,64 +402,87 @@ private fun DiagnosticsCard(diag: Diagnostics) {
 
 @Composable
 private fun LogCard(vm: AppViewModel) {
+    var expanded by remember { mutableStateOf(false) }
     AppCard {
         Column {
-            Text("日志", style = MaterialTheme.typography.titleSmall)
-            Row(
-                modifier = Modifier.padding(top = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ChoicePill(
-                    text = "Bot",
-                    selected = vm.logSource == "bot",
-                    onClick = { vm.refreshLogs("bot", vm.logLines) },
-                )
-                ChoicePill(
-                    text = "OpenCode",
-                    selected = vm.logSource == "opencode",
-                    onClick = { vm.refreshLogs("opencode", vm.logLines) },
-                )
-                LOG_LINE_CHOICES.forEach { count ->
-                    ChoicePill(
-                        text = "$count",
-                        selected = vm.logLines == count,
-                        onClick = { vm.refreshLogs(vm.logSource, count) },
-                    )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("日志", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "收起" else "展开")
                 }
             }
+            if (expanded) {
+                Row(
+                    modifier = Modifier.padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ChoicePill(
+                        text = "Bot",
+                        selected = vm.logSource == "bot",
+                        onClick = { vm.refreshLogs("bot", vm.logLines) },
+                    )
+                    ChoicePill(
+                        text = "OpenCode",
+                        selected = vm.logSource == "opencode",
+                        onClick = { vm.refreshLogs("opencode", vm.logLines) },
+                    )
+                    LOG_LINE_CHOICES.forEach { count ->
+                        ChoicePill(
+                            text = "$count",
+                            selected = vm.logLines == count,
+                            onClick = { vm.refreshLogs(vm.logSource, count) },
+                        )
+                    }
+                }
 
-            val tail = vm.logTail
-            val text = when {
-                tail == null -> "（尚未加载）"
-                tail.missing -> "日志尚未生成：${tail.path ?: ""}"
-                !tail.ok -> "读取日志失败"
-                tail.text.isBlank() -> "（日志为空）"
-                else -> tail.text
-            }
-            SelectionContainer {
+                val tail = vm.logTail
+                vm.logError?.let { message ->
+                    InlineNotice(
+                        text = message,
+                        modifier = Modifier.padding(top = 10.dp),
+                        tone = MaterialTheme.colorScheme.error,
+                        icon = Icons.Filled.Warning,
+                    )
+                }
+                val text = when {
+                    tail == null -> "（尚未加载）"
+                    tail.missing -> "日志尚未生成：${tail.path ?: ""}"
+                    !tail.ok -> "读取日志失败"
+                    tail.text.isBlank() -> "（日志为空）"
+                    else -> tail.text
+                }
+                SelectionContainer {
+                    Text(
+                        text,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (tail != null && tail.ok && !tail.missing) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            TextSecondary
+                        },
+                        modifier = Modifier
+                            .padding(top = 10.dp)
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
+                if (tail != null && tail.ok && !tail.missing) {
+                    Text(
+                        "显示最近 ${vm.logLines} 行 · ${formatBytes(tail.bytes)}",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            } else {
                 Text(
-                    text,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (tail != null && tail.ok && !tail.missing) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        TextSecondary
-                    },
-                    modifier = Modifier
-                        .padding(top = 10.dp)
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
-                )
-            }
-            if (tail != null && tail.ok && !tail.missing) {
-                Text(
-                    "显示最近 ${vm.logLines} 行 · ${formatBytes(tail.bytes)}",
+                    "查看 Bot 与 OpenCode 最近日志",
                     color = TextSecondary,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }

@@ -70,8 +70,12 @@ test("runtime state selects a managed release before the checkout build", () => 
 
 test("install manifest is atomic and scoped to DATA_DIR from .env", () => {
   const dir = tempProject()
+  const previous = process.env.DATA_DIR
   try {
     writeFileSync(join(dir, ".env"), "DATA_DIR=./custom-data\n")
+    // The Bot itself runs with DATA_DIR exported. An explicit projectDir is a complete
+    // target, so its .env must decide the data dir rather than the caller's process env.
+    process.env.DATA_DIR = "./data"
     const path = writeInstallManifest(dir, {
       version: 1,
       projectDir: dir,
@@ -82,6 +86,8 @@ test("install manifest is atomic and scoped to DATA_DIR from .env", () => {
     assert.equal(JSON.parse(readFileSync(path, "utf8")).supervisor, "script")
     assert.equal(readInstallManifest(dir)?.projectDir, dir)
   } finally {
+    if (previous === undefined) delete process.env.DATA_DIR
+    else process.env.DATA_DIR = previous
     rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -40,7 +40,6 @@ fun ConfigScreen(vm: AppViewModel) {
     var editing by remember { mutableStateOf<ConfigEntry?>(null) }
     var adding by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<ConfigEntry?>(null) }
-
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
             title = "配置项",
@@ -51,7 +50,11 @@ fun ConfigScreen(vm: AppViewModel) {
                 AppIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "新增配置项",
-                    onClick = { adding = true },
+                    onClick = {
+                        vm.configActionError = null
+                        vm.configDraftRejected = false
+                        adding = true
+                    },
                 )
                 AppIconButton(
                     icon = Icons.Filled.Refresh,
@@ -68,6 +71,11 @@ fun ConfigScreen(vm: AppViewModel) {
             modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
+        PageErrorNotice(
+            message = vm.configActionError,
+            onDismiss = { vm.configActionError = null },
+        )
+
         if (vm.configBusy) {
             LoadingBar(
                 modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 10.dp),
@@ -80,7 +88,18 @@ fun ConfigScreen(vm: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
             val view = vm.configView
-            if (view == null) {
+            val loadError = vm.configError
+            if (loadError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法加载配置",
+                        message = loadError,
+                        icon = Icons.Filled.Edit,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshConfig,
+                    )
+                }
+            } else if (view == null) {
                 item {
                     EmptyState(
                         icon = Icons.Filled.Edit,
@@ -100,8 +119,14 @@ fun ConfigScreen(vm: AppViewModel) {
                 items(view.entries.sortedBy { it.key }, key = { it.key }) { entry ->
                     ConfigCard(
                         entry = entry,
-                        onEdit = { editing = entry },
-                        onDelete = { deleting = entry },
+                        onEdit = {
+                            vm.configActionError = null
+                            editing = entry
+                        },
+                        onDelete = {
+                            vm.configActionError = null
+                            deleting = entry
+                        },
                     )
                 }
                 if (view.entries.isEmpty()) {
@@ -123,11 +148,14 @@ fun ConfigScreen(vm: AppViewModel) {
             hint = "写入 .env；值不能包含换行。",
             confirmLabel = "保存",
             initial = entry.value.orEmpty(),
-            placeholder = entry.value.orEmpty(),
-            onDismiss = { editing = null },
-            onConfirm = { value ->
-                vm.setConfig(entry.key, value)
+            error = vm.configActionError.takeIf { vm.configDraftRejected },
+            onDismiss = {
                 editing = null
+                vm.configActionError = null
+                vm.configDraftRejected = false
+            },
+            onConfirm = { value ->
+                vm.setConfig(entry.key, value) { ok -> if (ok) editing = null }
             },
         )
     }
@@ -138,10 +166,14 @@ fun ConfigScreen(vm: AppViewModel) {
             hint = "格式：KEY 值，例如 LOG_LEVEL debug。可用键由服务器校验。",
             confirmLabel = "保存",
             placeholder = "LOG_LEVEL debug",
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                vm.addConfig(input)
+            error = vm.configActionError.takeIf { vm.configDraftRejected },
+            onDismiss = {
                 adding = false
+                vm.configActionError = null
+                vm.configDraftRejected = false
+            },
+            onConfirm = { input ->
+                vm.addConfig(input) { ok -> if (ok) adding = false }
             },
         )
     }
@@ -150,11 +182,17 @@ fun ConfigScreen(vm: AppViewModel) {
         AlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("删除配置", style = MaterialTheme.typography.titleLarge) },
-            text = { Text("将删除 ${entry.key}，重启 Bot 后恢复默认值。", color = TextSecondary) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("将删除 ${entry.key}，重启 Bot 后恢复默认值。", color = TextSecondary)
+                    vm.configActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.unsetConfig(entry.key)
-                    deleting = null
+                    vm.unsetConfig(entry.key) { ok -> if (ok) deleting = null }
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },

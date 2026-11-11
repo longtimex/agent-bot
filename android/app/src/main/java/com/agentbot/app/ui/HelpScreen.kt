@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,13 +40,28 @@ fun HelpScreen(vm: AppViewModel) {
             },
         )
 
+        val loadError = vm.helpError
+        if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载帮助",
+                message = loadError,
+                icon = Icons.Filled.Help,
+                onRetry = vm::refreshHelp,
+            )
+            return@Column
+        }
+
         val sections = vm.helpView?.sections.orEmpty()
         if (sections.isEmpty()) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = AppSpacing.screen, vertical = 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("正在加载帮助…", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (vm.helpBusy) "正在加载帮助…" else "还没有帮助内容，点右上角刷新。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         } else {
             Row(
@@ -65,7 +81,7 @@ fun HelpScreen(vm: AppViewModel) {
             }
         }
 
-        if (vm.helpView == null) {
+        if (vm.helpView == null && vm.helpBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen))
             return@Column
         }

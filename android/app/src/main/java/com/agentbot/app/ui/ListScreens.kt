@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material3.AlertDialog
@@ -45,6 +46,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,6 +66,27 @@ import kotlinx.coroutines.delay
 
 /** Windows offered by the history screen; the server keeps at most 50 runs. */
 private val HISTORY_LIMIT_CHOICES = listOf(20, 30, 50)
+
+/** A deployment without a chat channel cannot deliver either automation, so explain the setup. */
+@Composable
+private fun AutomationUnavailable(
+    title: String,
+    message: String,
+    icon: ImageVector,
+    onRetry: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        EmptyState(
+            icon = icon,
+            title = title,
+            message = message,
+            action = { QuietButton(text = "重新检查", icon = Icons.Filled.Refresh, onClick = onRetry) },
+        )
+    }
+}
 
 private fun historyDayLabel(at: Long): String {
     val zone = ZoneId.systemDefault()
@@ -109,6 +132,7 @@ private fun rememberClock(vm: AppViewModel): Long {
 @Composable
 fun HistoryScreen(vm: AppViewModel) {
     var selected by remember { mutableStateOf<HistoryEntry?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     var exporting by remember { mutableStateOf(false) }
     var actionsOpen by remember { mutableStateOf(false) }
@@ -148,6 +172,12 @@ fun HistoryScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新任务历史",
+                    enabled = !vm.historyBusy,
+                    onClick = vm::refreshHistory,
+                )
                 Box {
                     AppIconButton(
                         icon = Icons.Filled.MoreVert,
@@ -178,6 +208,7 @@ fun HistoryScreen(vm: AppViewModel) {
                         )
                         DropdownMenuItem(
                             text = { Text("清空历史", color = MaterialTheme.colorScheme.error) },
+                            enabled = vm.history.isNotEmpty(),
                             leadingIcon = {
                                 Icon(
                                     Icons.Filled.Delete,
@@ -188,7 +219,7 @@ fun HistoryScreen(vm: AppViewModel) {
                             },
                             onClick = {
                                 actionsOpen = false
-                                vm.clearHistory()
+                                confirmClear = true
                             },
                         )
                     }
@@ -216,7 +247,18 @@ fun HistoryScreen(vm: AppViewModel) {
                 )
             }
         }
-        if (vm.history.isEmpty()) {
+        val loadError = vm.historyError
+        if (loadError != null) {
+            InlineNotice(
+                text = loadError,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                tone = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (vm.historyBusy) {
+            LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+        }
+        if (vm.history.isEmpty() && loadError == null && !vm.historyBusy) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
                 verticalArrangement = Arrangement.Center,
@@ -228,6 +270,15 @@ fun HistoryScreen(vm: AppViewModel) {
                     message = "在聊天页发出第一条任务后，完成记录会显示在这里。",
                 )
             }
+            return@Column
+        }
+        if (vm.history.isEmpty()) {
+            PageLoadError(
+                title = "暂时无法加载任务历史",
+                message = loadError ?: "任务历史仍在读取，请稍后重试。",
+                icon = Icons.Filled.History,
+                onRetry = vm::refreshHistory,
+            )
             return@Column
         }
         LazyColumn(
@@ -344,21 +395,58 @@ fun HistoryScreen(vm: AppViewModel) {
             )
         }
     }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清空任务历史？") },
+            text = { Text("将删除服务端保留的全部任务记录（最多 50 条），且无法恢复；聊天里已显示的消息不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.clearHistory()
+                    confirmClear = false
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
 @Composable
 fun RemindersScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
     var snoozeTarget by remember { mutableStateOf<com.agentbot.app.data.Reminder?>(null) }
+    var deleteTarget by remember { mutableStateOf<com.agentbot.app.data.Reminder?>(null) }
     val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
             title = "提醒",
-            subtitle = "到点由服务器推送，不依赖 App 在线",
+            subtitle = "到点推送到 Telegram 或飞书，不依赖 App 在线",
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
             onBack = { vm.navigate(Screen.Chat) },
         )
-        if (vm.reminders.isEmpty()) {
+        val loadError = vm.remindersError
+        val unavailable = vm.remindersUnavailable
+        if (unavailable != null) {
+            AutomationUnavailable(
+                title = "提醒暂时不可用",
+                message = unavailable,
+                icon = Icons.Filled.Notifications,
+                onRetry = vm::refreshReminders,
+            )
+        } else if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载提醒",
+                message = loadError,
+                icon = Icons.Filled.Notifications,
+                onRetry = vm::refreshReminders,
+            )
+        } else if (vm.remindersBusy && vm.reminders.isEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp)) {
+                LoadingBar()
+            }
+        } else if (vm.reminders.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
                 verticalArrangement = Arrangement.Center,
@@ -406,13 +494,29 @@ fun RemindersScreen(vm: AppViewModel) {
                             AppIconButton(
                                 icon = Icons.Filled.Delete,
                                 contentDescription = "删除",
-                                onClick = { vm.deleteReminder(reminder.id) },
+                                onClick = { deleteTarget = reminder },
                             )
                         }
                     }
                 }
             }
         }
+    }
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除这条提醒？") },
+            text = { Text("「${target.text}」将不再触发，且无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteReminder(target.id)
+                    deleteTarget = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            },
+        )
     }
     if (showAdd) {
         TextPromptDialog(
@@ -447,17 +551,22 @@ fun RemindersScreen(vm: AppViewModel) {
             },
         )
     }
-    FloatingActionButtonRow(onClick = { showAdd = true })
+    // The server rejects every create while the list read has no push target; offering + here
+    // would only lead the user into a dialog that cannot succeed.
+    if (vm.remindersError == null && vm.remindersUnavailable == null) {
+        FloatingActionButtonRow(onClick = { showAdd = true })
+    }
 }
 
 @Composable
 fun SchedulesScreen(vm: AppViewModel) {
     var showAdd by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<com.agentbot.app.data.Schedule?>(null) }
     val now = rememberClock(vm)
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
             title = "定时 AI 任务",
-            subtitle = "按计划自动执行，结果推送到 Telegram",
+            subtitle = "按计划自动执行，结果推送到 Telegram 或飞书",
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
             onBack = { vm.navigate(Screen.Chat) },
         )
@@ -467,7 +576,27 @@ fun SchedulesScreen(vm: AppViewModel) {
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp),
         )
-        if (vm.schedules.isEmpty()) {
+        val loadError = vm.schedulesError
+        val unavailable = vm.schedulesUnavailable
+        if (unavailable != null) {
+            AutomationUnavailable(
+                title = "定时任务暂时不可用",
+                message = unavailable,
+                icon = Icons.Filled.Schedule,
+                onRetry = vm::refreshSchedules,
+            )
+        } else if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载定时任务",
+                message = loadError,
+                icon = Icons.Filled.Schedule,
+                onRetry = vm::refreshSchedules,
+            )
+        } else if (vm.schedulesBusy && vm.schedules.isEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp)) {
+                LoadingBar()
+            }
+        } else if (vm.schedules.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
                 verticalArrangement = Arrangement.Center,
@@ -538,7 +667,7 @@ fun SchedulesScreen(vm: AppViewModel) {
                             AppIconButton(
                                 icon = Icons.Filled.Delete,
                                 contentDescription = "删除",
-                                onClick = { vm.deleteSchedule(schedule.id) },
+                                onClick = { deleteTarget = schedule },
                             )
                         }
                     }
@@ -546,10 +675,28 @@ fun SchedulesScreen(vm: AppViewModel) {
             }
         }
     }
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除这个定时任务？") },
+            text = { Text("「${target.prompt}」将不再按计划执行，且无法恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteSchedule(target.id)
+                    deleteTarget = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            },
+        )
+    }
     if (showAdd) {
         ScheduleAddDialog(vm, onDismiss = { showAdd = false })
     }
-    FloatingActionButtonRow(onClick = { showAdd = true })
+    if (vm.schedulesError == null && vm.schedulesUnavailable == null) {
+        FloatingActionButtonRow(onClick = { showAdd = true })
+    }
 }
 
 /**
@@ -605,7 +752,7 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                     singleLine = true,
                 )
                 Text(
-                    "到点由所选引擎执行并把结果发到 Telegram；留空则沿用当前会话的引擎与模型。",
+                    "到点由所选引擎执行并把结果发到 Telegram 或飞书；留空则沿用当前会话的引擎与模型。",
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelMedium,
                 )

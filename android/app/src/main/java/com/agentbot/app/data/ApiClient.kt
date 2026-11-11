@@ -2,6 +2,7 @@ package com.agentbot.app.data
 
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -315,7 +316,10 @@ class ApiClient {
         json.parseToJsonElement(executeEncryptedFallback(connection, method, path, body)).jsonObject
 
     private fun <T> parseList(obj: JsonObject, field: String, deserializer: kotlinx.serialization.KSerializer<T>): List<T> {
-        val array = obj[field]?.jsonArray ?: return emptyList()
+        // A reverse proxy can answer 200 with an error document while the Bot restarts. Treating
+        // a missing collection as [] would paint a failed read as a genuinely empty list.
+        val element = obj[field] ?: throw ApiException(0, "响应缺少 $field 列表，请确认 Bot 仍在运行")
+        val array = element.jsonArray
         return array.map { json.decodeFromJsonElement(deserializer, it.jsonObject) }
     }
 
@@ -730,18 +734,49 @@ class ApiClient {
 
     /** `path` is the server's action id, e.g. `check`, `update`, `restart`, `service/start`. */
     suspend fun runOps(connection: Connection, path: String): OpsResult {
-        val text = executeEncryptedFallback(connection, "POST", "/ops/$path", client = longHttp)
-        val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
-            ?: throw ApiException(500, "响应缺少 result 字段")
-        return json.decodeFromJsonElement(OpsResult.serializer(), result)
+        val text = runCatching { executeEncryptedFallback(connection, "POST", "/ops/$path?async=1") }
+            .getOrElse { error ->
+                // The proxy can answer 502 after forwarding the POST; the server may still have
+                // queued the job. Reconnect by action name rather than making the user tap again.
+                val latest = runCatching {
+                    json.parseToJsonElement(
+                        executeEncryptedFallback(connection, "GET", "/ops/actions/latest?label=${Uri.encode(path)}"),
+                    ).jsonObject["job"]?.jsonObject
+                }.getOrNull()
+                latest?.let { return awaitOpsJob(connection, it, 240) }
+                throw error
+            }
+        val body = json.parseToJsonElement(text).jsonObject
+        val job = body["job"]?.jsonObject
+            // Older servers ignore query parameters we do not know and answer synchronously.
+            ?: return body["result"]?.jsonObject?.let { json.decodeFromJsonElement(OpsResult.serializer(), it) }
+            ?: throw ApiException(500, "响应缺少 result 或 job 字段")
+        return awaitOpsJob(connection, job, 240)
+    }
+
+    /** Hosted tunnels cut a long POST near 20s; each poll is a fresh, short request. */
+    private suspend fun awaitOpsJob(connection: Connection, job: JsonObject, attempts: Int): OpsResult {
+        val id = job["id"]?.jsonPrimitive?.content ?: throw ApiException(500, "运维任务缺少 id")
+        repeat(attempts) {
+            val state = json.parseToJsonElement(executeEncryptedFallback(connection, "GET", "/ops/actions/$id")).jsonObject["job"]?.jsonObject
+                ?: throw ApiException(500, "运维任务响应缺少 job 字段")
+            val result = state["result"]?.jsonObject
+            if (state["state"]?.jsonPrimitive?.content == "done") {
+                return json.decodeFromJsonElement(OpsResult.serializer(), result ?: throw ApiException(500, "运维任务缺少 result 字段"))
+            }
+            delay(1_000)
+        }
+        throw ApiException(0, "运维任务仍在运行，请稍后刷新查看结果")
     }
 
     /** 干跑检查更新：GET /ops/check-update，只列出落后提交，不改服务器工作区。 */
     suspend fun checkUpdate(connection: Connection): OpsResult {
-        val text = executeEncryptedFallback(connection, "GET", "/ops/check-update", client = longHttp)
-        val result = json.parseToJsonElement(text).jsonObject["result"]?.jsonObject
-            ?: throw ApiException(500, "响应缺少 result 字段")
-        return json.decodeFromJsonElement(OpsResult.serializer(), result)
+        val text = executeEncryptedFallback(connection, "GET", "/ops/check-update?async=1")
+        val body = json.parseToJsonElement(text).jsonObject
+        val job = body["job"]?.jsonObject
+            ?: return body["result"]?.jsonObject?.let { json.decodeFromJsonElement(OpsResult.serializer(), it) }
+            ?: throw ApiException(500, "响应缺少 result 或 job 字段")
+        return awaitOpsJob(connection, job, 120)
     }
 
     suspend fun logs(connection: Connection, source: String, lines: Int): LogTail {
@@ -1079,8 +1114,10 @@ class ApiClient {
         return entries to (res["total"]?.jsonPrimitive?.content?.toIntOrNull() ?: entries.size)
     }
 
-    suspend fun clearHistory(connection: Connection) {
-        send(connection, "DELETE", "/history")
+    /** Deletes this App session's history and returns how many records actually existed. */
+    suspend fun clearHistory(connection: Connection): Int {
+        val res = send(connection, "DELETE", "/history")
+        return res["cleared"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
     }
 
     /** Downloads the gzipped data backup produced by GET /ops/backup. */

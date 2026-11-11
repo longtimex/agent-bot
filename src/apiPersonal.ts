@@ -422,7 +422,9 @@ function aliasView(entry: AliasEntry): Record<string, unknown> {
 export async function routeAliases(deps: PersonalRouteDeps, ctx: ApiRequestContext, id: string | undefined): Promise<void> {
   const aliases = deps.aliases
   if (!aliases) throw new ApiError(409, "当前运行环境不支持快捷指令")
-  const chatId = requireOwnerChat(deps, "快捷指令")
+  // An Android-only deployment has no Telegram/Feishu owner to share with; its
+  // shortcuts still belong to the app session and must work without a push target.
+  const chatId = deps.ownerChatId ?? deps.appKey
   if (ctx.method === "GET" && !id) {
     deps.json(ctx.res, 200, { aliases: aliases.list(chatId).map((entry) => aliasView(entry)) })
     return

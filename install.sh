@@ -333,6 +333,12 @@ elif [ "$want_tools" != 0 ]; then
   fi
 fi
 
+# A plain install creates .env from the sample above. Re-evaluate after the
+# optional setup stage and the file creation so --start does not reject a
+# configuration that exists by the time it runs.
+has_channel=0
+if has_control_channel; then has_channel=1; fi
+
 if [ "$use_systemd" -eq 1 ] || [ "$use_user_systemd" -eq 1 ]; then
   step "Installing systemd units..."
   systemd_args=""

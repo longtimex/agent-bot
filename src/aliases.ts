@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
+import { isReservedAliasName } from "./help.js"
 import type { Logger } from "./logger.js"
 
 /**
@@ -41,12 +42,15 @@ export class AliasStore {
     this.#load()
   }
 
-  add(chatId: number, name: string, expansion: string): AliasEntry {
+  add(chatId: number | string, name: string, expansion: string): AliasEntry {
     this.#assertWritable()
     const key = String(chatId)
     const normalized = name.toLowerCase()
     if (!isValidAliasName(normalized)) {
       throw new Error("快捷指令名只能包含小写字母、数字和下划线，且以字母开头（2-32 位）。")
+    }
+    if (isReservedAliasName(normalized)) {
+      throw new Error(`快捷指令名「/${normalized}」与内置命令或 App 保留命令冲突，请换一个名称。`)
     }
     const trimmed = expansion.trim()
     if (!trimmed) throw new Error("请提供指令内容，例如：/alias add code 审查当前目录的代码")
@@ -65,19 +69,19 @@ export class AliasStore {
   }
 
   /** Returns the expansion for `/name`, or undefined when the alias does not exist. */
-  expand(chatId: number, name: string): string | undefined {
+  expand(chatId: number | string, name: string): string | undefined {
     return this.#data.get(String(chatId))?.get(name.toLowerCase())?.expansion
   }
 
-  list(chatId: number): AliasEntry[] {
+  list(chatId: number | string): AliasEntry[] {
     return [...(this.#data.get(String(chatId))?.values() ?? [])].sort((a, b) => a.name.localeCompare(b.name))
   }
 
-  count(chatId: number): number {
+  count(chatId: number | string): number {
     return this.#data.get(String(chatId))?.size ?? 0
   }
 
-  remove(chatId: number, name: string): AliasEntry | undefined {
+  remove(chatId: number | string, name: string): AliasEntry | undefined {
     this.#assertWritable()
     const aliases = this.#data.get(String(chatId))
     if (!aliases) return undefined
@@ -108,6 +112,10 @@ export class AliasStore {
         for (const [name, entry] of Object.entries(entries)) {
           if (!entry || typeof entry.expansion !== "string" || !entry.expansion.trim()) continue
           if (!isValidAliasName(name)) continue
+          if (isReservedAliasName(name)) {
+            this.#log.warn(`ignored reserved shortcut /${name} in ${this.#path}`)
+            continue
+          }
           aliases.set(name.toLowerCase(), {
             name: name.toLowerCase(),
             expansion: entry.expansion,

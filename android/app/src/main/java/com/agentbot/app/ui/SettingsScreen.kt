@@ -12,12 +12,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,14 +32,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.agentbot.app.data.ApiFormat
+import com.agentbot.app.data.formatFileSize
 import com.agentbot.app.ui.theme.AppSpacing
 import com.agentbot.app.ui.theme.OkGreen
 import com.agentbot.app.ui.theme.TextSecondary
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -51,10 +59,13 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
     var message by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
     var scanned by remember { mutableStateOf(false) }
+    var secretsVisible by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val normalized = ApiFormat.normalizeBaseUrl(baseUrl)
     val warning = ApiFormat.connectionWarning(normalized)
-    val healthy = vm.health != null && vm.health?.ok == true && vm.connectionError == null
+    // A rejected probe for a new address says nothing about the saved one, which is still live.
+    val healthy = vm.health != null && vm.health?.ok == true
+    val secretTransformation = if (secretsVisible) VisualTransformation.None else PasswordVisualTransformation()
 
     fun connect() {
         if (testing) return
@@ -62,17 +73,34 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
             message = "请填写服务器地址与访问令牌"
             return
         }
+        val hadConnection = settings.connection() != null
         testing = true
         message = null
+        vm.connectionProbeError = null
         scope.launch {
             val result = vm.saveConnection(normalized, token.trim(), encKey.trim().ifBlank { null })
             testing = false
             if (result.isSuccess) {
                 baseUrl = normalized
-                message = "连接成功"
+                message = "连接成功，即将返回聊天"
+                // Keep the success notice on screen long enough to be read; returning at once
+                // made a successful save indistinguishable from no visible effect at all.
+                delay(1_500)
+                vm.navigate(Screen.Chat)
             } else {
-                // saveConnection probes before writing, so the stored pairing is still the old one.
-                message = "连接失败，已保留原配置；请检查新地址、令牌和隧道状态"
+                // saveConnection probes before writing, so a previously working pairing survives.
+                val prefix = if (hadConnection) {
+                    "连接失败，已保留原配置。"
+                } else {
+                    "连接失败，尚未保存。"
+                }
+                // The prefix already says the pairing failed; keep the actual cause, not
+                // "连接失败" twice. The probe owns the reason and the form owns the outcome.
+                val detail = vm.connectionProbeError
+                    ?.removePrefix("连接失败：")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "请检查地址、令牌和隧道状态"
+                message = prefix + "\n" + detail
             }
         }
     }
@@ -144,7 +172,7 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                 onValueChange = { baseUrl = it; scanned = false },
                 label = "服务器地址",
                 placeholder = "https://bot.example.com",
-                singleLine = true,
+                maxLines = 3,
             )
             if (normalized.isNotBlank()) {
                 Text(
@@ -161,13 +189,32 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                     tone = MaterialTheme.colorScheme.error,
                 )
             }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (secretsVisible) "凭据当前可见，注意遮挡屏幕" else "凭据已隐藏",
+                    color = if (secretsVisible) MaterialTheme.colorScheme.error else TextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                QuietButton(
+                    text = if (secretsVisible) "隐藏" else "显示",
+                    icon = if (secretsVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    onClick = { secretsVisible = !secretsVisible },
+                )
+            }
             AppTextField(
                 value = token,
                 onValueChange = { token = it; scanned = false },
                 label = "访问令牌",
                 placeholder = "从 /api 配对信息中获取",
                 singleLine = true,
-                modifier = Modifier.padding(top = 12.dp),
+                visualTransformation = secretTransformation,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             )
             AppTextField(
                 value = encKey,
@@ -175,6 +222,8 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                 label = "加密密钥（可选）",
                 placeholder = "服务器开启 API_ENCRYPTION 时填写",
                 singleLine = true,
+                visualTransformation = secretTransformation,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
                 modifier = Modifier.padding(top = 12.dp),
             )
 
@@ -210,8 +259,8 @@ fun SettingsScreen(vm: AppViewModel, settings: com.agentbot.app.data.SettingsRep
                 InlineNotice(
                     text = it,
                     modifier = Modifier.padding(top = 12.dp),
-                    tone = if (it == "连接成功") OkGreen else MaterialTheme.colorScheme.error,
-                    icon = if (it == "连接成功") Icons.Filled.Check else Icons.Filled.Info,
+                    tone = if (it.startsWith("连接成功")) OkGreen else MaterialTheme.colorScheme.error,
+                    icon = if (it.startsWith("连接成功")) Icons.Filled.Check else Icons.Filled.Info,
                 )
             }
         }
@@ -292,7 +341,7 @@ private fun AppUpdateCard(vm: AppViewModel) {
         if (release?.configured == true) {
             val latest = release.versionName ?: release.versionCode?.toString() ?: "—"
             Text(
-                "服务器最新：$latest" + if (release.size > 0) " · ${formatSize(release.size)}" else "",
+                "服务器最新：$latest" + if (release.size > 0) " · ${formatFileSize(release.size)}" else "",
                 color = TextSecondary,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 12.dp),
@@ -306,6 +355,8 @@ private fun AppUpdateCard(vm: AppViewModel) {
             }
         } else if (!release?.message.isNullOrBlank()) {
             Text(release!!.message!!, color = TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        } else if (release == null && vm.appUpdateError == null) {
+            Text("正在读取更新清单…", color = TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
         }
         vm.appUpdateError?.let {
             InlineNotice(
@@ -331,10 +382,4 @@ private fun AppUpdateCard(vm: AppViewModel) {
             modifier = Modifier.padding(top = 12.dp),
         )
     }
-}
-
-private fun formatSize(bytes: Long): String = when {
-    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
-    bytes >= 1_024 -> "%.0f KB".format(bytes / 1_024.0)
-    else -> "$bytes B"
 }

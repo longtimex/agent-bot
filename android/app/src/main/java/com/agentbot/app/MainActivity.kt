@@ -174,6 +174,7 @@ class MainActivity : ComponentActivity() {
                                 connected = vm.session != null && vm.connectionError == null,
                                 sessionLabel = vm.session?.engineLabel,
                                 queueCount = vm.queue.size,
+                                open = drawerState.isOpen,
                             )
                         },
                     ) {

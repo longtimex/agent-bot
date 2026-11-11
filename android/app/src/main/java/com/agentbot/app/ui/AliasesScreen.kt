@@ -14,8 +14,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +35,7 @@ import com.agentbot.app.ui.theme.TextTertiary
 @Composable
 fun AliasesScreen(vm: AppViewModel) {
     var adding by remember { mutableStateOf(false) }
+    var pendingRemove by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
@@ -44,7 +47,11 @@ fun AliasesScreen(vm: AppViewModel) {
                 AppIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "新建快捷指令",
-                    onClick = { adding = true },
+                    onClick = {
+                        vm.aliasesActionError = null
+                        vm.aliasesDraftRejected = false
+                        adding = true
+                    },
                 )
                 AppIconButton(
                     icon = Icons.Filled.Refresh,
@@ -55,28 +62,46 @@ fun AliasesScreen(vm: AppViewModel) {
         )
 
         Text(
-            "在聊天中发送 /名称 即可触发（输入 / 也能从命令列表中点选）；与 Telegram 的 /alias 共享同一份列表。",
+            "在聊天中发送 /名称 即可触发（输入 / 也能从命令列表中点选）。已连接 Telegram 或飞书时与所有者会话共享列表；仅安卓端时保存在本 App 会话中。",
             color = TextSecondary,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-        ) {
-            if (vm.aliases.isEmpty()) {
-                item {
-                    EmptyState(
-                        icon = Icons.Filled.Keyboard,
-                        title = "还没有快捷指令",
-                        message = "新建后发送 /名称 即可展开，例如 code → 审查当前目录的代码。",
-                    )
+        PageErrorNotice(
+            message = vm.aliasesActionError,
+            onDismiss = { vm.aliasesActionError = null },
+        )
+
+        val loadError = vm.aliasesError
+        if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载快捷指令",
+                message = loadError,
+                icon = Icons.Filled.Keyboard,
+                onRetry = vm::refreshAliases,
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+            ) {
+                if (vm.aliases.isEmpty()) {
+                    item {
+                        EmptyState(
+                            icon = Icons.Filled.Keyboard,
+                            title = "还没有快捷指令",
+                            message = "新建后发送 /名称 即可展开，例如 code → 审查当前目录的代码。",
+                        )
+                    }
                 }
-            }
-            items(vm.aliases, key = { it.name }) { alias ->
-                AliasCard(vm, alias)
+                items(vm.aliases, key = { it.name }) { alias ->
+                    AliasCard(alias, onDelete = {
+                        vm.aliasesActionError = null
+                        pendingRemove = alias.name
+                    })
+                }
             }
         }
     }
@@ -84,20 +109,47 @@ fun AliasesScreen(vm: AppViewModel) {
     if (adding) {
         TextPromptDialog(
             title = "新建快捷指令",
-            hint = "格式：名称 指令内容。名称限小写字母、数字、下划线（字母开头，2–32 位），发送 /名称 即触发。",
+            hint = "格式：名称 指令内容。名称限小写字母、数字、下划线（字母开头，2–32 位），且不能与内置命令重名；发送 /名称 即触发。",
             confirmLabel = "创建",
             placeholder = "code 审查当前目录的代码",
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                vm.addAlias(input)
+            error = vm.aliasesActionError.takeIf { vm.aliasesDraftRejected },
+            onDismiss = {
                 adding = false
+                vm.aliasesActionError = null
+                vm.aliasesDraftRejected = false
+            },
+            onConfirm = { input ->
+                vm.addAlias(input) { ok -> if (ok) adding = false }
+            },
+        )
+    }
+
+    pendingRemove?.let { name ->
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("删除快捷指令 /$name？", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("删除后发送 /$name 将不再展开，且无法恢复。", style = MaterialTheme.typography.bodyMedium)
+                    vm.aliasesActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteAlias(name) { ok -> if (ok) pendingRemove = null }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("取消") }
             },
         )
     }
 }
 
 @Composable
-private fun AliasCard(vm: AppViewModel, alias: AliasEntry) {
+private fun AliasCard(alias: AliasEntry, onDelete: () -> Unit) {
     AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -122,7 +174,7 @@ private fun AliasCard(vm: AppViewModel, alias: AliasEntry) {
                 text = "删除",
                 icon = Icons.Filled.DeleteOutline,
                 danger = true,
-                onClick = { vm.deleteAlias(alias.name) },
+                onClick = onDelete,
             )
         }
     }

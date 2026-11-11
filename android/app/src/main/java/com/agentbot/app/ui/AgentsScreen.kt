@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExtensionOff
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -151,7 +152,28 @@ fun AgentsScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(vm.agents, key = { it.id }) { agent ->
+            val loadError = vm.agentsError
+            if (loadError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法加载引擎",
+                        message = loadError,
+                        icon = Icons.Filled.ExtensionOff,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshAgents,
+                    )
+                }
+            } else if (vm.agents.isEmpty()) {
+                item {
+                    Text(
+                        "正在读取引擎列表…",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                }
+            }
+            if (loadError == null) items(vm.agents, key = { it.id }) { agent ->
                 val current = agent.id == vm.session?.engine
                 AppCard(contentPadding = PaddingValues(0.dp)) {
                     Column(modifier = Modifier.fillMaxWidth()) {

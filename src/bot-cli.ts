@@ -134,8 +134,12 @@ function doctor(): number {
   check("git", Boolean(whichSync("git", env.PATH)), whichSync("git", env.PATH) ?? "not found")
   check("dotenv", existsSync(state.paths.envPath), state.paths.envPath)
   check("entry", state.entrySource !== "missing", state.entry ?? "run: npm run build")
-  const processManaged = supervisor !== "systemd" ? Boolean(state.bot) : true
-  check("bot process", processManaged, state.bot ? `PID ${state.bot.pid}` : "managed by systemd")
+  const processManaged = supervisor !== "systemd" || manifest?.supervisor === "systemd"
+  check(
+    "bot process",
+    processManaged,
+    state.bot ? `PID ${state.bot.pid}` : supervisor === "systemd" ? "managed by systemd" : "bot is stopped",
+  )
   const opencode = whichSync("opencode", env.PATH)
   check("opencode CLI", Boolean(opencode), opencode ?? "not found")
   const health = state.bot

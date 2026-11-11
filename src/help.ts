@@ -59,7 +59,7 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/remind every 30m 喝水\` - 重复提醒（也支持 \`每5分钟\`、\`每天 08:30\`、\`下午3点\`）
 • \`/reminders\` - 查看待触发的提醒
 • \`/cancel 编号\` - 取消指定提醒
-• \`/alias\` - 自定义快捷指令面板；\`/alias add 名称 指令内容\` 创建后，发送 \`/名称\` 即触发
+• \`/alias\` - 自定义快捷指令面板；\`/alias add 名称 指令内容\` 创建后，发送 \`/名称\` 即触发（名称不能与内置命令重名）
 • \`/timezone\` - 查看/切换时区（提醒、定时任务、每日统计立即生效）
 • \`/timezone Asia/Shanghai\` - 直接指定 IANA 时区
 • \`/proxy\` - 管理网络代理（HTTP/HTTPS/SOCKS），支持测试、启用与删除
@@ -267,6 +267,22 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "timezone", description: "查看或切换时区（立即生效）" },
   { command: "id", description: "查看会话与配置信息" },
 ]
+
+/**
+ * Words that a handler answers before user shortcuts are expanded. Saving one as an
+ * alias would report success while making the shortcut impossible to trigger, so the
+ * store refuses these names. `engine` is App-only, but aliases are shared with the App.
+ */
+const RESERVED_ALIAS_NAMES = new Set([
+  ...BOT_MENU_COMMANDS.map((item) => item.command),
+  ...Object.keys(BOT_COMMAND_ALIASES),
+  "engine",
+])
+
+export function isReservedAliasName(name: string): boolean {
+  const bare = name.trim().toLowerCase().replace(/^\/+/, "")
+  return RESERVED_ALIAS_NAMES.has(bare)
+}
 
 /** Telegram's Markdown markers would render literally in the app, so strip them for plain display. */
 export function plainHelp(text: string): string {

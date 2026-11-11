@@ -46,7 +46,11 @@ fun AccessScreen(vm: AppViewModel) {
                 AppIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "添加白名单用户",
-                    onClick = { adding = true },
+                    onClick = {
+                        vm.accessActionError = null
+                        vm.accessDraftRejected = false
+                        adding = true
+                    },
                 )
                 AppIconButton(
                     icon = Icons.Filled.Refresh,
@@ -63,6 +67,11 @@ fun AccessScreen(vm: AppViewModel) {
             modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
+        PageErrorNotice(
+            message = vm.accessActionError,
+            onDismiss = { vm.accessActionError = null },
+        )
+
         if (vm.allowAllUsers) {
             InlineNotice(
                 text = "TELEGRAM_ALLOW_ALL_USERS 已开启：任何 Telegram 用户都能驱动 Bot 与运维操作，建议尽快关闭。",
@@ -77,7 +86,18 @@ fun AccessScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
-            if (vm.accessUsers.isEmpty()) {
+            val loadError = vm.accessError
+            if (loadError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法加载白名单",
+                        message = loadError,
+                        icon = Icons.Filled.Lock,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshAccess,
+                    )
+                }
+            } else if (vm.accessUsers.isEmpty()) {
                 item {
                     EmptyState(
                         icon = Icons.Filled.Lock,
@@ -86,28 +106,33 @@ fun AccessScreen(vm: AppViewModel) {
                     )
                 }
             }
-            items(vm.accessUsers, key = { it }) { id ->
-                AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            id,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            "Telegram ID",
-                            color = TextTertiary,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
-                        QuietButton(
-                            text = "移除",
-                            danger = true,
-                            onClick = { pendingRemove = id },
-                        )
+            if (loadError == null) {
+                items(vm.accessUsers, key = { it }) { id ->
+                    AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                id,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                "Telegram ID",
+                                color = TextTertiary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(end = 8.dp),
+                            )
+                            QuietButton(
+                                text = "移除",
+                                danger = true,
+                                onClick = {
+                                    vm.accessActionError = null
+                                    pendingRemove = id
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -120,10 +145,14 @@ fun AccessScreen(vm: AppViewModel) {
             hint = "填写对方的 Telegram 数字 ID（最多 20 位）。对方给 Bot 发 /start 时，拒绝提示里会显示这个 ID。",
             confirmLabel = "添加",
             placeholder = "123456789",
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                vm.addAccess(input)
+            error = vm.accessActionError.takeIf { vm.accessDraftRejected },
+            onDismiss = {
                 adding = false
+                vm.accessActionError = null
+                vm.accessDraftRejected = false
+            },
+            onConfirm = { input ->
+                vm.addAccess(input) { ok -> if (ok) adding = false }
             },
         )
     }
@@ -132,11 +161,17 @@ fun AccessScreen(vm: AppViewModel) {
         AlertDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("移除 $id？", style = MaterialTheme.typography.titleLarge) },
-            text = { Text("该用户将立即无法再使用 Bot（包括驱动任务与运维操作）。", style = MaterialTheme.typography.bodyMedium) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("该用户将立即无法再使用 Bot（包括驱动任务与运维操作）。", style = MaterialTheme.typography.bodyMedium)
+                    vm.accessActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.removeAccess(id)
-                    pendingRemove = null
+                    vm.removeAccess(id) { ok -> if (ok) pendingRemove = null }
                 }) { Text("移除") }
             },
             dismissButton = {

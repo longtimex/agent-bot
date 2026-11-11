@@ -356,6 +356,41 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
     "a drawer route disappeared during the regrouping",
   )
   assert.ok(drawer.includes('DrawerSection("对话")'), "the drawer needs named groups, not a flat list")
+  const scroller = /Column\(\s*modifier = Modifier\s*\.weight\(1f\)[\s\S]*?DrawerItem\(Icons\.Filled\.Help[^\n]*\n\s*}/.exec(drawer)?.[0]
+  assert.ok(scroller, "the grouped routes must share one vertical scroller")
+  const topPadding = scroller.indexOf(".padding(top = 10.dp)")
+  const routeScroll = scroller.indexOf(".verticalScroll(routeScroll)")
+  assert.ok(topPadding >= 0, "the route scroller must keep its top spacing")
+  assert.ok(routeScroll >= 0, "the grouped routes must keep their vertical scroller")
+  assert.ok(
+    topPadding < routeScroll,
+    "the top spacing must wrap the scroller, not become scrolling content that can clip the first group",
+  )
+  assert.ok(
+    /verticalScroll\(routeScroll\)[\s\S]*?Spacer\(modifier = Modifier\.padding\(top = 6\.dp\)\)/.test(scroller),
+    "the scroll cushion must stay inside the scroller, so a moved route never touches the button above it",
+  )
+  assert.match(
+    drawer,
+    /AppDrawer\([\s\S]*?open: Boolean = false/,
+    "the drawer must receive its open edge instead of guessing when to reset",
+  )
+  assert.match(
+    drawer,
+    /if \(open && !wasOpen\) routeScroll\.scrollTo\(0\)/,
+    "reopening the drawer must show the first routes again",
+  )
+  assert.match(
+    readFileSync("android/app/src/main/java/com/agentbot/app/MainActivity.kt", "utf8"),
+    /open = drawerState\.isOpen/,
+    "MainActivity must feed the drawer's live open state",
+  )
+  const footer = drawer.slice(drawer.indexOf(scroller) + scroller.length)
+  assert.ok(footer.includes('DrawerItem(Icons.Filled.Settings'), "settings must stay outside the route scroller")
+  assert.ok(
+    footer.indexOf("HorizontalDivider(") < footer.indexOf('DrawerItem(Icons.Filled.Settings'),
+    "the fixed settings footer must keep its separator",
+  )
   assert.ok(chat.includes("Icons.Filled.MoreVert"), "secondary chat actions belong in an overflow menu")
   const topBar = /private fun ChatTopBar\([\s\S]*?\n}\n/.exec(chat)?.[0]
   assert.ok(topBar, "ChatTopBar must stay one function")
@@ -388,6 +423,335 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
       `${screen} still has a detached page title`,
     )
   }
+})
+
+test("the history page confirms before deleting records that cannot be restored", () => {
+  const source = readFileSync(`${UI_DIR}/ListScreens.kt`, "utf8")
+  const history = /fun HistoryScreen\([\s\S]*?\n}\n/.exec(source)?.[0]
+  assert.ok(history, "HistoryScreen must stay one composable")
+  assert.match(history, /var confirmClear by remember/, "clearing history needs a pending-confirmation state")
+  assert.match(history, /confirmClear = true/, "the menu action must open the confirmation instead of deleting")
+  assert.match(history, /Text\("清空任务历史？"\)/, "the dialog must name the destructive action")
+  assert.match(history, /vm\.clearHistory\(\)/, "only the confirmed dialog action may call clearHistory")
+  assert.match(
+    history,
+    /enabled = vm\.history\.isNotEmpty\(\)/,
+    "an empty history must not offer an action that can only say nothing was deleted",
+  )
+  assert.doesNotMatch(
+    history,
+    /onClick = \{\s*actionsOpen = false\s+vm\.clearHistory\(\)/,
+    "the overflow menu must not clear history immediately",
+  )
+})
+
+test("clearing history reports how many records the server actually deleted", () => {
+  const client = readFileSync("android/app/src/main/java/com/agentbot/app/data/ApiClient.kt", "utf8")
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const clear = /suspend fun clearHistory\([\s\S]*?\n    \}\n/.exec(client)?.[0]
+  assert.ok(clear, "clearHistory must stay one ApiClient function")
+  assert.match(clear, /res\["cleared"\]/, "DELETE /history returns the number of records it removed")
+  assert.match(clear, /: Int\b/, "the caller needs the count, not just a completed request")
+  const view = /fun clearHistory\(\)[\s\S]*?\n    \}\n/.exec(viewModel)?.[0]
+  assert.ok(view, "AppViewModel.clearHistory must stay one function")
+  assert.match(view, /val cleared = api\.clearHistory/, "the toast must use the server's count")
+  assert.match(view, /已清空 \$cleared 条历史/, "a non-empty clear must say how much was removed")
+  assert.match(view, /没有可清空的历史/, "an empty clear must not claim a deletion")
+})
+
+test("deleting a reminder or schedule asks before discarding the user's setup", () => {
+  const source = readFileSync(`${UI_DIR}/ListScreens.kt`, "utf8")
+  for (const [screen, title, call] of [
+    ["RemindersScreen", "删除这条提醒？", "vm.deleteReminder"],
+    ["SchedulesScreen", "删除这个定时任务？", "vm.deleteSchedule"],
+  ] as const) {
+    const body = new RegExp(`fun ${screen}\\([\\s\\S]*?\\n}\\n`).exec(source)?.[0]
+    assert.ok(body, `${screen} must stay one composable`)
+    assert.match(body, /var deleteTarget by remember/, `${screen} needs a pending-delete state`)
+    assert.ok(body.includes(`Text("${title}")`), `${screen} must name the destructive action`)
+    assert.ok(body.includes(call), `${screen} must delete after confirmation`)
+    assert.doesNotMatch(
+      body,
+      new RegExp(`contentDescription = "删除",\\s*onClick = \\{ ${call}\\(`),
+      `${screen} must not delete straight from the list icon`,
+    )
+  }
+})
+
+test("automation screens distinguish loading, delivery setup and read failures", () => {
+  const source = readFileSync(`${UI_DIR}/ListScreens.kt`, "utf8")
+  assert.match(
+    source,
+    /vm\.remindersBusy && vm\.reminders\.isEmpty\(\)/,
+    "the reminder empty state must wait for its first successful read",
+  )
+  assert.match(
+    source,
+    /vm\.remindersUnavailable/,
+    "a reminder page must explain a deployment without a chat delivery target",
+  )
+  assert.match(
+    source,
+    /vm\.schedulesBusy && vm\.schedules\.isEmpty\(\)/,
+    "the schedule empty state must wait for its first successful read",
+  )
+  assert.match(
+    source,
+    /vm\.schedulesUnavailable/,
+    "a schedule page must explain a deployment without a chat delivery target",
+  )
+  assert.match(
+    source,
+    /action = \{ QuietButton\(text = "重新检查"/,
+    "an unavailable automation page needs a check that can discover a newly paired chat channel",
+  )
+  assert.match(
+    source,
+    /vm\.remindersError == null && vm\.remindersUnavailable == null/,
+    "a reminder create button must be hidden when reminders cannot be created",
+  )
+  assert.match(
+    source,
+    /vm\.schedulesError == null && vm\.schedulesUnavailable == null/,
+    "a schedule create button must be hidden when schedules cannot be created",
+  )
+})
+
+test("retrying an automation page also refreshes the delivery setup", () => {
+  const source = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  for (const resource of ["reminders", "schedules"]) {
+    const body = new RegExp(`fun refresh${resource[0]!.toUpperCase()}${resource.slice(1)}\\(\\)[\\s\\S]*?\\n    \\}`).exec(source)?.[0]
+    assert.ok(body, `refresh${resource[0]!.toUpperCase()}${resource.slice(1)} must stay one function`)
+    assert.match(
+      body,
+      new RegExp(`serverInfo = api\\.info\\(conn\\(\\)\\)[\\s\\S]*?api\\.${resource}\\(conn\\(\\)\\)`),
+      `retrying ${resource} must re-read /info before its list, not repeat a stale unavailable state`,
+    )
+  }
+})
+
+/**
+ * A queue row and its 重试 button are both far below the chat: a rejected retry used to write
+ * `connectionError`, whose banner only the chat renders. The page therefore looked unchanged,
+ * and a successful retry also gave no sign that a new paid run had started. Keep both outcomes
+ * on the queue page, and keep a failed read from turning a valid list into an empty queue.
+ */
+test("queue actions report success and failure on the queue page", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const queue = readFileSync(`${UI_DIR}/SessionScreen.kt`, "utf8")
+  const retryRecord = /fun retryRecord\(taskId: String\) \{[\s\S]*?\n    \}/.exec(viewModel)?.[0]
+  assert.ok(retryRecord, "retryRecord must stay one function so its feedback can be checked")
+  assert.ok(
+    retryRecord.includes('queueActionError = "重试失败：${err.message}"'),
+    "a rejected queue retry must stay on the queue page",
+  )
+  assert.match(retryRecord, /toast = "已重新提交任务/, "a successful retry must say that a new run started")
+  for (const field of ["queueError", "queueActionError"]) {
+    assert.ok(
+      new RegExp(`var ${field} by mutableStateOf<String\\?>\\(null\\)\\n\\n`).test(viewModel),
+      `${field} is read by the queue screen, so its getter cannot be private`,
+    )
+  }
+  for (const [name, label] of [["stopTask", "停止任务"], ["clearQueue", "清空队列"]] as const) {
+    const action = new RegExp(`fun ${name}\\([^)]*\\)[\\s\\S]*?\\n    \\}`).exec(viewModel)?.[0]
+    assert.ok(action, `${name} must stay one function so its failure can be checked`)
+    assert.ok(
+      action.includes(`onError = { queueActionError = "${label}失败：\${it.message}" }`),
+      `${name} failures must stay on the queue page rather than the chat-only banner`,
+    )
+  }
+
+  const screen = /fun QueueScreen\(vm: AppViewModel\) \{[\s\S]*?\n\}\n\nprivate fun taskStatusLabel/.exec(queue)?.[0]
+  assert.ok(screen, "QueueScreen must stay one composable")
+  assert.match(screen, /PageErrorNotice\(\s*message = vm\.queueActionError/, "queue action failures need a visible notice")
+  assert.ok(screen.indexOf("PageErrorNotice(") < screen.indexOf("val loadError = vm.queueError"), "the notice must sit above both the list and the load-error branch")
+  assert.match(
+    screen,
+    /message = vm\.queueError\.takeIf \{ vm\.queue\.isNotEmpty\(\) \|\| vm\.recentTasks\.isNotEmpty\(\) \}/,
+    "a failed refresh must stay visible over the rows it keeps, not only when the list is empty",
+  )
+  assert.ok(
+    !screen.includes("dismissQueueError"),
+    "the read failure and the action failure must stay separate states on the queue page",
+  )
+})
+
+/**
+ * The queue screen renders a refresh error only when rows are still present. That layout cannot
+ * prove the refresh keeps them: assigning the partial result first, or clearing the list in the
+ * catch branch, would still compile and would leave the user looking at a plausible stale page.
+ * Pin the write order and the failure branch in the ViewModel, in addition to the UI condition.
+ */
+test("a failed queue refresh keeps the rows it could not re-read", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const refresh = /fun refreshQueue\(\) \{[\s\S]*?\n    \}/.exec(viewModel)?.[0]
+  assert.ok(refresh, "refreshQueue must stay one function so its failure semantics can be checked")
+  const nextQueue = refresh.indexOf("val nextQueue = api.queue(conn())")
+  const nextRecent = refresh.indexOf("val nextRecent = api.tasks(conn()).filterNot { it.isRunning }")
+  const queueWrite = refresh.indexOf("queue = nextQueue")
+  const recentWrite = refresh.indexOf("recentTasks = nextRecent")
+  const successClear = refresh.indexOf("queueError = null")
+  assert.ok(nextQueue >= 0 && nextRecent >= 0, "both reads must finish before either list is replaced")
+  assert.ok(
+    queueWrite > nextQueue && queueWrite > nextRecent && recentWrite > nextQueue && recentWrite > nextRecent,
+    "a rejected second read must not leave a half-updated queue",
+  )
+  assert.ok(successClear > queueWrite && successClear > recentWrite, "only a complete read may clear the old error")
+  const failure = /catch \(err: Exception\) \{[\s\S]*?queueError = [\s\S]*?throw err/.exec(refresh)?.[0]
+  assert.ok(failure, "a failed refresh must mark the read and keep propagating to the banner path")
+  assert.doesNotMatch(failure, /\b(?:queue|recentTasks)\s*=\s*(?:emptyList\(\)|null)/, "a failed refresh must keep the old rows")
+})
+
+test("the status page keeps its connection address readable on a phone", () => {
+  const status = readFileSync(`${UI_DIR}/StatusScreen.kt`, "utf8")
+  assert.match(
+    status,
+    /ServerAddressRow\(vm\.serverUrl\b/,
+    "the server URL needs a full-width row, not a narrow label/value column",
+  )
+  const address = /private fun ServerAddressRow\([\s\S]*?\n}\n/.exec(status)?.[0]
+  assert.ok(address, "ServerAddressRow must stay one composable")
+  assert.match(address, /SelectionContainer\s*\{/, "a connection address should be selectable")
+  assert.match(address, /fillMaxWidth\(\)/, "the address must be allowed the full card width")
+  assert.doesNotMatch(
+    status,
+    /subtitle = "服务健康、连接信息与今日用量"/,
+    "the long status subtitle wraps the title on a 720px-wide phone",
+  )
+})
+
+/**
+ * A model page owns every action it offers. Invalid input and server failures used to write the
+ * chat-only connection banner, then close the add dialog: the model page looked unchanged and the
+ * typed line was gone. Validation now keeps the dialog; every other outcome lands on the page.
+ */
+test("model actions report their outcome on the model page", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const screen = readFileSync(`${UI_DIR}/ModelsScreen.kt`, "utf8")
+  assert.ok(
+    /var modelActionError by mutableStateOf<String\?>\(null\)\n\n/.test(viewModel),
+    "modelActionError is read by ModelsScreen, so its getter cannot be private",
+  )
+  assert.ok(
+    /var modelDraftRejected by mutableStateOf\(false\)\n\s+private set\n\n/.test(viewModel),
+    "a form rejection must be distinguishable from a server failure",
+  )
+
+  const add = /fun addCustomModel\(input: String\): Boolean \{[\s\S]*?\n    \}/.exec(viewModel)?.[0]
+  assert.ok(add, "addCustomModel must keep an explicit validation result")
+  assert.ok(!add.includes("connectionError"), "an add failure must not go to the chat-only banner")
+  assert.match(add, /modelActionError = "用法：/, "missing fields must explain the accepted format")
+  assert.match(add, /modelActionError = "第二项必须是 provider\/modelID/, "a malformed provider/model pair must be rejected on this page")
+  assert.match(add, /return false/, "an invalid input must keep its dialog and text available")
+
+  for (const [name, message] of [
+    ["assignAgentModel", "绑定 Agent 模型失败"],
+    ["removeCustomModel", "删除模型失败"],
+  ] as const) {
+    const action = new RegExp(`fun ${name}\\([^)]*\\)[\\s\\S]*?\\n    \\}`).exec(viewModel)?.[0]
+    assert.ok(action, `${name} must stay one function so its feedback can be checked`)
+    assert.ok(action.includes(`modelActionError = "${message}：\${err.message}"`), `${message} must stay on the model page`)
+    assert.ok(!action.includes("connectionError"), `${name} must not hide its failure in the chat-only banner`)
+  }
+
+  assert.match(screen, /PageErrorNotice\(\s*message = vm\.modelActionError/, "the model page needs a visible action error")
+  assert.match(
+    screen,
+    /error = vm\.modelActionError\.takeIf \{ vm\.modelDraftRejected \}/,
+    "the add dialog must show a validation reason where it cannot be covered",
+  )
+  assert.match(
+    screen,
+    /onConfirm = \{ input ->\s*if \(vm\.addCustomModel\(input\)\) adding = false/,
+    "only a valid add may close the dialog",
+  )
+  assert.match(screen, /onDismiss = \{ adding = false \}/, "the user can still cancel an invalid draft")
+})
+
+test("config and access writes explain failures on their own page", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const config = readFileSync(`${UI_DIR}/ConfigScreen.kt`, "utf8")
+  const access = readFileSync(`${UI_DIR}/AccessScreen.kt`, "utf8")
+
+  assert.match(viewModel, /var configActionError by mutableStateOf<String\?>\(null\)/, "config writes need a page-local error")
+  assert.match(viewModel, /var configDraftRejected by mutableStateOf\(false\)/, "the prompt needs to know a malformed draft")
+  assert.match(viewModel, /configActionError = "用法：KEY 值/, "a malformed add must explain the accepted format")
+  assert.match(viewModel, /fun setConfig\(key: String, value: String, onResult/, "the prompt needs an asynchronous result callback")
+  assert.match(viewModel, /configActionError = "更新配置失败：\$\{err\.message\}"/, "a failed write must stay on the config page")
+  assert.match(viewModel, /configActionError = "更新配置失败：[\s\S]{0,100}configDraftRejected = true/, "a server-rejected write needs its reason inside the prompt")
+  assert.match(viewModel, /configActionError = "删除配置失败：\$\{err\.message\}"/, "a failed delete must stay on the config page")
+  assert.match(config, /PageErrorNotice\(\s*message = vm\.configActionError/, "the config page needs a visible action error")
+  assert.match(config, /error = vm\.configActionError\.takeIf \{ vm\.configDraftRejected \}/, "the prompt must show its own validation reason")
+  assert.match(config, /vm\.addConfig\(input\) \{ ok -> if \(ok\) adding = false \}/, "only a successful add may close the prompt")
+  assert.match(config, /vm\.setConfig\(entry\.key, value\) \{ ok -> if \(ok\) editing = null \}/, "only a successful edit may close the prompt")
+  assert.match(access, /PageErrorNotice\(\s*message = vm\.accessActionError/, "the access page needs a visible action error")
+  assert.ok(access.includes("vm.addAccess(input) { ok -> if (ok) adding = false }"), "only a successful whitelist add may close the prompt")
+  assert.match(viewModel, /accessActionError = "添加白名单失败：[\s\S]{0,100}accessDraftRejected = true/, "a server-rejected whitelist add needs its reason inside the prompt")
+  assert.match(viewModel, /trimmed\.length !in 1\.\.20 \|\| !trimmed\.all\(Char::isDigit\)/, "the App must reject IDs the server's 1-20 digit rule rejects")
+  assert.match(access, /error = vm\.accessActionError\.takeIf \{ vm\.accessDraftRejected \}/, "an invalid whitelist draft needs an inline reason")
+
+  const proxy = readFileSync(`${UI_DIR}/ProxyScreen.kt`, "utf8")
+  assert.match(viewModel, /var proxyActionError by mutableStateOf<String\?>\(null\)/, "proxy writes need a page-local error")
+  assert.match(proxy, /PageErrorNotice\(\s*message = vm\.proxyActionError/, "the proxy page needs a visible action error")
+  assert.match(proxy, /vm\.addProxy\(input\) \{ ok -> if \(ok\) adding = false \}/, "only a successful proxy add may close the prompt")
+  assert.match(viewModel, /proxyActionError = "添加代理失败：[\s\S]{0,100}proxyDraftRejected = true/, "a server-rejected proxy needs its reason inside the prompt")
+  assert.match(proxy, /var pendingRemove by remember/, "proxy removal needs a pending-confirmation state")
+  assert.ok(proxy.includes("vm.removeProxy(proxy.id) { ok -> if (ok) pendingRemove = null }"), "a proxy may only disappear after the server confirms")
+  assert.match(viewModel, /proxyActionError = "测试代理失败：/, "a failed test must not masquerade as an unsuccessful connection")
+
+  const aliases = readFileSync(`${UI_DIR}/AliasesScreen.kt`, "utf8")
+  assert.match(viewModel, /var aliasesActionError by mutableStateOf<String\?>\(null\)/, "shortcut writes need a page-local error")
+  assert.match(aliases, /PageErrorNotice\(\s*message = vm\.aliasesActionError/, "the shortcut page needs a visible action error")
+  assert.match(aliases, /vm\.addAlias\(input\) \{ ok -> if \(ok\) adding = false \}/, "only a successful shortcut add may close the prompt")
+  assert.match(viewModel, /aliasesActionError = "创建快捷指令失败：[\s\S]{0,100}aliasesDraftRejected = true/, "a server-rejected shortcut needs its reason inside the prompt")
+  assert.match(aliases, /var pendingRemove by remember/, "shortcut deletion needs a pending-confirmation state")
+  assert.match(aliases, /删除快捷指令 \/\$name？/, "shortcut deletion must name what is being deleted")
+  assert.ok(aliases.includes("vm.deleteAlias(name) { ok -> if (ok) pendingRemove = null }"), "a shortcut may only disappear after the server confirms")
+
+  const session = readFileSync(`${UI_DIR}/SessionScreen.kt`, "utf8")
+  assert.match(viewModel, /var sessionActionError by mutableStateOf<String\?>\(null\)/, "session writes need a page-local error")
+  assert.match(session, /PageErrorNotice\(\s*message = vm\.sessionActionError/, "the session page needs a visible action error")
+  assert.match(session, /vm\.setWorkDir\(path\) \{ ok -> if \(ok\) editDir = false \}/, "a rejected directory must keep its prompt and draft")
+  assert.match(session, /vm\.changeTimezone\(zone\.trim\(\)\) \{ ok -> if \(ok\) editTz = false \}/, "a rejected timezone must keep its prompt and draft")
+  assert.match(viewModel, /sessionActionError = "切换时区失败：[\s\S]{0,100}sessionDraftRejected = true/, "a server-rejected timezone needs its reason inside the prompt")
+  assert.match(viewModel, /fun followPeer\(scope: String, onResult: \(Boolean\) -> Unit/, "following a peer needs an async result callback")
+  assert.ok(session.includes("vm.followPeer(peer.scope) { ok -> if (ok) followTarget = null }"), "the follow confirmation may only close after the server confirms")
+})
+
+test("the shared text prompt can show an inline validation error", () => {
+  const picker = readFileSync(`${UI_DIR}/PickerDialog.kt`, "utf8")
+  const prompt = /fun TextPromptDialog\([\s\S]*?\n\}\n/.exec(picker)?.[0]
+  assert.ok(prompt, "TextPromptDialog must stay one composable")
+  assert.match(prompt, /error: String\? = null,/, "the prompt needs an optional inline error")
+  assert.match(picker, /\.weight\(1f, fill = false\)[\s\S]*verticalScroll\(rememberScrollState\(\)\)/, "the prompt body must take only the height left by the actions")
+  assert.match(picker, /HorizontalDivider[\s\S]*TextButton\(onClick = onDismiss\)/, "the prompt actions must stay outside the scrolling body")
+  assert.match(
+    picker,
+    /error\?\.let \{[\s\S]*?clickable \{ reasonExpanded = !reasonExpanded \}[\s\S]*?maxLines = if \(reasonExpanded\) Int\.MAX_VALUE else 2[\s\S]*?\n {8}\}\n {8}\/\/ The field is outside both scrolling bodies/,
+    "the reason must stay beside the field, collapsed to two expandable lines so it cannot crowd the title or keyboard",
+  )
+  assert.match(
+    picker,
+    /The field is outside both scrolling bodies[\s\S]*?\n {8}AppTextField\(/,
+    "the field must sit outside the scrolling bodies, so a long reason cannot push the focused field under the keyboard",
+  )
+  assert.match(
+    picker,
+    /Text\(title,[\s\S]*?Text\(hint,[\s\S]*?\n {8}\}\n {8}\/\/ Keep the rejection beside the draft/,
+    "the title and help stay in the weighted body while the reason is pinned above the field",
+  )
+  assert.match(
+    picker,
+    /Column\(modifier = Modifier\.fillMaxWidth\(\)\) \{[\s\S]*?\.weight\(1f, fill = false\)[\s\S]*?HorizontalDivider[\s\S]*?TextButton\(onClick = onDismiss\)[\s\S]*?\n {4}\}$/m,
+    "the actions must be siblings of the weighted body inside one root, or they are measured after it and clipped",
+  )
+  assert.match(picker, /Dialog\([\s\S]*?usePlatformDefaultWidth = false/, "the prompt needs a dialog it can size above the keyboard")
+  assert.match(picker, /decorFitsSystemWindows = false/, "the dialog window must pass its keyboard inset to Compose")
+  assert.match(picker, /fillMaxSize\(\)[\s\S]*windowInsetsPadding\(WindowInsets\.safeDrawing\)[\s\S]*imePadding\(\)/, "the dialog must inset its whole surface above the keyboard")
+  assert.ok(
+    picker.indexOf("error?.let") < picker.indexOf("AppTextField("),
+    "the validation reason must be visible above the field, not hidden behind the keyboard",
+  )
 })
 
 /**
@@ -464,6 +828,7 @@ test("scanning a pairing QR fills the form instead of saving an unreviewed addre
 
 test("a failed pairing probe leaves the saved connection untouched", () => {
   const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const settings = readFileSync(SETTINGS_SOURCE, "utf8")
   const save = /suspend fun saveConnection[\s\S]*?\n    }\n/.exec(viewModel)?.[0]
   assert.ok(save, "saveConnection must stay a suspend function in AppViewModel.kt")
   const writes = save.indexOf("settings.baseUrl = candidate.baseUrl")
@@ -474,6 +839,30 @@ test("a failed pairing probe leaves the saved connection untouched", () => {
   const failure = /catch \(err: Exception\) \{[\s\S]*?Result\.failure\(err\)/.exec(save)?.[0]
   assert.ok(failure, "saveConnection must keep an explicit failure path")
   assert.ok(!/\b(?:health|session)\s*=\s*null\b/.test(failure), "a failed probe must not wipe the live state of the saved connection")
+  assert.ok(failure.includes("connectionProbeError ="), "the pairing failure must reach the fields that caused it")
+  assert.ok(!failure.includes("connectionError ="), "a rejected new address must not mark the saved chat offline")
+  assert.ok(!save.includes("screen = Screen.Chat"), "navigation belongs to the screen after a successful probe, not the probe itself")
+  assert.match(settings, /vm\.connectionProbeError[\s\S]*removePrefix\("连接失败："\)/, "the settings page must show the real pairing failure once, without a doubled prefix")
+  assert.equal(settings.match(/vm\.connectionProbeError\?\.let/g)?.length ?? 0, 0, "the failure must not be rendered twice")
+  assert.match(settings, /delay\(1_500\)[\s\S]*vm\.navigate\(Screen\.Chat\)/, "a successful pairing must show its result before leaving the form")
+})
+
+test("an unpaired chat leads to setup instead of offering messages it cannot send", () => {
+  const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
+  const empty = /private fun EmptyChat\([\s\S]*?\n}\n/.exec(chat)?.[0]
+  assert.ok(empty, "EmptyChat must stay one composable")
+  const start = empty.indexOf("if (!connected)")
+  const end = empty.indexOf("} else {", start)
+  assert.ok(start >= 0 && end > start, "the unpaired branch must stay separate from the connected suggestions")
+  const unpaired = empty.slice(start, end)
+  assert.match(unpaired, /先在「设置」填写服务器地址与访问令牌/, "the unpaired state must name the required fields")
+  assert.match(unpaired, /text = "打开设置"/, "the unpaired state needs one action that opens setup")
+  assert.match(unpaired, /onClick = onOpenSettings/, "that action must really navigate to settings")
+  assert.doesNotMatch(
+    unpaired,
+    /"总结一下我今天的任务进展"|"查看服务器当前状态并给出建议"|"帮我写一个自动化脚本"/,
+    "prompt suggestions imply the unpaired chat can already send",
+  )
 })
 
 test("the settings screen previews the real API path and warns about phone loopback", () => {
@@ -482,6 +871,27 @@ test("the settings screen previews the real API path and warns about phone loopb
   assert.ok(scanner.includes("ApiFormat.apiUrl(normalized)"), "the settings field must preview /api/v1")
   assert.ok(scanner.includes("ApiFormat.connectionWarning(normalized)"), "the settings field must explain unreachable addresses")
   assert.ok(client.includes('host == "localhost" || host == "127.0.0.1"'), "loopback detection must cover localhost and 127.0.0.1")
+  const address = /label = "服务器地址"[\s\S]*?\n\s*\)/.exec(scanner)?.[0]
+  assert.ok(address, "the server address field must stay on the settings screen")
+  assert.doesNotMatch(address, /singleLine = true/, "a long Instabox URL must wrap instead of hiding its host")
+  assert.match(address, /maxLines = 3/, "three lines keep the host and suffix readable on a 720px phone")
+})
+
+test("the settings screen masks saved credentials until the user reveals them", () => {
+  const scanner = readFileSync(SETTINGS_SOURCE, "utf8")
+  assert.match(scanner, /var secretsVisible by remember \{ mutableStateOf\(false\) \}/, "credentials must start hidden on every visit")
+  assert.match(
+    scanner,
+    /val secretTransformation = if \(secretsVisible\) VisualTransformation\.None else PasswordVisualTransformation\(\)/,
+    "the token and encryption key must share the default-masked transformation",
+  )
+  for (const field of ["访问令牌", "加密密钥（可选）"]) {
+    const start = scanner.indexOf(`label = "${field}"`)
+    assert.ok(start >= 0, `${field} must stay on the settings screen`)
+    const block = scanner.slice(start, start + 700)
+    assert.ok(block.includes("visualTransformation = secretTransformation"), `${field} must use the masked transformation`)
+  }
+  assert.ok(scanner.includes('if (secretsVisible) "隐藏" else "显示"'), "there must be an explicit reveal/hide control")
 })
 
 
@@ -808,6 +1218,43 @@ test("the App gives large streamed uploads a long write timeout", () => {
   const client = readFileSync(CLIENT_SOURCE, "utf8")
   assert.match(client, /\.writeTimeout\(30, TimeUnit\.MINUTES\)/)
   assert.match(client, /asRequestBody\(att\.mime\.toMediaTypeOrNull\(\)\)/)
+})
+
+test("attachment sizes read the same before and after sending", () => {
+  const store = readFileSync(LOCALSTORE_SOURCE, "utf8")
+  const models = readFileSync("android/app/src/main/java/com/agentbot/app/data/ApiModels.kt", "utf8")
+  const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
+  const formatter = /fun formatFileSize\(bytes: Long\): String = when \{[\s\S]*?\n\}/.exec(store)?.[0]
+  assert.ok(formatter, "one shared formatter must own attachment units")
+  assert.match(formatter, /bytes < 1_024 -> "\$\{bytes\}B"/, "a few hundred bytes must stay exact, not round up to 1KB")
+  assert.match(formatter, /bytes < 1_024L \* 1_024 -> "%\.1fKB"/, "kilobytes keep one decimal so 1.5KB is not shown as 2KB")
+  assert.match(store, /val sizeLabel: String get\(\) = formatFileSize\(size\)/, "sent attachments must use the shared label")
+  assert.match(models, /val sizeLabel: String get\(\) = formatFileSize\(size\)/, "reply media must use the same label")
+  assert.match(chat, /formatFileSize\(att\.sizeBytes\)/, "the pre-send chip must use the same label")
+  assert.doesNotMatch(chat, /private fun formatSize\(/, "the chip must not keep a second, rounding formatter")
+})
+
+/**
+ * A phone loses the prompt when the network drops between tapping send and the server accepting
+ * the task. The composer clears only after send() reports acceptance; the ViewModel must also put
+ * the text back in the draft it could not submit, and keep the one-off engine/model so a retry
+ * repeats the same request rather than silently switching engines.
+ */
+test("a rejected send gives the prompt and one-off model back", () => {
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  const send = /fun send\(text: String\): Boolean \{[\s\S]*?\n    \}/.exec(viewModel)?.[0]
+  assert.ok(send, "send must stay one function so its failure semantics can be checked")
+  assert.match(send, /if \(draft\.isBlank\(\)\) updateDraft\(raw\)/, "a dropped send must restore the typed prompt")
+  assert.match(send, /oneOffEngine = engine[\s\S]*?oneOffModel = model/, "a retry must keep the one-off engine and model")
+
+  const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
+  const submit = /fun submit\(text: String\) \{[\s\S]*?\n    \}/.exec(chat)?.[0]
+  assert.ok(submit, "the chat's submit must stay one function")
+  assert.match(
+    submit,
+    /if \(vm\.send\(text\)\) \{[\s\S]*?vm\.updateDraft\(""\)/,
+    "the composer must clear only after send() accepted the prompt",
+  )
 })
 
 test("the App and server keep only the attachment count cap", () => {

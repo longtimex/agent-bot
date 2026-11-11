@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -84,6 +84,27 @@ test("ops diagnostics reports git, opencode, cc-switch, disk and logs", async ()
     assert.ok(diag.memory.totalBytes > 0)
     assert.equal(diag.systemd, false)
     assert.ok(calls.some((call) => call.command === "git" && call.args[0] === "status"))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ops diagnostics rounds a fractional backup mtime to a JSON-safe integer", async () => {
+  const dir = tempDir()
+  try {
+    const backupDir = join(dir, "data", "backups")
+    mkdirSync(backupDir, { recursive: true })
+    const archive = join(backupDir, "backup-20261110-151932109.tar.gz")
+    writeFileSync(archive, "archive")
+    // statSync().mtimeMs can carry a fractional nanosecond remainder on Linux. Kotlin's
+    // Long decoder rejects it, so the API must not forward the raw value.
+    utimesSync(archive, 1_794_323_972.109, 1_794_323_972.109)
+    assert.ok(!Number.isInteger(statSync(archive).mtimeMs), "the fixture must expose a fractional mtime")
+
+    const { ops } = makeService(dir, () => undefined)
+    const diag = await ops.diagnostics()
+    assert.equal(diag.lastBackupAt, Math.floor(statSync(archive).mtimeMs))
+    assert.ok(Number.isSafeInteger(diag.lastBackupAt))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -714,11 +735,17 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     { dataDir },
   )
   try {
+    // Older releases (or an operator's mkdir) may have left this directory readable by
+    // the host's other users; the next backup must close it as well as the new archive.
+    mkdirSync(join(dataDir, "backups"), { recursive: true })
+    chmodSync(join(dataDir, "backups"), 0o775)
     const result = await ops.backupData()
     assert.equal(result.ok, true)
     assert.ok(result.file, "the backup reports the archive path")
     assert.match(result.file!, /backups\/backup-\d{8}-\d{9}\.tar\.gz$/)
     assert.ok(existsSync(result.file!))
+    assert.equal(statSync(join(dataDir, "backups")).mode & 0o777, 0o700, "an existing backup directory must be private")
+    assert.equal(statSync(result.file!).mode & 0o777, 0o600, "the archive must be private")
     // tar 收到的就是 data/ 下的状态文件,且不含配对令牌
     const tarCall = calls.find((call) => call.command === "tar")
     assert.ok(tarCall, "backup runs tar")
@@ -736,6 +763,9 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     const kept = readdirSync(join(dataDir, "backups")).filter((name) => name.endsWith(".tar.gz"))
     assert.equal(kept.length, 5)
     assert.ok(!kept.some((name) => name.startsWith("backup-20260100")), "the oldest archives get pruned first")
+    for (const name of kept) {
+      assert.equal(statSync(join(dataDir, "backups", name)).mode & 0o777, 0o600, `${name} must be private`)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

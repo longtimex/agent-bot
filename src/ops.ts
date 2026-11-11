@@ -481,7 +481,8 @@ export class OpsService {
         .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz"))
         .sort()
         .pop()
-      return newest ? statSync(join(backupDir, newest)).mtimeMs : undefined
+      // Kotlin Long rejects the fractional sub-millisecond precision statSync exposes.
+      return newest ? Math.floor(statSync(join(backupDir, newest)).mtimeMs) : undefined
     } catch {
       return undefined
     }
@@ -509,7 +510,8 @@ export class OpsService {
       return { ok: false, message: "data 目录里还没有可备份的状态文件。", steps }
     }
     const backupDir = join(this.#dataDir, "backups")
-    mkdirSync(backupDir, { recursive: true })
+    mkdirSync(backupDir, { recursive: true, mode: 0o700 })
+    chmodSync(backupDir, 0o700)
     const now = new Date()
     const pad = (value: number, width = 2): string => String(value).padStart(width, "0")
     // Milliseconds in the name: two backups in the same second must not overwrite each other
@@ -522,14 +524,15 @@ export class OpsService {
     if (tar.code !== 0) {
       return { ok: false, message: "打包失败，请根据输出排查。", steps }
     }
+    chmodSync(out, 0o600)
 
     // Keep the newest 5 archives so long-running bots do not fill the disk
     const archives = readdirSync(backupDir)
       .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz"))
       .sort()
-    for (const stale of archives.slice(0, Math.max(0, archives.length - 5))) {
-      unlinkSync(join(backupDir, stale))
-    }
+    const cutoff = Math.max(0, archives.length - 5)
+    for (const stale of archives.slice(0, cutoff)) unlinkSync(join(backupDir, stale))
+    for (const kept of archives.slice(cutoff)) if (kept !== out) chmodSync(join(backupDir, kept), 0o600)
 
     const kb = (statSync(out).size / 1024).toFixed(1)
     return {

@@ -36,12 +36,7 @@ data class TaskMedia(
     val size: Long = 0,
     val remote: Boolean = false,
 ) {
-    val sizeLabel: String
-        get() = when {
-            size >= 1024 * 1024 -> "%.1fMB".format(size / 1024.0 / 1024.0)
-            size >= 1024 -> "${(size + 1023) / 1024}KB"
-            else -> "${size}B"
-        }
+    val sizeLabel: String get() = formatFileSize(size)
 }
 
 @Serializable
@@ -198,8 +193,8 @@ data class UpdateTarget(
 @Serializable
 data class StartupMigration(
     val ok: Boolean = true,
-    val fromVersion: String? = null,
-    val toVersion: String? = null,
+    val fromVersion: Int? = null,
+    val toVersion: Int? = null,
     val message: String? = null,
     val warning: String? = null,
 )
@@ -808,6 +803,13 @@ data class ApiEndpointInfo(
     val tokenConfigured: Boolean = false,
 )
 
+/** Why reminders and schedules can or cannot run: both deliver through a chat channel. */
+@Serializable
+data class AutomationInfo(
+    val available: Boolean = false,
+    val reason: String? = null,
+)
+
 @Serializable
 data class ServerInfo(
     val version: String? = null,
@@ -820,6 +822,7 @@ data class ServerInfo(
     val workDir: String? = null,
     val chatId: Long? = null,
     val userId: Long? = null,
+    val automation: AutomationInfo = AutomationInfo(),
     val api: ApiEndpointInfo = ApiEndpointInfo(),
 )
 

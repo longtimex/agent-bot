@@ -140,8 +140,19 @@ fun CcScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
+            val catalogError = vm.ccCatalogError
             val status = vm.ccStatus
-            if (status == null) {
+            if (catalogError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法读取 cc-switch",
+                        message = catalogError,
+                        icon = Icons.Filled.Warning,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshCc,
+                    )
+                }
+            } else if (status == null) {
                 item {
                     EmptyState(
                         icon = Icons.Filled.Info,

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import { AliasStore, isValidAliasName } from "../src/aliases.js"
+import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS, isReservedAliasName } from "../src/help.js"
 import type { Logger } from "../src/logger.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} }
@@ -45,6 +46,25 @@ test("AliasStore add, expand and remove per chat", () => {
   }
 })
 
+test("AliasStore refuses names that a built-in command would intercept", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-alias-"))
+  try {
+    const store = new AliasStore(join(dir, "aliases.json"), log)
+    for (const name of ["alias", "timezone", "reset", "svc", "engine", "MODEL"]) {
+      assert.equal(isReservedAliasName(name), true, name)
+      assert.throws(() => store.add(42, name, "内容"), /保留命令冲突/, name)
+    }
+    assert.equal(isReservedAliasName("deploy"), false)
+    assert.equal(store.count(42), 0)
+
+    // Every menu word and documented equivalent is covered automatically
+    for (const item of BOT_MENU_COMMANDS) assert.equal(isReservedAliasName(item.command), true, item.command)
+    for (const name of Object.keys(BOT_COMMAND_ALIASES)) assert.equal(isReservedAliasName(name), true, name)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("AliasStore persists across instances", () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-alias-"))
   try {
@@ -61,6 +81,24 @@ test("AliasStore persists across instances", () => {
   }
 })
 
+test("AliasStore keeps string session keys separate from numeric chat ids", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-alias-"))
+  try {
+    const path = join(dir, "aliases.json")
+    const first = new AliasStore(path, log)
+    first.add("api:app", "local", "仅安卓端")
+    first.add(42, "shared", "Telegram 会话")
+
+    const second = new AliasStore(path, log)
+    assert.equal(second.expand("api:app", "local"), "仅安卓端")
+    assert.equal(second.expand("api:app", "shared"), undefined)
+    assert.equal(second.expand(42, "shared"), "Telegram 会话")
+    assert.equal(second.expand(42, "local"), undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("AliasStore skips invalid entries and duplicate ids stay safe on load", () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-alias-"))
   try {
@@ -71,6 +109,7 @@ test("AliasStore skips invalid entries and duplicate ids stay safe on load", () 
         aliases: {
           "42": {
             good: { name: "good", expansion: "ok", createdAt: 1 },
+            alias: { name: "alias", expansion: "collides", createdAt: 2 },
             "bad name": { name: "bad name", expansion: "ignored", createdAt: 2 },
             empty: { name: "empty", expansion: "", createdAt: 3 },
           },

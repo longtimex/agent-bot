@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -19,10 +20,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -98,6 +103,44 @@ fun ScreenHeader(
             }
         }
         trailing?.invoke()
+    }
+}
+
+/**
+ * A failed action on a secondary page: its read-only content may still be valid, so this is a
+ * dismissible notice above the page rather than the full-page [PageLoadError].
+ */
+@Composable
+fun PageErrorNotice(
+    message: String?,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    onRetry: (() -> Unit)? = null,
+) {
+    if (message == null) return
+    Row(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        InlineNotice(
+            text = message,
+            tone = MaterialTheme.colorScheme.error,
+            icon = Icons.Filled.Info,
+            modifier = Modifier.weight(1f),
+        )
+        onRetry?.let { retry ->
+            QuietButton(
+                text = "重新加载",
+                icon = Icons.Filled.Refresh,
+                onClick = retry,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+        AppIconButton(
+            icon = Icons.Filled.Close,
+            contentDescription = "关闭错误提示",
+            onClick = onDismiss,
+        )
     }
 }
 
@@ -449,6 +492,7 @@ fun AppTextField(
     maxLines: Int = if (singleLine) 1 else 5,
     monospace: Boolean = false,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     enabled: Boolean = true,
 ) {
     OutlinedTextField(
@@ -462,6 +506,7 @@ fun AppTextField(
         minLines = minLines,
         maxLines = maxLines,
         visualTransformation = visualTransformation,
+        keyboardOptions = keyboardOptions,
         shape = RoundedCornerShape(AppRadius.md),
         textStyle = if (monospace) {
             MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
@@ -579,6 +624,30 @@ fun EmptyState(
             textAlign = TextAlign.Center,
         )
         action?.invoke()
+    }
+}
+
+/** A failed page read, distinct from a successfully loaded empty list. */
+@Composable
+fun PageLoadError(
+    title: String,
+    message: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onRetry: (() -> Unit)? = null,
+) {
+    Box(
+        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        EmptyState(
+            icon = icon,
+            title = title,
+            message = message,
+            action = onRetry?.let { retry ->
+                { QuietButton(text = "重试", icon = Icons.Filled.Refresh, onClick = retry) }
+            },
+        )
     }
 }
 

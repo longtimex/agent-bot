@@ -47,7 +47,7 @@ import { type OpsResult, type OpsService } from "./ops.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
-import { routeOps } from "./apiOpsRoutes.js"
+import { OpsActionJobs, routeOps } from "./apiOpsRoutes.js"
 import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
 import { routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
@@ -90,7 +90,7 @@ export interface ApiServerOptions {
   androidRelease?: AndroidReleaseService
   /** Proxy store shared with the bot so enabling a proxy takes effect for outbound downloads. */
   proxies?: ProxyService
-  /** Per-chat shortcuts; the app shares the owner chat's list with Telegram. */
+  /** Per-chat shortcuts; the app shares the owner chat's list when one is paired. */
   aliases?: AliasStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
   access?: {
@@ -180,6 +180,7 @@ export class ApiServer {
   #server?: Server
   /** Update/check can run npm for minutes; one at a time keeps the repo files sane. */
   #opsActionRunning = false
+  readonly #opsJobs = new OpsActionJobs()
   #ccActionRunning = false
   #magpieActionRunning = false
   readonly #taskManager: ApiTaskManager
@@ -403,6 +404,7 @@ export class ApiServer {
     if (resource === "info" && method === "GET") {
       const engine = this.#opts.store.getEngine(this.appKey)
       const session = this.#sessionView()
+      const ownerChatId = this.ownerChatId
       this.#json(ctx.res, 200, {
         version: this.#opts.version ?? null,
         timezone: this.#opts.timezone(),
@@ -412,8 +414,17 @@ export class ApiServer {
         sessionId: engine === "opencode" ? (this.#opts.store.get(this.appKey) ?? null) : null,
         cliSessionId: engine === "opencode" ? null : (this.#opts.store.getCliSession(this.appKey, engine) ?? null),
         workDir: this.#opts.agents.workDir(this.appKey),
-        chatId: this.ownerChatId ?? null,
+        chatId: ownerChatId ?? null,
         userId: this.ownerUserId ?? this.ownerChatId ?? null,
+        // Reminders and schedules deliver through a chat channel, not the App. Tell the
+        // client up front, so it can explain that instead of offering a create button that
+        // can only fail with 409 on an App-only deployment.
+        automation: {
+          available: Boolean(ownerChatId),
+          reason: ownerChatId
+            ? null
+            : "提醒和定时任务需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或配置对应渠道的白名单。",
+        },
         api: {
           enabled: this.#opts.cfg.api.enabled,
           bind: this.#opts.cfg.api.bind,
@@ -717,8 +728,8 @@ export class ApiServer {
 
   #expandAlias(text: string): string {
     const aliases = this.#opts.aliases
-    const chatId = this.ownerChatId
-    if (!aliases || chatId === undefined) return text
+    const chatId = this.ownerChatId ?? this.appKey
+    if (!aliases) return text
     let current = text
     for (let depth = 0; depth < 3; depth++) {
       const first = current.split(/\s+/, 1)[0] ?? ""
@@ -789,6 +800,7 @@ export class ApiServer {
       ops: this.#opts.ops,
       json: (res: ServerResponse, status: number, body: unknown) => this.#json(res, status, body),
       runOpsAction: (run: () => Promise<OpsResult>) => this.#runOpsAction(run),
+      asyncOps: this.#opsJobs,
       hasActiveTask: () => this.#taskManager.hasActiveTask(),
     }
   }

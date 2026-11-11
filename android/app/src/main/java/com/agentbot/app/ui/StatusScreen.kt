@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -42,20 +45,35 @@ fun StatusScreen(vm: AppViewModel) {
     ) {
         ScreenHeader(
             title = "运行状态",
-            subtitle = "服务健康、连接信息与今日用量",
+            subtitle = "健康、连接与今日用量",
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
-                StatusPill(
-                    text = if (vm.health?.ok == true) "在线" else "离线",
-                    tone = if (vm.health?.ok == true) StatusTone.Success else StatusTone.Warning,
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新运行状态",
+                    onClick = vm::refreshStatus,
                 )
             },
         )
 
         val status = vm.status
+        val loadError = vm.statusError
+        if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载运行状态",
+                message = loadError,
+                icon = Icons.Filled.Warning,
+                onRetry = vm::refreshStatus,
+            )
+            return@Column
+        }
         if (status == null) {
             AppCard {
-                Text("正在读取服务器状态…", color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (vm.statusBusy) "正在读取服务器状态…" else "状态尚未加载，点右上角重试。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         } else {
             // Hero: one answer to "is it healthy?" before any detail rows.
@@ -64,6 +82,11 @@ fun StatusScreen(vm: AppViewModel) {
                     StatusPill(
                         text = if (status.opencodeReachable == true) "运行正常" else "需要检查",
                         tone = if (status.opencodeReachable == true) StatusTone.Success else StatusTone.Warning,
+                    )
+                    StatusPill(
+                        text = if (vm.health?.ok == true) "在线" else "离线",
+                        tone = if (vm.health?.ok == true) StatusTone.Success else StatusTone.Warning,
+                        modifier = Modifier.padding(start = 6.dp),
                     )
                     androidx.compose.foundation.layout.Spacer(modifier = Modifier.weight(1f))
                     Text(
@@ -141,9 +164,10 @@ fun StatusScreen(vm: AppViewModel) {
         if (info != null) {
             SectionHeader(title = "连接信息", modifier = Modifier.padding(top = 8.dp))
             AppCard {
+                ServerAddressRow(vm.serverUrl, Modifier.padding(bottom = 11.dp))
+                androidx.compose.material3.HorizontalDivider(color = Border.copy(alpha = 0.4f))
                 InfoGrid(
                     rows = listOf(
-                        "服务器" to vm.serverUrl,
                         "API 监听" to ("${info.api.bind}:${info.api.port}" + if (info.api.enabled) "" else "（未启用）"),
                         "引擎" to (info.engineLabel ?: info.engine ?: "-"),
                         "工作目录" to (info.workDir ?: "-"),
@@ -266,6 +290,17 @@ private fun InfoGrid(rows: List<Pair<String, String>>) {
                 androidx.compose.material3.HorizontalDivider(color = Border.copy(alpha = 0.4f))
             }
             DetailRow(label, value)
+        }
+    }
+}
+
+/** A URL is copied verbatim, so it gets its own full-width line instead of a narrow value column. */
+@Composable
+private fun ServerAddressRow(url: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("服务器", color = TextTertiary, style = MaterialTheme.typography.labelMedium)
+        SelectionContainer {
+            Text(url, style = MaterialTheme.typography.bodySmall, modifier = Modifier.fillMaxWidth())
         }
     }
 }

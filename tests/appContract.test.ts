@@ -15,13 +15,13 @@ import { authHeaders, withApi } from "./api.test.js"
  * the way the App's models declare them.
  */
 
-type Kind = "string" | "number" | "boolean" | "array" | "object"
+type Kind = "string" | "number" | "integer" | "boolean" | "array" | "object"
 
 const PRIMITIVES: Record<string, Kind> = {
   String: "string",
-  Int: "number",
-  Long: "number",
-  Short: "number",
+  Int: "integer",
+  Long: "integer",
+  Short: "integer",
   Double: "number",
   Float: "number",
   Boolean: "boolean",
@@ -63,6 +63,12 @@ function kindOf(value: unknown): Kind | "null" {
   return "null"
 }
 
+/** Kotlin's integer decoders reject `1.5`, including a fractional timestamp shipped as a JSON number. */
+function matchesKind(value: unknown, kind: Kind): boolean {
+  if (kind === "integer") return typeof value === "number" && Number.isSafeInteger(value)
+  return kindOf(value) === kind
+}
+
 /** A `T?` field tolerates a null or an absent key; a field without a default tolerates neither. */
 function walk(model: string, value: unknown, where: string, problems: string[], depth = 0): void {
   if (depth > 5) return
@@ -80,7 +86,7 @@ function walk(model: string, value: unknown, where: string, problems: string[], 
       continue
     }
     const want = expectedKind(field.type)
-    if (want && kindOf(got) !== want) {
+    if (want && !matchesKind(got, want)) {
       problems.push(`${site}: wrong type (${field.type} needs ${want}, the server sent ${kindOf(got)})`)
       continue
     }
@@ -106,11 +112,11 @@ function walk(model: string, value: unknown, where: string, problems: string[], 
     if (!innerKind) continue
     if (want === "array") {
       ;(got as unknown[]).forEach((item, index) => {
-        if (kindOf(item) !== innerKind) problems.push(`${site}[${index}]: needs ${inner}, got ${kindOf(item)}`)
+        if (!matchesKind(item, innerKind)) problems.push(`${site}[${index}]: needs ${inner}, got ${kindOf(item)}`)
       })
     } else {
       for (const [key, item] of Object.entries(got as Record<string, unknown>)) {
-        if (kindOf(item) !== innerKind) problems.push(`${site}.${key}: needs ${inner}, got ${kindOf(item)}`)
+        if (!matchesKind(item, innerKind)) problems.push(`${site}.${key}: needs ${inner}, got ${kindOf(item)}`)
       }
     }
   }
@@ -397,10 +403,31 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "ccProviderModels → GET /cc/models", method: "GET", path: "/cc/models?id=p1", model: "CcText" },
         { name: "ccQuota → GET /cc/quota", method: "GET", path: "/cc/quota?id=p1", model: "CcText" },
         { name: "checkUpdate → GET /ops/check-update", method: "GET", path: "/ops/check-update", model: "OpsResult", at: "result" },
+        { name: "checkUpdate(async) → GET /ops/check-update?async=1", method: "GET", path: "/ops/check-update?async=1" },
         { name: "exportHistory → GET /export", method: "GET", path: "/export?format=markdown", raw: true },
         { name: "backupData → GET /ops/backup", method: "GET", path: "/ops/backup", raw: true },
       ]
       for (const probe of statics) await call(probe)
+      // The async poll must be reachable after a tunnel cuts the initial request. Start one
+      // only here, then wait for it to settle rather than guessing with a fixed sleep.
+      const job = (await call({ name: "runOps(async) → POST /ops/check?async=1", method: "POST", path: "/ops/check?async=1" }))?.job as
+        | { id?: unknown; state?: unknown }
+        | undefined
+      if (typeof job?.id !== "string") problems.push("runOps(async) → POST /ops/check?async=1: no job.id")
+      else {
+        let state: unknown = job.state
+        for (let attempt = 0; attempt < 300 && state !== "done"; attempt++) {
+          const polled = (await call({
+            name: "opsAction → GET /ops/actions/:id",
+            method: "GET",
+            path: `/ops/actions/${job.id}`,
+          }))?.job as { state?: unknown; result?: unknown } | undefined
+          state = polled?.state
+          if (state === "done" && typeof polled?.result !== "object") problems.push("opsAction: done without result")
+          if (state !== "done") await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        if (state !== "done") problems.push("opsAction: the async check never settled")
+      }
 
       // ---- the actions the buttons trigger ----
       const mutations: Probe[] = [
@@ -439,7 +466,6 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
           model: "AgentAssignment",
         },
         { name: "removeCustomModel → DELETE /models/custom/:key", method: "DELETE", path: "/models/custom/probek?force=1" },
-        { name: "runOps check → POST /ops/check", method: "POST", path: "/ops/check", model: "OpsResult", at: "result" },
         { name: "runOps restart → POST /ops/restart", method: "POST", path: "/ops/restart", model: "OpsResult", at: "result" },
         { name: "runOps rollback → POST /ops/rollback", method: "POST", path: "/ops/rollback", model: "OpsResult", at: "result" },
         { name: "runOps cancel-pending → POST /ops/cancel-pending", method: "POST", path: "/ops/cancel-pending", model: "OpsResult", at: "result" },

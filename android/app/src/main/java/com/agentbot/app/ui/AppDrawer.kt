@@ -42,6 +42,12 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.ScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,7 +68,18 @@ fun AppDrawer(
     connected: Boolean = false,
     sessionLabel: String? = null,
     queueCount: Int = 0,
+    open: Boolean = false,
 ) {
+    // A drawer is a map, not a document: reopening it must start at the first route. Keeping
+    // the scroll position made every group above the last visit look missing on a short phone.
+    val routeScroll = remember { ScrollState(0) }
+    var wasOpen by remember { mutableStateOf(false) }
+    // Only an edge from closed to open resets the map; a recomposition while it is open must
+    // not yank the list back to the top under the user's finger.
+    LaunchedEffect(open) {
+        if (open && !wasOpen) routeScroll.scrollTo(0)
+        wasOpen = open
+    }
     ModalDrawerSheet(
         drawerContainerColor = MaterialTheme.colorScheme.background,
         drawerContentColor = MaterialTheme.colorScheme.onBackground,
@@ -111,12 +128,15 @@ fun AppDrawer(
                 )
             }
 
+            // The groups scroll as one surface so a short phone can still reach every page;
+            // Settings stays outside it so it never covers the last entries.
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(top = 10.dp),
+                    .padding(top = 10.dp)
+                    .verticalScroll(routeScroll),
             ) {
+                Spacer(modifier = Modifier.padding(top = 6.dp))
                 DrawerSection("对话")
                 DrawerItem(Icons.Filled.History, "任务历史", current is Screen.History) { onNavigate(Screen.History) }
                 DrawerItem(
@@ -148,7 +168,7 @@ fun AppDrawer(
                 DrawerItem(Icons.Filled.Help, "帮助", current is Screen.Help) { onNavigate(Screen.Help) }
             }
 
-            HorizontalDivider(color = Border.copy(alpha = 0.55f), modifier = Modifier.padding(vertical = 10.dp))
+            HorizontalDivider(color = Border.copy(alpha = 0.55f), modifier = Modifier.padding(top = 10.dp))
             DrawerItem(Icons.Filled.Settings, "设置", current is Screen.Settings) { onNavigate(Screen.Settings) }
         }
     }

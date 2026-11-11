@@ -18,7 +18,7 @@ Telegram  ── Bot API 长轮询 ────┐
 
 > 安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [运行](#运行) · [更新与迁移](#更新与迁移) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
+**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [双实例测试](#双实例真实测试linux--android) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [运行](#运行) · [更新与迁移](#更新与迁移) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
 
 ## 一键安装（推荐）
 
@@ -231,17 +231,17 @@ npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.1`）：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.4`）：
 
 ```bash
-tag=android-v1.1.1                  # 换成实际版本
+tag=android-v1.1.4                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.1.1.apk"
-curl -L -O "$base/agent-bot-v1.1.1.apk.sha256"
-sha256sum -c agent-bot-v1.1.1.apk.sha256
+curl -L -O "$base/agent-bot-v1.1.4.apk"
+curl -L -O "$base/agent-bot-v1.1.4.apk.sha256"
+sha256sum -c agent-bot-v1.1.4.apk.sha256
 ```
 
-- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.1` 已修复明文 HTTP、代理重连、附件内存、加密切换与时间显示等问题。
+- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.4` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页等移动端行为。
 - `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名；同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留。首次安装需允许「安装未知来源应用」。
 - 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
@@ -418,6 +418,65 @@ npm run smoke:app -- --base https://3080-<机器ID>.instabox.tech \
 
 App「设置 → 应用更新」会读取服务器上的 `GET /android/release?versionCode=<当前版本>`，显示最新版本、大小、更新说明与是否有新版；点击「下载并安装」后流式下载 `GET /android/release/apk` 到缓存 `.part` 文件，校验清单中的大小与 SHA-256，再交给 Android 系统安装器。首次安装需允许「安装未知来源应用」；App 会记住已校验的 APK，授权后返回 App 即自动继续安装，无需再次下载或点击。APK 是原始字节，即使开启 `API_ENCRYPTION=1` 也不会套消息级加密；下载仍需要 Bearer Token。更新清单缺失或未配置时，App 只显示提示，不影响服务器更新与聊天。
 
+#### 双实例真实测试（Linux + Android）
+
+让 Agent 从外部同时控制一台 Linux 实例和一台 Android 实例，可以在不改动你日常实例的前提下跑完整链路。两个实例都只是普通的 Instabox sandbox：Linux 实例运行 Bot/OpenCode，Android 实例运行模拟器与 App；Agent 用 `instabox exec` 发命令、用 `push`/`pull` 传源码与截图。不要 `rm`、`stop` 或复用已有实例，先用 `instabox ls --json` 看清名字再创建。
+
+```bash
+# 推荐先安装 CLI：npx instabox@latest；之后命令都叫 instabox
+IBX=instabox
+
+# Linux 实例：默认 agent-browser 模板即可；名字必须是新的
+$IBX create --name ab-linux-test --template agent-browser \
+  --meta purpose=agent-bot-e2e --ready-timeout 10m
+
+# Android 实例：android 模板带模拟器与 adb，不需要另起桌面
+$IBX create --name ab-android-test --template android \
+  --meta purpose=agent-bot-e2e --ready-timeout 10m
+
+# 确认只新增了这两台；现有的 codex/gemini/grok 状态应保持不变
+$IBX ls --json | jq -r '.[] | [.name,.state,.id] | @tsv'
+```
+
+创建后把源码送到两个实例。Linux 实例使用 Git checkout 或 `push`；Android 实例至少需要 `android/`、`scripts/` 与 `package.json`（构建 APK 不需要整个仓库）：
+
+```bash
+$IBX cp -r -p . ab-linux-test:/data/workspace/agent-bot --all
+$IBX cp -r -p android/ ab-android-test:/data/workspace/agent-bot-src/android --all
+$IBX cp -p scripts/app-smoke.mjs ab-android-test:/data/workspace/agent-bot-src/scripts/app-smoke.mjs
+```
+
+Linux 实例：按前文 `API_PUBLIC_URL` 发布端口、写 `.env`、构建并启动，然后在同一实例（或本机，只要能访问公网 URL）运行部署冒烟：
+
+```bash
+$IBX exec ab-linux-test -- bash -lc 'cd /data/workspace/agent-bot && npm ci && npm run build'
+$IBX exec ab-linux-test -- bash -lc 'cd /data/workspace/agent-bot && set -a && . ./.env && set +a && npm run smoke:app -- --base "$API_PUBLIC_URL" --token "$API_TOKEN"'
+```
+
+Android 实例：确认模拟器在线，构建 debug APK 并覆盖安装。`-r` 保留数据与登录态；不要用 `pm clear`，否则会清掉 App 连接配置和聊天记录：
+
+```bash
+$IBX exec ab-android-test -- bash -lc 'adb devices && cd /data/workspace/agent-bot-src/android && ./gradlew assembleDebug --no-daemon'
+$IBX exec ab-android-test -- bash -lc 'adb install -r /data/workspace/agent-bot-src/android/app/build/outputs/apk/debug/app-debug.apk'
+$IBX exec ab-android-test -- bash -lc 'adb shell dumpsys package com.agentbot.app | grep -E "firstInstallTime=|lastUpdateTime="; adb shell sha256sum "$(adb shell pm path com.agentbot.app | sed s/package://)"'
+```
+
+驱动 UI 与取证的常用命令：
+
+```bash
+# 列出当前界面上的文字与可点击区域，用坐标操作
+$IBX exec ab-android-test -- bash -lc 'adb shell uiautomator dump /sdcard/ui.xml >/dev/null && adb shell cat /sdcard/ui.xml'
+$IBX exec ab-android-test -- bash -lc 'adb shell input tap 56 100; sleep 1; adb shell input keyevent KEYCODE_BACK'
+
+# 截屏走文件通道，避免 exec 的 UTF-8 输出把 PNG 弄坏
+$IBX exec ab-android-test -- bash -lc 'adb shell screencap -p /sdcard/shot.png; adb pull /sdcard/shot.png /data/workspace/shot.png'
+$IBX pull ab-android-test /data/workspace/shot.png ./shots/shot.png
+```
+
+一次完整回归至少覆盖：Linux 的 `npm run check` 与 `npm run smoke:app`；Android 的 `assembleDebug`、`adb install -r`、`firstInstallTime` 不变；从 App 发一条真实对话并看到回复；提醒/定时任务页面在无推送目标时显示 `409` 的原因而不误报为空；断网/错误地址时首屏引导设置；设置页令牌默认遮蔽；左抽屉重开回到顶部。把截图、APK 哈希和上述命令输出留存在工作区（例如 `shots/` 与 `ITERATIONS.md`），不要把 token、密钥或 `data/` 提交进仓库。
+
+> 用完只删除**你自己新建且确认不再需要**的实例：`instabox rm <name>`。测试结束后若仍要保留证据，可不删除；长期测试期间不要 `stop` 别人的实例来腾资源。免费实例闲置 30 分钟会自动暂停，重新执行 `instabox resume <name>` 即可继续。
+
 发布服务器更新包：
 
 ```bash
@@ -490,7 +549,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/access` | 查看当前渠道的访问白名单（含每个 ID 的移除按钮）与「放行所有用户」的状态；在飞书内自动展示飞书 open_id |
 | `/access add <ID>` / `/access del <ID>` | 增删当前渠道白名单：Telegram 填数字用户 ID，飞书填 `ou_` 开头的 open_id；写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
 | `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
-| `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留） |
+| `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留）。名称不能与内置命令或 App 保留命令重名，避免创建出永远无法触发的指令 |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。
@@ -513,7 +572,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 存活检查：版本、当前引擎、时区 |
-| `GET /info` | 会话与配对信息：引擎/模型、会话 ID、工作目录、当前 owner 聊天 `chatId`、用户 `userId`、API 监听地址；令牌不会回传 |
+| `GET /info` | 会话与配对信息：引擎/模型、会话 ID、工作目录、当前 owner 聊天 `chatId`、用户 `userId`、API 监听地址，以及 `automation.{available,reason}` 说明提醒/定时任务是否具备聊天推送目标；令牌不会回传 |
 | `GET /help` | 与聊天端共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记）；`commands` 是全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`） |
 | `GET /session` | 当前引擎/模型/工作目录；OpenCode 额外给出 `modelRef`，CLI 只给模型名。配套 `POST /agent` 切换引擎，`POST /model` 切换模型（复位词与聊天端一致），`POST /new` 重置会话。切换或恢复模型会清空上一个模型的上下文；`POST /model`、`POST /new`、`POST /dir`、`POST /peers/follow` 在任务排队/执行时返回 409；`POST /agent` 不影响当前上下文 |
 | `GET /peers` · `POST /peers/follow {scope}` | 列出 App 与当前 owner 聊天（Telegram 或飞书）的引擎/模型/目录及用量；不返回内部会话键或聊天正文，也无法读取聊天端的队列深度。`follow` 只让 App 单向对齐该会话，不会反向修改聊天端设置 |
@@ -526,7 +585,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话。`GET /dir/browse?path=` 列出该层的子目录供 App 的目录选择器使用：只回目录（隐藏项与文件不列，软链接只有指向真实目录才列出，悬空链接丢弃），名称按不区分大小写排序、最多 200 条并标 `truncated`，回 `{path, parent, home, cwd, defaultWorkDir, sessionDir, dirs:[{name,path}], truncated}`；路径走与 `POST /dir` 同一个解析器（`~`、相对路径、控制字符/超长/文件系统根目录的拒绝完全一致），非目录 400、无权限 409、`POST /dir/browse` 405、其它 `/dir/<子路径>` 404。它只读取，绝不改动会话（不会写 `dir`，也不会重置 CLI 上下文） |
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
-| `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：与 Telegram `/alias` 共享同一份列表；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
+| `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：连接 Telegram/飞书时与所有者会话共享同一份列表，仅安卓端时保存在 App 会话；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
 | `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
 | `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |
@@ -548,9 +607,10 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
+| `GET /ops/check-update?async=1` · `GET /ops/actions/:id` | 长任务版本：立即返回 `{job:{id,state}}`（202），随后轮询任务结果。公网反向代理常在 20–30 秒断开同步请求，App 用这一对接口取回检查与构建结果；`GET /ops/actions/latest?label=<action>` 可在首个响应丢失后重连 |
 | `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；聊天端的 `/ops` 面板也可发送同一份备份 |
 | `GET /ops/release` | 轻量版本卡：current/pending/previous release、stable/beta 通道、最近更新与启动自检；App 轮询它而不触发完整诊断探针 |
-| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（npm run check）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏 |
+| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（npm run check）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏。加 `?async=1` 时立即返回 `{job:{id,state}}`，再用 `GET /ops/actions/:id` 轮询，适合会切断长请求的隧道；不带该参数时保持原来的同步响应 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
 | `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
 | `GET /android/release` · `GET /android/release/apk` | App 更新清单与经 Bearer 鉴权的 APK 原始字节；清单包含版本、大小、SHA-256 与说明，APK 下载不套消息级加密 |
@@ -558,8 +618,8 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
 | `GET /usage` | 用量统计与近 7 天趋势 |
 | `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
-| `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
-| `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间） |
+| `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录。没有 Telegram/飞书 owner 聊天时读写返回 `409`，原因见 `GET /info` 的 `automation.reason` |
+| `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
 | `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |
 
 App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互不干扰。`GET /peers` 展示 App 与 owner 聊天的现状，App 可据此显示对端引擎/模型/目录与最近用量，并用 `POST /peers/follow` 单向跟随。
@@ -857,7 +917,7 @@ npm run clients    # 只管理控制端，适合安装完成后添加其他控�
 
 向导输出中，Telegram Bot Token 与飞书 App Secret 只显示掩码；安卓配对所需的新 `API_TOKEN` 会完整显示一次，便于在 App 中填写。输入行仍由终端回显，请留意共享屏幕。`.env` 采用原子写入并保持 `0600` 权限，不会进入日志或聊天消息。非交互环境（systemd、CI、无 TTY）不会阻塞，而是打印手动配置步骤并退出。
 
-> 仅安卓 App 控制端也能启动并使用聊天、附件、引擎/模型、目录、历史与运维功能。但提醒、定时任务和每日用量报告需要一个聊天推送目标，因此仅部署安卓端时这些接口会返回 `409`；如需推送功能，请同时配置 Telegram 或飞书。
+> 仅安卓 App 控制端也能启动并使用聊天、附件、引擎/模型、目录、历史、运维与快捷指令。快捷指令在连接 Telegram 或飞书时与所有者会话共享，仅安卓端时保存在本 App 会话中。提醒、定时任务和每日用量报告需要一个聊天推送目标，因此仅部署安卓端时这些接口会返回 `409`；如需推送功能，请同时配置 Telegram 或飞书。
 
 启动时会自动扫描 `PATH` 并打印 `agent CLI detection: n/14 installed (...)`；首次在聊天发送 `/start` 或 `/agents` 即可查看检测结果并安装新 CLI。
 

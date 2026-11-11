@@ -61,8 +61,8 @@ interface Harness {
   releaseActions: string[]
   /** Makes the next cc-switch read fail, for a route that writes first and then re-reads. */
   ccFailNextRead: () => void
-  /** Simulates the owner appearing or changing after the API server has started. */
-  setOwner: (chatId: number, userId?: number) => void
+  /** Simulates the owner appearing, changing or disappearing after the API server has started. */
+  setOwner: (chatId: number | undefined, userId?: number) => void
 }
 
 export async function withApi(
@@ -181,7 +181,7 @@ export async function withApi(
         commit: "0123456789abcdef0123456789abcdef01234567",
         release: "20261108-120000-abc",
         previousRelease: "20261107-120000-def",
-        migration: { ok: true, fromVersion: "1", toVersion: "1", message: "数据 schema 已是最新（v1）。" },
+        migration: { ok: true, fromVersion: 1, toVersion: 1, message: "数据 schema 已是最新（v1）。" },
         api: { requested: true, reachable: true },
         engine: "claude",
         notes: ["HTTP API 已启动", "数据迁移检查通过"],
@@ -224,7 +224,7 @@ export async function withApi(
         commit: "0123456789abcdef0123456789abcdef01234567",
         release: "20261108-120000-abc",
         previousRelease: "20261107-120000-def",
-        migration: { ok: true, fromVersion: "1", toVersion: "1", message: "数据 schema 已是最新（v1）。" },
+        migration: { ok: true, fromVersion: 1, toVersion: 1, message: "数据 schema 已是最新（v1）。" },
         api: { requested: true, reachable: true },
         engine: "claude",
         notes: ["HTTP API 已启动", "数据迁移检查通过"],
@@ -1914,6 +1914,13 @@ test("api manages alias shortcuts and expands them in tasks", async () => {
       body: JSON.stringify({ name: "Bad-Name", expansion: "x" }),
     })
     assert.equal(badName.status, 400)
+    const reservedName = await fetch(`${h.base}/api/v1/aliases`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ name: "alias", expansion: "不应保存" }),
+    })
+    assert.equal(reservedName.status, 400)
+    assert.match(((await reservedName.json()) as { error: string }).error, /保留命令冲突/)
     const noExpansion = await fetch(`${h.base}/api/v1/aliases`, {
       method: "POST",
       headers: authHeaders(),
@@ -1976,6 +1983,53 @@ test("api manages alias shortcuts and expands them in tasks", async () => {
     assert.equal(removed.status, 200)
     const again = await fetch(`${h.base}/api/v1/aliases/code`, { method: "DELETE", headers: authHeaders() })
     assert.equal(again.status, 404)
+  })
+})
+
+test("api keeps aliases local when no owner chat is paired", async () => {
+  let engineText = ""
+  await withApi(async (_key, _engine, text) => {
+    engineText = text
+    return `回复：${text}`
+  }, async (h) => {
+    // This is the Android-only deployment: no Telegram/Feishu chat exists yet.
+    h.setOwner(undefined)
+    const initial = await fetch(`${h.base}/api/v1/aliases`, { headers: authHeaders() })
+    assert.equal(initial.status, 200)
+    assert.deepEqual(((await initial.json()) as { aliases: unknown[] }).aliases, [])
+
+    const created = await fetch(`${h.base}/api/v1/aliases`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ name: "local", expansion: "本地快捷指令" }),
+    })
+    assert.equal(created.status, 201)
+
+    const listed = await fetch(`${h.base}/api/v1/aliases`, { headers: authHeaders() })
+    assert.equal(listed.status, 200)
+    assert.deepEqual(
+      ((await listed.json()) as { aliases: Array<{ name: string }> }).aliases.map((entry) => entry.name),
+      ["local"],
+    )
+
+    const submitted = await fetch(`${h.base}/api/v1/task`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ text: "/local 请执行" }),
+    })
+    assert.equal(submitted.status, 202)
+    const { task } = (await submitted.json()) as { task: { id: string } }
+    let status = ""
+    for (let i = 0; i < 50 && status !== "done"; i++) {
+      const res = await fetch(`${h.base}/api/v1/task/${task.id}`, { headers: authHeaders() })
+      status = ((await res.json()) as { task: { status: string } }).task.status
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(status, "done")
+    assert.equal(engineText, "本地快捷指令 请执行")
+
+    const removed = await fetch(`${h.base}/api/v1/aliases/local`, { method: "DELETE", headers: authHeaders() })
+    assert.equal(removed.status, 200)
   })
 })
 
@@ -2250,6 +2304,10 @@ test("api history windows the list but still reports the stored total", async ()
     assert.equal(((await cleared.json()) as { cleared: number }).cleared, 25)
     const after = await fetch(`${h.base}/api/v1/history`, { headers: authHeaders() })
     assert.equal(((await after.json()) as { total: number }).total, 0)
+
+    // The App uses this count to say "没有可清空的历史" instead of claiming a deletion.
+    const emptyClear = await fetch(`${h.base}/api/v1/history`, { method: "DELETE", headers: authHeaders() })
+    assert.equal(((await emptyClear.json()) as { cleared: number }).cleared, 0)
   })
 })
 
@@ -3537,6 +3595,7 @@ test("api exposes session and pairing info without leaking the token", async () 
       chatId: number | null
       sessionId: string | null
       cliSessionId: string | null
+      automation: { available: boolean; reason: string | null }
       api: { enabled: boolean; bind: string; port: number; tokenConfigured: boolean }
     }
     assert.equal(info.engine, "claude")
@@ -3545,10 +3604,35 @@ test("api exposes session and pairing info without leaking the token", async () 
     assert.equal(info.chatId, 42)
     assert.equal(info.sessionId, null)
     assert.equal(info.cliSessionId, null)
+    assert.deepEqual(info.automation, { available: true, reason: null })
     assert.equal(info.api.enabled, true)
     assert.equal(info.api.bind, "127.0.0.1")
     assert.equal(info.api.port, 0)
     assert.equal(info.api.tokenConfigured, true)
+  })
+})
+
+test("api info explains that automation needs a chat delivery target", async () => {
+  await withApi(async () => "ok", async (h) => {
+    h.setOwner(undefined)
+    const info = (await (await fetch(`${h.base}/api/v1/info`, { headers: authHeaders() })).json()) as {
+      chatId: number | null
+      automation: { available: boolean; reason: string | null }
+    }
+    assert.equal(info.chatId, null)
+    assert.equal(info.automation.available, false)
+    assert.match(info.automation.reason ?? "", /Telegram 或飞书/)
+
+    // The route must still say why, so clients that never read /info get the same answer.
+    for (const resource of ["reminders", "schedules"]) {
+      const res = await fetch(`${h.base}/api/v1/${resource}`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: resource === "reminders" ? "30m 喝水" : "30m 检查服务器" }),
+      })
+      assert.equal(res.status, 409, `POST /${resource} must not accept an undeliverable automation`)
+      assert.match(String(((await res.json()) as { error?: string }).error), /推送目标/)
+    }
   })
 })
 

@@ -1995,6 +1995,22 @@ test("the Telegram autocomplete menu stays in sync with /help full", () => {
   assert.equal(isBotCommand("/model", "timezone"), false)
 })
 
+test("Telegram rejects shortcuts that its built-in router would intercept", async () => {
+  const h = await createHarness()
+  try {
+    await h.send("/alias add alias 不应保存")
+    assert.match(h.lastText(), /保留命令冲突/)
+    assert.deepEqual(h.bridge.aliasStore.list(7), [])
+
+    await h.send("/alias add deploy 查看当前部署")
+    assert.match(h.lastText(), /已保存快捷指令 `\/deploy`/)
+    assert.equal(h.bridge.aliasStore.expand(7, "deploy"), "查看当前部署")
+    assert.equal(h.errors.length, 0)
+  } finally {
+    await h.close()
+  }
+})
+
 test("parseProviderAdd reads the friendly key=value form", () => {
   const parsed = parseProviderAdd([
     "我的 Claude",

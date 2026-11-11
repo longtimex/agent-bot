@@ -19,8 +19,10 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +40,7 @@ import com.agentbot.app.ui.theme.TextTertiary
 @Composable
 fun ProxyScreen(vm: AppViewModel) {
     var adding by remember { mutableStateOf(false) }
+    var pendingRemove by remember { mutableStateOf<ProxyInfo?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
@@ -49,7 +52,11 @@ fun ProxyScreen(vm: AppViewModel) {
                 AppIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "添加代理",
-                    onClick = { adding = true },
+                    onClick = {
+                        vm.proxyActionError = null
+                        vm.proxyDraftRejected = false
+                        adding = true
+                    },
                 )
                 AppIconButton(
                     icon = Icons.Filled.Refresh,
@@ -72,6 +79,11 @@ fun ProxyScreen(vm: AppViewModel) {
             )
         }
 
+        PageErrorNotice(
+            message = vm.proxyActionError,
+            onDismiss = { vm.proxyActionError = null },
+        )
+
         vm.proxyTestMessage?.let { message ->
             val ok = message.startsWith("连接正常")
             InlineNotice(
@@ -87,7 +99,18 @@ fun ProxyScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         ) {
-            if (vm.proxies.isEmpty()) {
+            val loadError = vm.proxiesError
+            if (loadError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法加载代理",
+                        message = loadError,
+                        icon = Icons.Filled.Settings,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshProxies,
+                    )
+                }
+            } else if (vm.proxies.isEmpty()) {
                 item {
                     EmptyState(
                         icon = Icons.Filled.Settings,
@@ -96,18 +119,23 @@ fun ProxyScreen(vm: AppViewModel) {
                     )
                 }
             }
-            items(vm.proxies, key = { it.id }) { proxy ->
-                ProxyCard(vm, proxy)
-            }
-            if (vm.activeProxyId != null) {
-                item {
-                    QuietButton(
-                        text = "停用代理",
-                        icon = Icons.Filled.Stop,
-                        enabled = !vm.proxyBusy,
-                        danger = true,
-                        onClick = vm::disableProxy,
-                    )
+            if (loadError == null) {
+                items(vm.proxies, key = { it.id }) { proxy ->
+                    ProxyCard(vm, proxy, onDelete = {
+                        vm.proxyActionError = null
+                        pendingRemove = proxy
+                    })
+                }
+                if (vm.activeProxyId != null) {
+                    item {
+                        QuietButton(
+                            text = "停用代理",
+                            icon = Icons.Filled.Stop,
+                            enabled = !vm.proxyBusy,
+                            danger = true,
+                            onClick = vm::disableProxy,
+                        )
+                    }
                 }
             }
         }
@@ -119,17 +147,46 @@ fun ProxyScreen(vm: AppViewModel) {
             hint = "支持 http、https、socks4、socks5，可带用户名密码。格式：地址 [名称]。添加前会先测试连通性。",
             confirmLabel = "添加",
             placeholder = "socks5://127.0.0.1:1080 本地代理",
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                vm.addProxy(input)
+            error = vm.proxyActionError.takeIf { vm.proxyDraftRejected },
+            onDismiss = {
                 adding = false
+                vm.proxyActionError = null
+                vm.proxyDraftRejected = false
+            },
+            onConfirm = { input ->
+                vm.addProxy(input) { ok -> if (ok) adding = false }
+            },
+        )
+    }
+
+    pendingRemove?.let { proxy ->
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("删除代理？", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("将从 Bot 中移除「${proxy.name.ifBlank { proxy.url }}」。", style = MaterialTheme.typography.bodyMedium)
+                    vm.proxyActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.removeProxy(proxy.id) { ok -> if (ok) pendingRemove = null }
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("取消") }
             },
         )
     }
 }
 
 @Composable
-private fun ProxyCard(vm: AppViewModel, proxy: ProxyInfo) {
+private fun ProxyCard(vm: AppViewModel, proxy: ProxyInfo, onDelete: () -> Unit) {
     AppCard(contentPadding = PaddingValues(horizontal = AppSpacing.lg, vertical = 14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -172,7 +229,7 @@ private fun ProxyCard(vm: AppViewModel, proxy: ProxyInfo) {
                 icon = Icons.Filled.DeleteOutline,
                 enabled = !vm.proxyBusy,
                 danger = true,
-                onClick = { vm.removeProxy(proxy.id) },
+                onClick = onDelete,
             )
         }
     }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -64,16 +65,40 @@ fun ModelsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp),
         )
 
-        if (vm.modelBusy) {
+        if (vm.modelBusy || vm.customModelsBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         }
+
+        PageErrorNotice(
+            message = vm.modelActionError,
+            onDismiss = { vm.modelActionError = null },
+        )
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (vm.customModels.isEmpty()) {
+            val loadError = vm.customModelsError
+            if (loadError != null) {
+                item {
+                    PageLoadError(
+                        title = "暂时无法加载模型",
+                        message = loadError,
+                        icon = Icons.Filled.Memory,
+                        modifier = Modifier.fillParentMaxSize(),
+                        onRetry = vm::refreshCustomModels,
+                    )
+                }
+            } else if (vm.customModelsBusy && vm.customModels.isEmpty()) {
+                item {
+                    Text(
+                        "正在读取自定义模型…",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            } else if (vm.customModels.isEmpty()) {
                 item {
                     AppCard {
                         Text("还没有自定义模型", style = MaterialTheme.typography.titleSmall)
@@ -86,10 +111,12 @@ fun ModelsScreen(vm: AppViewModel) {
                     }
                 }
             }
-            items(vm.customModels, key = { it.key }) { model ->
-                CustomModelCard(vm, model) { pendingRemove = model.key }
+            if (loadError == null) {
+                items(vm.customModels, key = { it.key }) { model ->
+                    CustomModelCard(vm, model) { pendingRemove = model.key }
+                }
             }
-            if (vm.agentBindings.isNotEmpty()) {
+            if (loadError == null && vm.agentBindings.isNotEmpty()) {
                 item {
                     AppCard(contentPadding = PaddingValues(0.dp)) {
                         Column(modifier = Modifier.fillMaxWidth()) {
@@ -131,10 +158,10 @@ fun ModelsScreen(vm: AppViewModel) {
             hint = "格式：简称 provider/modelID [显示名] [--attachment] [--context 200000] [--output 64000]。例如：mymodel custom/my-model-id 我的模型 --attachment。",
             confirmLabel = "添加",
             placeholder = "mymodel custom/my-model-id 我的模型 --attachment",
+            error = vm.modelActionError.takeIf { vm.modelDraftRejected },
             onDismiss = { adding = false },
             onConfirm = { input ->
-                vm.addCustomModel(input)
-                adding = false
+                if (vm.addCustomModel(input)) adding = false
             },
         )
     }
@@ -145,6 +172,7 @@ fun ModelsScreen(vm: AppViewModel) {
             hint = "为 $agent 指定模型：可用简称（sonnet、gpt-5）或 provider/modelID；绑定 self 会同时切换当前会话（上下文重置）。",
             confirmLabel = "绑定",
             placeholder = "sonnet",
+            error = vm.modelActionError.takeIf { vm.modelDraftRejected },
             onDismiss = { assigning = null },
             onConfirm = { model ->
                 vm.assignAgentModel(agent, model.trim())

@@ -102,8 +102,6 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
@@ -123,6 +121,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.LocalStore
 import com.agentbot.app.data.PendingAttachment
+import com.agentbot.app.data.formatFileSize
 import com.agentbot.app.data.TaskMedia
 import com.agentbot.app.data.mediaMime
 import com.agentbot.app.ui.theme.AccentSoft
@@ -702,50 +701,61 @@ private fun EmptyChat(
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 14.dp),
         )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 26.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            listOf(
-                "总结一下我今天的任务进展",
-                "查看服务器当前状态并给出建议",
-                "帮我写一个自动化脚本",
-            ).forEach { suggestion ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(AppRadius.md))
-                        .clickable { onSuggestion(suggestion) },
-                    shape = RoundedCornerShape(AppRadius.md),
-                    color = Color.Transparent,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 13.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+        // An unpaired chat cannot submit anything. Showing prompts here would look like a
+        // working inbox whose buttons silently only fill a draft, so lead with the instructions
+        // that actually enable the screen.
+        if (!connected) {
+            Text(
+                "先在「设置」填写服务器地址与访问令牌，连接后即可发送消息、传附件并接收任务进度。",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 18.dp),
+            )
+            SecondaryButton(
+                text = "打开设置",
+                modifier = Modifier.padding(top = 14.dp),
+                onClick = onOpenSettings,
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 26.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                listOf(
+                    "总结一下我今天的任务进展",
+                    "查看服务器当前状态并给出建议",
+                    "帮我写一个自动化脚本",
+                ).forEach { suggestion ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(AppRadius.md))
+                            .clickable { onSuggestion(suggestion) },
+                        shape = RoundedCornerShape(AppRadius.md),
+                        color = Color.Transparent,
                     ) {
-                        Icon(
-                            Icons.Filled.ArrowUpward,
-                            contentDescription = null,
-                            tint = TextTertiary,
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Text(
-                            suggestion,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f).padding(start = 10.dp),
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 13.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.ArrowUpward,
+                                contentDescription = null,
+                                tint = TextTertiary,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Text(
+                                suggestion,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f).padding(start = 10.dp),
+                            )
+                        }
                     }
                 }
-            }
-            if (!connected) {
-                SecondaryButton(
-                    text = "连接服务器",
-                    modifier = Modifier.padding(top = 18.dp),
-                    onClick = onOpenSettings,
-                )
             }
         }
     }
@@ -1383,7 +1393,7 @@ private fun AttachmentChip(att: PendingAttachment, onRemove: () -> Unit) {
                     modifier = Modifier.widthIn(max = 150.dp),
                 )
                 Text(
-                    formatSize(att.sizeBytes),
+                    formatFileSize(att.sizeBytes),
                     color = TextSecondary,
                     style = MaterialTheme.typography.labelSmall,
                 )
@@ -1407,13 +1417,6 @@ private fun decodeThumbnail(file: java.io.File): ImageBitmap? = runCatching {
 
 /** Voice notes remain short for reliable transcription and mobile recording limits. */
 private const val MAX_VOICE_SECONDS = 120
-
-private fun formatSize(bytes: Long): String =
-    when {
-        bytes >= 1024L * 1024 * 1024 -> "%.1fGB".format(bytes / 1024.0 / 1024.0 / 1024.0)
-        bytes >= 1024L * 1024 -> "%.1fMB".format(bytes / 1024.0 / 1024.0)
-        else -> "${(bytes + 1023) / 1024}KB"
-    }
 
 /** A slash command that maps a Telegram-style chat command to a local app action. */
 private data class SlashCommand(val name: String, val desc: String, val run: () -> Unit)
@@ -1454,7 +1457,6 @@ private fun ChatInputBar(
     var recordSeconds by remember { mutableStateOf(0) }
     val recorder = remember { mutableStateOf<MediaRecorder?>(null) }
     val voiceFile = remember { mutableStateOf<File?>(null) }
-
     fun stopRecorder(): Boolean {
         val active = recorder.value ?: return true
         val stopped = runCatching { active.stop() }.isSuccess
@@ -1568,7 +1570,10 @@ private fun ChatInputBar(
     var attachMenu by remember { mutableStateOf(false) }
     var enginePicker by remember { mutableStateOf(false) }
     LaunchedEffect(enginePicker) {
-        if (enginePicker) vm.refreshAgentsQuietly()
+        if (enginePicker) {
+            vm.refreshAgentsQuietly()
+            if (vm.oneOffEngine == null) vm.refreshModels()
+        }
     }
     // A bare `/engine` or `/model!` typed into the box asks for this picker
     LaunchedEffect(vm.pinPickerRequested) {
@@ -1618,7 +1623,7 @@ private fun ChatInputBar(
         SlashCommand("/proxy", "网络代理") { vm.navigate(Screen.Proxy) },
         SlashCommand("/access", "访问白名单") { vm.navigate(Screen.Access) },
         SlashCommand("/ops", "运维中心") { vm.navigate(Screen.Ops) },
-        SlashCommand("/alias", "快捷指令") { vm.navigate(Screen.Aliases) },
+        SlashCommand("/alias", "管理快捷指令") { vm.navigate(Screen.Aliases) },
         SlashCommand("/help", "帮助") { vm.navigate(Screen.Help) },
         // App-only pins: they affect the next message, not the session
         SlashCommand("/engine", "本条消息交给另一个引擎") { enginePicker = true },
@@ -1711,7 +1716,11 @@ private fun ChatInputBar(
             }
             val pinnedEngine = vm.oneOffEngineLabel
             val pinnedModel = vm.oneOffModelLabel
-            val overrideLabel = pinnedEngine?.let { engine -> pinnedModel?.let { model -> "$engine / $model" } ?: engine }
+            val overrideLabel = when {
+                pinnedEngine != null -> pinnedModel?.let { model -> "$pinnedEngine / $model" } ?: pinnedEngine
+                pinnedModel != null -> "默认引擎 / $pinnedModel"
+                else -> null
+            }
             val composerFocus = remember { MutableInteractionSource() }
             val composerFocused by composerFocus.collectIsFocusedAsState()
             Surface(
@@ -1744,7 +1753,7 @@ private fun ChatInputBar(
                             icon = Icons.Filled.Tune,
                             tint = MaterialTheme.colorScheme.primary,
                             text = "本条交给「$overrideLabel」，仅生效一次",
-                            onClear = { vm.updateOneOffEngine(null) },
+                            onClear = vm::clearOneOffPin,
                         )
                     }
 
@@ -1753,15 +1762,15 @@ private fun ChatInputBar(
                         onValueChange = onDraftChange,
                         enabled = !recording,
                         interactionSource = composerFocus,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 54.dp)
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
                         textStyle = MaterialTheme.typography.bodyLarge.copy(
                             color = MaterialTheme.colorScheme.onSurface,
                         ),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = 6,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 54.dp)
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
                         decorationBox = { inner ->
                             Box(contentAlignment = Alignment.TopStart) {
                                 if (draft.isEmpty()) {
@@ -1926,37 +1935,57 @@ private fun ChatInputBar(
                                     vm.updateOneOffEngine(agent.id)
                                 }
                             }
-                            if (vm.oneOffEngine != null) {
+                            val modelEngine = vm.oneOffModelEngine
+                            Text(
+                                "模型（只影响这一条）",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
+                            )
+                            EngineOptionRow(
+                                label = "跟随引擎配置",
+                                detail = "不指定模型，由该引擎自行决定",
+                                selected = vm.oneOffModel == null,
+                            ) {
+                                vm.updateOneOffModel(null)
+                            }
+                            val modelsError = vm.pinPickerModelsError
+                            if (modelsError != null) {
                                 Text(
-                                    "模型（只影响这一条）",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
+                                    modelsError,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(vertical = 6.dp),
                                 )
+                                QuietButton(
+                                    text = "重试加载模型",
+                                    onClick = {
+                                        if (vm.oneOffEngine == null) vm.refreshModels()
+                                        else vm.reloadOneOffModels()
+                                    },
+                                )
+                            } else if (vm.pinPickerModels.isEmpty()) {
+                                Text(
+                                    if (vm.pinPickerModelsLoading) {
+                                        "正在读取模型…"
+                                    } else vm.pinPickerModelHint?.let {
+                                        "该引擎不列出可选模型，可在聊天里发送 /model! <模型ID>（提示：$it）"
+                                    } ?: if (modelEngine == null) {
+                                        "尚无可用的会话引擎；请先连接并在「会话设置」中选择引擎。"
+                                    } else {
+                                        "该引擎不列出可选模型，留空即由该引擎自身配置决定。"
+                                    },
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(vertical = 6.dp),
+                                )
+                            }
+                            vm.pinPickerModels.forEach { option ->
                                 EngineOptionRow(
-                                    label = "跟随引擎配置",
-                                    detail = "不指定模型，由该引擎自行决定",
-                                    selected = vm.oneOffModel == null,
+                                    label = option.label,
+                                    detail = option.desc ?: option.detail,
+                                    selected = vm.oneOffModel == option.value,
                                 ) {
-                                    vm.updateOneOffModel(null)
-                                }
-                                if (vm.oneOffModels.isEmpty()) {
-                                    Text(
-                                        vm.oneOffModelHint?.let {
-                                            "该引擎不列出可选模型，可在聊天里发送 /model! <模型ID>（提示：$it）"
-                                        } ?: "该引擎不列出可选模型，留空即由该引擎自身配置决定。",
-                                        color = TextSecondary,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier.padding(vertical = 6.dp),
-                                    )
-                                }
-                                vm.oneOffModels.forEach { option ->
-                                    EngineOptionRow(
-                                        label = option.label,
-                                        detail = option.desc ?: option.detail,
-                                        selected = vm.oneOffModel == option.value,
-                                    ) {
-                                        vm.updateOneOffModel(option.value)
-                                    }
+                                    vm.updateOneOffModel(option.value)
                                 }
                             }
                         }

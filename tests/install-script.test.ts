@@ -29,6 +29,16 @@ test("install.sh recognizes Telegram, Feishu and Android API as control channels
   assert.doesNotMatch(source, /refusing to start without TELEGRAM_BOT_TOKEN/)
 })
 
+test("install.sh re-reads the control channel after creating .env", () => {
+  const source = execFileSync("sh", ["-c", "cat install.sh"], { encoding: "utf8" })
+  const start = source.indexOf('if [ "$start_after" -eq 1 ]')
+  assert.ok(start > 0)
+  const beforeStart = source.slice(0, start)
+  const finalRefresh = beforeStart.lastIndexOf("has_channel=0")
+  const firstCheck = beforeStart.indexOf("if has_control_channel; then has_channel=1; fi")
+  assert.ok(finalRefresh > firstCheck, "the channel must be re-read after the setup/file stages")
+})
+
 test("install.sh points at the client wizard for adding control clients later", () => {
   const source = execFileSync("sh", ["-c", "cat install.sh"], { encoding: "utf8" })
   assert.match(source, /npm run setup/)

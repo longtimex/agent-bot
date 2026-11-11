@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -81,7 +82,30 @@ fun SessionScreen(vm: AppViewModel) {
             title = "会话设置",
             subtitle = "引擎、上下文、时区与对端会话",
             onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新会话设置",
+                    onClick = vm::refreshSessionSettings,
+                )
+            },
         )
+
+        PageErrorNotice(
+            message = vm.sessionActionError,
+            onDismiss = { vm.sessionActionError = null },
+        )
+
+        val loadError = vm.sessionError
+        if (loadError != null) {
+            PageLoadError(
+                title = "暂时无法加载会话设置",
+                message = loadError,
+                icon = Icons.Filled.Warning,
+                onRetry = vm::refreshSessionSettings,
+            )
+            return@Column
+        }
 
         AppCard {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -181,7 +205,10 @@ fun SessionScreen(vm: AppViewModel) {
                         SecondaryButton(
                             text = "跟随该会话",
                             modifier = Modifier.fillMaxWidth(),
-                            onClick = { followTarget = peer },
+                            onClick = {
+                                vm.sessionActionError = null
+                                followTarget = peer
+                            },
                         )
                     }
                 }
@@ -241,10 +268,14 @@ fun SessionScreen(vm: AppViewModel) {
             initial = dir?.custom ?: "",
             confirmLabel = "保存",
             placeholder = "/data/workspace/project",
-            onDismiss = { editDir = false },
-            onConfirm = { path ->
-                vm.setWorkDir(path)
+            error = vm.sessionActionError.takeIf { vm.sessionDraftRejected },
+            onDismiss = {
                 editDir = false
+                vm.sessionActionError = null
+                vm.sessionDraftRejected = false
+            },
+            onConfirm = { path ->
+                vm.setWorkDir(path) { ok -> if (ok) editDir = false }
             },
         )
     }
@@ -261,10 +292,14 @@ fun SessionScreen(vm: AppViewModel) {
             initial = currentTz ?: "",
             confirmLabel = "保存",
             placeholder = "Asia/Shanghai",
-            onDismiss = { editTz = false },
-            onConfirm = { zone ->
-                vm.changeTimezone(zone.trim())
+            error = vm.sessionActionError.takeIf { vm.sessionDraftRejected },
+            onDismiss = {
                 editTz = false
+                vm.sessionActionError = null
+                vm.sessionDraftRejected = false
+            },
+            onConfirm = { zone ->
+                vm.changeTimezone(zone.trim()) { ok -> if (ok) editTz = false }
             },
         )
     }
@@ -273,16 +308,20 @@ fun SessionScreen(vm: AppViewModel) {
             onDismissRequest = { followTarget = null },
             title = { Text("跟随${peer.label}？") },
             text = {
-                Text(
-                    "会把本机 App 改成「${peer.session?.engineLabel ?: peer.session?.engine ?: "-"} · " +
-                        "${peer.session?.model ?: "-"} · ${peer.session?.workDir ?: "-"}」，" +
-                        "并重置 App 侧的 CLI 上下文。另一端不会有任何改动。",
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "会把本机 App 改成「${peer.session?.engineLabel ?: peer.session?.engine ?: "-"} · " +
+                            "${peer.session?.model ?: "-"} · ${peer.session?.workDir ?: "-"}」，" +
+                            "并重置 App 侧的 CLI 上下文。另一端不会有任何改动。",
+                    )
+                    vm.sessionActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.followPeer(peer.scope)
-                    followTarget = null
+                    vm.followPeer(peer.scope) { ok -> if (ok) followTarget = null }
                 }) { Text("跟随") }
             },
             dismissButton = {
@@ -433,14 +472,38 @@ fun QueueScreen(vm: AppViewModel) {
             }
         )
 
-        if (vm.queue.isEmpty() && vm.recentTasks.isEmpty()) {
+        PageErrorNotice(
+            message = vm.queueActionError,
+            onDismiss = { vm.queueActionError = null },
+        )
+        PageErrorNotice(
+            message = vm.queueError.takeIf { vm.queue.isNotEmpty() || vm.recentTasks.isNotEmpty() },
+            onDismiss = { vm.queueError = null },
+            onRetry = vm::refreshQueue,
+        )
+
+        val loadError = vm.queueError
+        if (vm.queue.isEmpty() && vm.recentTasks.isEmpty() && loadError == null) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("当前没有排队或执行中的任务", color = TextSecondary, style = MaterialTheme.typography.bodyLarge)
+                EmptyState(
+                    icon = Icons.Filled.Stop,
+                    title = "当前没有排队或执行中的任务",
+                    message = "新任务会先出现在这里；最近完成的记录也会保留，便于重试。",
+                )
             }
+            return@Column
+        }
+        if (vm.queue.isEmpty() && vm.recentTasks.isEmpty()) {
+            PageLoadError(
+                title = "暂时无法加载任务队列",
+                message = loadError ?: "任务队列仍在读取，请稍后重试。",
+                icon = Icons.Filled.Warning,
+                onRetry = vm::refreshQueue,
+            )
             return@Column
         }
 

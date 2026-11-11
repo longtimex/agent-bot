@@ -172,14 +172,23 @@ export function runtimePaths(projectDir = process.cwd(), env: NodeJS.ProcessEnv 
   }
 }
 
-/** Resolve .env without mutating the caller's environment; explicit values win. */
-export function projectEnv(projectDir: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+/**
+ * Resolve `.env` without mutating the caller's environment. `base` keeps its explicit
+ * overrides so `DATA_DIR=` can still be cleared on purpose, while an explicit project
+ * a caller is inspecting stays anchored to that project's file instead of the Bot's
+ * exported variables leaking into it.
+ */
+export function projectEnv(
+  projectDir: string,
+  base: NodeJS.ProcessEnv = process.env,
+  options: { preferProject?: boolean } = {},
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base }
   try {
     const file = join(projectDir, ".env")
     if (existsSync(file)) {
       for (const [key, value] of Object.entries(parseEnv(readFileSync(file, "utf8")))) {
-        if (env[key] === undefined) env[key] = value
+        if (options.preferProject || env[key] === undefined) env[key] = value
       }
     }
   } catch {
@@ -208,7 +217,7 @@ export function detectSupervisor(env: NodeJS.ProcessEnv = process.env): Supervis
 export function readInstallManifest(projectDir = process.cwd()): InstallManifest | undefined {
   let dataDir: string
   try {
-    dataDir = runtimePaths(projectDir, projectEnv(projectDir)).dataDir
+    dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true })).dataDir
   } catch {
     dataDir = runtimePaths(projectDir).dataDir
   }
@@ -224,7 +233,7 @@ export function readInstallManifest(projectDir = process.cwd()): InstallManifest
 }
 
 export function writeInstallManifest(projectDir: string, manifest: InstallManifest): string {
-  const dataDir = runtimePaths(projectDir, projectEnv(projectDir)).dataDir
+  const dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true })).dataDir
   mkdirSync(dataDir, { recursive: true })
   const path = join(dataDir, MANIFEST)
   const temp = `${path}.${process.pid}.tmp`
@@ -248,7 +257,7 @@ function currentEntry(paths: RuntimePaths): { entry?: string; source: RuntimeSta
 }
 
 export function readRuntimeState(projectDir = process.cwd()): RuntimeState {
-  const env = projectEnv(projectDir)
+  const env = projectEnv(projectDir, process.env, { preferProject: true })
   const paths = runtimePaths(projectDir, env)
   const lock = readLockIdentity(paths.lockPath)
   const fromPid = lock ? undefined : readPidIdentity(paths.pidPath, isBotCommand)

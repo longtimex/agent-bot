@@ -79,6 +79,14 @@ fun HermesScreen(vm: AppViewModel) {
         if (vm.hermesBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = AppSpacing.screen))
         }
+        vm.hermesError?.let { error ->
+            InlineNotice(
+                text = error,
+                modifier = Modifier.padding(horizontal = AppSpacing.screen),
+                tone = MaterialTheme.colorScheme.error,
+                icon = Icons.Filled.Warning,
+            )
+        }
         vm.hermesMessage?.let { message ->
             InlineNotice(
                 text = message.removePrefix("⚠️ ").removePrefix("✅ "),
@@ -88,6 +96,15 @@ fun HermesScreen(vm: AppViewModel) {
             )
         }
         if (state == null) {
+            if (vm.hermesError != null && !vm.hermesBusy) {
+                PageLoadError(
+                    title = "暂时无法加载 Hermes 记忆",
+                    message = vm.hermesError.orEmpty(),
+                    icon = Icons.Filled.Memory,
+                    onRetry = vm::refreshHermes,
+                )
+                return@Column
+            }
             EmptyState(
                 icon = Icons.Filled.Memory,
                 title = if (vm.hermesBusy) "正在读取记忆" else "尚未加载记忆",

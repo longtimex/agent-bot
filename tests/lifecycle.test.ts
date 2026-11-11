@@ -24,11 +24,25 @@ function writeManifest(dir: string, extra: Record<string, unknown> = {}): void {
 
 async function inDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const previous = process.cwd()
+  const previousDataDir = process.env.DATA_DIR
+  const previousHome = process.env.AGENT_BOT_HOME
+  const previousLog = process.env.BOT_LOG_FILE
   process.chdir(dir)
+  // The bot's own process exports DATA_DIR; without clearing it the temp project's
+  // .env never wins and the "unsafe data root" guard would inspect the real checkout.
+  delete process.env.DATA_DIR
+  delete process.env.AGENT_BOT_HOME
+  delete process.env.BOT_LOG_FILE
   try {
     return await fn()
   } finally {
     process.chdir(previous)
+    if (previousDataDir === undefined) delete process.env.DATA_DIR
+    else process.env.DATA_DIR = previousDataDir
+    if (previousHome === undefined) delete process.env.AGENT_BOT_HOME
+    else process.env.AGENT_BOT_HOME = previousHome
+    if (previousLog === undefined) delete process.env.BOT_LOG_FILE
+    else process.env.BOT_LOG_FILE = previousLog
   }
 }
 

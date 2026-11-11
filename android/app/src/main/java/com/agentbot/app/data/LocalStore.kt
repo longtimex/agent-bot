@@ -25,6 +25,20 @@ object AttachmentLimits {
     const val MAX_COUNT = 4
 }
 
+/**
+ * One size label for every attachment surface. The pre-send chip and the sent bubble describe
+ * the same file, so rounding only one of them made a 34-byte note read `1KB` before sending and
+ * `34B` afterwards. Small files stay exact; larger ones keep one decimal and never become
+ * `0.0KB` just below the next unit.
+ */
+fun formatFileSize(bytes: Long): String = when {
+    bytes < 0 -> "0B"
+    bytes < 1_024 -> "${bytes}B"
+    bytes < 1_024L * 1_024 -> "%.1fKB".format(bytes / 1_024.0)
+    bytes < 1_024L * 1_024 * 1_024 -> "%.1fMB".format(bytes / (1_024.0 * 1_024.0))
+    else -> "%.1fGB".format(bytes / (1_024.0 * 1_024 * 1_024))
+}
+
 /** Name and size of an attachment already sent with a chat message; bytes are not kept. */
 @Serializable
 data class SentAttachment(
@@ -32,12 +46,7 @@ data class SentAttachment(
     val mime: String = "",
     val size: Long = 0,
 ) {
-    val sizeLabel: String
-        get() = when {
-            size >= 1024 * 1024 -> "%.1fMB".format(size / 1024.0 / 1024.0)
-            size >= 1024 -> "${(size + 1023) / 1024}KB"
-            else -> "${size}B"
-        }
+    val sizeLabel: String get() = formatFileSize(size)
 }
 
 /** Copies content URIs (photo picker, document picker) into private cache files, and persists chat history locally. */

@@ -37,6 +37,10 @@ const DEFAULT_TEST_URL = "https://www.gstatic.com/generate_204"
 const TEST_TIMEOUT_MS = 10_000
 const NO_PROXY = "localhost,127.0.0.1,::1"
 
+export function proxyTestUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PROXY_TEST_URL?.trim() || DEFAULT_TEST_URL
+}
+
 const PROTOCOL_MAP: Record<string, ProxyProtocol> = {
   "http:": "http",
   "https:": "https",
@@ -172,7 +176,7 @@ async function defaultTester(url: string, protocol: ProxyProtocol): Promise<void
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
   try {
-    const res = await fetch(process.env.PROXY_TEST_URL ?? DEFAULT_TEST_URL, {
+    const res = await fetch(proxyTestUrl(), {
       dispatcher,
       signal: controller.signal,
     })
