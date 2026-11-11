@@ -30,6 +30,10 @@ interface PromptResponse {
   parts?: Part[]
 }
 
+interface SessionStatus {
+  type?: string
+}
+
 export interface PromptFile {
   mime: string
   filename: string
@@ -89,6 +93,7 @@ export interface PromptOptions {
   agent?: string
   model?: ModelRef
   idleTimeoutMs?: number
+  /** `0` disables the wall-clock ceiling; the idle watchdog still applies. */
   maxTimeoutMs?: number
   onActivityHook?: (touch: () => void) => void
   signal?: AbortSignal
@@ -104,6 +109,8 @@ interface ProviderList {
 
 const DEFAULT_TASK_TIMEOUT_MS = 600_000
 const CONTROL_TIMEOUT_MS = 15_000
+/** A status probe must finish well inside the idle window, not hold the task open. */
+const STATUS_PROBE_TIMEOUT_MS = 5_000
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g
@@ -118,6 +125,10 @@ export function oneLine(value: string, max: number): string {
 }
 
 function describeDuration(ms: number): string {
+  if (ms >= 3_600_000) {
+    const hours = ms / 3_600_000
+    return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} 小时`
+  }
   if (ms >= 60_000) return `${Math.round(ms / 60_000)} 分钟`
   return `${Math.max(1, Math.round(ms / 1_000))} 秒`
 }
@@ -405,11 +416,14 @@ export class Opencode {
     if (options.model) body.model = options.model
 
     const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS
-    const maxTimeoutMs = Math.max(options.maxTimeoutMs ?? idleTimeoutMs, idleTimeoutMs)
+    const configuredMax = options.maxTimeoutMs ?? idleTimeoutMs
+    const maxTimeoutMs = configuredMax > 0 ? Math.max(configuredMax, idleTimeoutMs) : 0
 
     const controller = new AbortController()
     let idleTimer: NodeJS.Timeout | null = null
     let hardTimer: NodeJS.Timeout | null = null
+    let statusTimer: NodeJS.Timeout | null = null
+    let statusProbeInFlight = false
     let timeoutMessage: string | undefined
     let cancelled = false
     let settled = false
@@ -447,11 +461,50 @@ export class Opencode {
 
     touchActivity()
 
-    hardTimer = setTimeout(() => {
-      failWithTimeout(
-        `执行超时：任务总耗时已达到 ${describeDuration(maxTimeoutMs)}上限。`,
-      )
-    }, maxTimeoutMs)
+    if (maxTimeoutMs > 0) {
+      hardTimer = setTimeout(() => {
+        failWithTimeout(
+          `执行超时：任务总耗时已达到 ${describeDuration(maxTimeoutMs)}上限。`,
+        )
+      }, maxTimeoutMs)
+    }
+
+    /**
+     * OpenCode can spend a long time inside one tool call without emitting an SSE part.
+     * Treat a still-busy/retrying source session as activity, but never `idle`: an idle
+     * server is precisely the stuck state the inactivity watchdog exists to catch.
+     * `/session/status` is available on every supported OpenCode version; the SDK's
+     * `session.status` event is only an optimisation for newer servers.
+     */
+    const probeStatus = async (): Promise<void> => {
+      if (settled || statusProbeInFlight || cancelled) return
+      statusProbeInFlight = true
+      try {
+        const statuses = await this.#requestWithSignal<Record<string, SessionStatus> | undefined>(
+          "GET",
+          "/session/status",
+          undefined,
+          AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS),
+        )
+        if (settled || cancelled) return
+        const status = statuses?.[sessionID]
+        if (status?.type === "busy" || status?.type === "retry") touchActivity()
+      } catch {
+        // A failed probe proves nothing about liveness; letting it extend the idle
+        // window would turn a dead server into an endlessly running task.
+      } finally {
+        statusProbeInFlight = false
+      }
+    }
+
+    if (idleTimeoutMs > 0 && Number.isFinite(idleTimeoutMs)) {
+      // Half the window leaves room for network jitter and still refreshes twice
+      // before the watchdog would fire; the floor keeps tiny unit-test windows useful.
+      const probeIntervalMs = Math.max(100, Math.min(30_000, Math.floor(idleTimeoutMs / 2)))
+      statusTimer = setInterval(() => {
+        void probeStatus()
+      }, probeIntervalMs)
+    }
 
     if (options.onActivityHook) {
       options.onActivityHook(touchActivity)
@@ -483,6 +536,7 @@ export class Opencode {
       settled = true
       if (idleTimer) clearTimeout(idleTimer)
       if (hardTimer) clearTimeout(hardTimer)
+      if (statusTimer) clearInterval(statusTimer)
       externalSignal?.removeEventListener("abort", onExternalAbort)
     }
 

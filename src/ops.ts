@@ -228,7 +228,7 @@ function allowOpenIdsRule(value: string): string | undefined {
 
 const ENV_RULES: Record<string, EnvRule> = {
   TASK_TIMEOUT_MS: intRule(10_000, 86_400_000),
-  TASK_MAX_TIMEOUT_MS: intRule(10_000, 86_400_000),
+  TASK_MAX_TIMEOUT_MS: intRule(0, 86_400_000),
   MAX_REPLY_LENGTH: intRule(100, 4000),
   MAX_MEDIA_MB: intRule(1, 100),
   MAX_INPUT_MB: intRule(0, 100_000),

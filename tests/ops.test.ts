@@ -607,6 +607,10 @@ test("ops env rejects unknown keys, invalid values and newlines", () => {
     assert.equal(ops.envSet("MAX_INPUT_MB", "500").ok, true)
     assert.equal(ops.envSet("MAX_INPUT_MB", "100000").ok, true)
     assert.equal(ops.envSet("MAX_INPUT_MB", "100001").ok, false)
+    assert.equal(ops.envSet("TASK_MAX_TIMEOUT_MS", "0").ok, true)
+    assert.equal(ops.envSet("TASK_MAX_TIMEOUT_MS", "86400000").ok, true)
+    assert.equal(ops.envSet("TASK_MAX_TIMEOUT_MS", "600000").ok, true)
+    assert.equal(ops.envSet("TASK_MAX_TIMEOUT_MS", "86400001").ok, false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

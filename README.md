@@ -231,17 +231,17 @@ npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.5`）：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.4`）：
 
 ```bash
-tag=android-v1.1.5                  # 换成实际版本
+tag=android-v1.1.4                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.1.5.apk"
-curl -L -O "$base/agent-bot-v1.1.5.apk.sha256"
-sha256sum -c agent-bot-v1.1.5.apk.sha256
+curl -L -O "$base/agent-bot-v1.1.4.apk"
+curl -L -O "$base/agent-bot-v1.1.4.apk.sha256"
+sha256sum -c agent-bot-v1.1.4.apk.sha256
 ```
 
-- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.5` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页等移动端行为。
+- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.4` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页、聊天搜索编译修复与长任务超时修复等移动端行为。
 - `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名；同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留。首次安装需允许「安装未知来源应用」。
 - 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
@@ -854,7 +854,7 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `FEISHU_CALLBACK_ENABLED`：设为 `1` 启用飞书卡片回调 HTTP 服务，默认 `0`。不启用时普通消息、命令和附件仍可用，但面板按钮不会响应；启用后需在开放平台配置回调地址。
 - `FEISHU_CALLBACK_BIND` / `FEISHU_CALLBACK_PORT` / `FEISHU_CALLBACK_PATH`：回调服务的监听地址、端口与路径，默认 `127.0.0.1:3081/feishu/card`。放在 nginx/Caddy 后时通常保持回环监听，仅暴露反向代理路径。
 - `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY`：开放平台回调配置中的验签凭据，至少配置一项；属于密钥，不能经 `/env` 查看。
-- `TASK_TIMEOUT_MS` / `TASK_MAX_TIMEOUT_MS`：无活动超时与任务绝对上限，默认均为 10 分钟，所有引擎共用。
+- `TASK_TIMEOUT_MS` / `TASK_MAX_TIMEOUT_MS`：无活动超时默认 10 分钟，所有引擎共用；任务总耗时兜底默认 24 小时，设为 `0` 可关闭。OpenCode 会轮询 `/session/status`，会话仍在 `busy`/`retry` 时视为活跃，即使暂时没有新的输出事件也不会误判超时。
 - `MAX_MEDIA_MB` / `MAX_INPUT_MB`：前者限制出站媒体下载/发送，默认 20MB；后者是**项目级**入站下载上限，默认 `0` 表示关闭（可设 `0–100000`）。项目不再按 10MB/15MB 或附件总字节数拒绝单视频、图片和普通文件，单条消息只限制最多 4 个附件。实际平台边界仍然存在：Telegram Bot API 的 `getFile` 约 20MB；飞书图片超过约 10MB 会自动改按文件发送，文件超过约 30MB 无法发送；OpenCode 对单个直连附件有约 20MB 限制，超过时文件完整落盘并以绝对路径交给模型。
 - `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接访问本机/内网地址；仅在本地调试时设为 `1`。
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
@@ -1037,7 +1037,8 @@ npm run bot -- start
 /service opencode start|stop|restart
 /env                               # 查看可修改的非密钥配置
 /env set LOG_LEVEL debug
-/env set TASK_TIMEOUT_MS 1200000
+/env set TASK_MAX_TIMEOUT_MS 86400000
+/env set TASK_MAX_TIMEOUT_MS 0          # 关闭总耗时上限，只保留无活动超时
 /env unset PROXY_TEST_URL
 ```
 
@@ -1318,8 +1319,8 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 
 所有引擎统一使用：
 
-- 无活动超时：超过 `TASK_TIMEOUT_MS`（默认 10 分钟）没有任何输出即中止。
-- 绝对上限：任务总耗时达到 `TASK_MAX_TIMEOUT_MS`（默认 10 分钟）即中止；长任务可调大。
+- 无活动超时：超过 `TASK_TIMEOUT_MS`（默认 10 分钟）没有任何活动即中止。OpenCode 的 `/session/status` 返回 `busy` 或 `retry` 时会续期；`idle` 或探活失败不会续期，真正卡住的任务仍会被发现。
+- 总耗时兜底：任务总耗时达到 `TASK_MAX_TIMEOUT_MS`（默认 24 小时）即中止；不要为了长任务调大无活动超时，可把总耗时上限调大或设为 `0` 关闭。
 - OpenCode 超时会调用 `POST /session/:id/abort` 终止服务端生成；Agent CLI 会终止整个进程组（含子进程）。
 
 常见故障：

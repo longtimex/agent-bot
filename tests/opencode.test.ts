@@ -295,6 +295,127 @@ test("activity after the prompt settles does not arm a stale idle timer", async 
   )
 })
 
+test("prompt keeps a silent but busy session alive by probing /session/status", async () => {
+  let statusCalls = 0
+  let abortCalls = 0
+
+  await withServer(
+    (req, res) => {
+      const url = req.url ?? ""
+      if (url.endsWith("/session/status")) {
+        statusCalls += 1
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ses_test: { type: "busy" } }))
+        return
+      }
+      if (url.endsWith("/abort")) {
+        abortCalls += 1
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end("{}")
+        return
+      }
+      if (url.endsWith("/message")) {
+        // No SSE events at all: the status probe is the only sign of life.
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ parts: [{ type: "text", text: "长任务完成" }] }))
+        }, 450)
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async (oc) => {
+      const reply = await oc.prompt("ses_test", "hello", { idleTimeoutMs: 150, maxTimeoutMs: 5_000 })
+      assert.equal(reply, "长任务完成")
+      assert.ok(statusCalls >= 2, `expected status probes, saw ${statusCalls}`)
+      assert.equal(abortCalls, 0)
+    },
+  )
+})
+
+test("an idle session is not allowed to extend the inactivity watchdog", async () => {
+  let abortCalls = 0
+
+  await withServer(
+    (req, res) => {
+      const url = req.url ?? ""
+      if (url.endsWith("/session/status")) {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ses_test: { type: "idle" } }))
+        return
+      }
+      if (url.endsWith("/abort")) {
+        abortCalls += 1
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end("{}")
+        return
+      }
+      if (url.endsWith("/message")) return
+      res.writeHead(404)
+      res.end()
+    },
+    async (oc) => {
+      await assert.rejects(
+        oc.prompt("ses_test", "hello", { idleTimeoutMs: 150, maxTimeoutMs: 5_000 }),
+        (err: unknown) => err instanceof OpencodeError && /无活动超时/.test(err.message),
+      )
+      await delay(100)
+      assert.equal(abortCalls, 1)
+    },
+  )
+})
+
+test("a failed status probe does not extend the inactivity watchdog", async () => {
+  await withServer(
+    (req, res) => {
+      const url = req.url ?? ""
+      if (url.endsWith("/session/status")) {
+        res.writeHead(500)
+        res.end("down")
+        return
+      }
+      if (url.endsWith("/message")) return
+      res.writeHead(404)
+      res.end()
+    },
+    async (oc) => {
+      await assert.rejects(
+        oc.prompt("ses_test", "hello", { idleTimeoutMs: 150, maxTimeoutMs: 5_000 }),
+        (err: unknown) => err instanceof OpencodeError && /无活动超时/.test(err.message),
+      )
+    },
+  )
+})
+
+test("maxTimeoutMs=0 removes the wall-clock ceiling but keeps the idle watchdog", async () => {
+  await withServer(
+    (req, res) => {
+      const url = req.url ?? ""
+      if (url.endsWith("/session/status")) {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ses_test: { type: "busy" } }))
+        return
+      }
+      if (url.endsWith("/message")) {
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ parts: [{ type: "text", text: "ok" }] }))
+        }, 500)
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async (oc) => {
+      assert.equal(
+        await oc.prompt("ses_test", "hello", { idleTimeoutMs: 200, maxTimeoutMs: 0 }),
+        "ok",
+      )
+    },
+  )
+})
+
 test("createSession reports a missing session id instead of crashing", async () => {
   await withServer(
     (_req, res) => {

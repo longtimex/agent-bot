@@ -742,6 +742,62 @@ setTimeout(() => process.stdout.write("done\\n"), 60)`,
   }
 })
 
+test("AgentCliService lets a productive CLI run past the idle window when maxTimeoutMs=0", async () => {
+  const dir = tempDir("agent-cli-no-hard-cap-")
+  try {
+    const bin = join(dir, "fake-long.js")
+    // Keep emitting output past the idle window: this is the long-task shape,
+    // not a hung process, so the inactivity watchdog must not fire either.
+    writeExecutable(
+      bin,
+      `let seen = 0
+const timer = setInterval(() => {
+  seen += 1
+  process.stdout.write("tick " + seen + String.fromCharCode(10))
+  if (seen === 8) {
+    clearInterval(timer)
+    process.exit(0)
+  }
+}, 40)`,
+    )
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(registryPath, JSON.stringify({ agents: { longtask: { bin, parse: "text", args: {} } } }))
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    const service = new AgentCliService(dir, store, log, 150, 0, undefined, registry)
+
+    const startedAt = Date.now()
+    const reply = await service.prompt("chat", "longtask", "hi")
+    const elapsed = Date.now() - startedAt
+    assert.match(reply, /tick 8/)
+    assert.ok(elapsed >= 250, `fixture ended too early (${elapsed}ms); it must outlive the idle window`)
+    service.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("AgentCliService still aborts a silent CLI when maxTimeoutMs=0", async () => {
+  const dir = tempDir("agent-cli-idle-zero-")
+  try {
+    const bin = join(dir, "fake-silent.js")
+    writeExecutable(bin, "setInterval(() => {}, 1000)")
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(registryPath, JSON.stringify({ agents: { silent: { bin, parse: "text", args: {} } } }))
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    const service = new AgentCliService(dir, store, log, 150, 0, undefined, registry)
+
+    await assert.rejects(
+      () => service.prompt("chat", "silent", "hi"),
+      /无任何输出活动/,
+    )
+    service.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("terminateProcess reaches a grandchild that outlives its wrapper shim", async () => {
   const wrapper =
     'const { spawn } = require("node:child_process");' +

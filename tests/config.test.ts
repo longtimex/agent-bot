@@ -158,10 +158,10 @@ test("loadConfig gates the Feishu card callback and its verification credentials
   assert.equal(encrypted.feishu?.callback?.encryptKey, "encrypt-key")
 })
 
-test("loadConfig defaults both timeouts to ten minutes", () => {
+test("loadConfig keeps the ten-minute inactivity watchdog and defaults the hard cap to 24 hours", () => {
   const cfg = loadConfig({ TELEGRAM_BOT_TOKEN: "token", TELEGRAM_ALLOW_USERS: "1" })
   assert.equal(cfg.taskTimeoutMs, 600_000)
-  assert.equal(cfg.taskMaxTimeoutMs, 600_000)
+  assert.equal(cfg.taskMaxTimeoutMs, 24 * 60 * 60 * 1000)
 })
 
 /**
@@ -272,17 +272,36 @@ test("loadConfig treats empty numeric env vars as unset", () => {
   assert.equal(cfg.maxReplyLength, 1500)
   assert.equal(cfg.maxMediaBytes, 20 * 1024 * 1024)
   assert.equal(cfg.maxInputBytes, 0, "an unset MAX_INPUT_MB must disable the project-level ceiling")
-  assert.equal(cfg.taskMaxTimeoutMs, cfg.taskTimeoutMs)
+  assert.equal(cfg.taskMaxTimeoutMs, 24 * 60 * 60 * 1000)
 })
 
-test("loadConfig keeps legacy timeout env and supports a longer hard cap", () => {
+test("loadConfig migrates the old ten-minute sample hard cap but keeps explicit choices", () => {
   const legacy = loadConfig({
     TELEGRAM_BOT_TOKEN: "token",
     TELEGRAM_ALLOW_USERS: "1",
     OPENCODE_TIMEOUT_MS: "120000",
   })
   assert.equal(legacy.taskTimeoutMs, 120_000)
-  assert.equal(legacy.taskMaxTimeoutMs, 120_000)
+  assert.equal(legacy.taskMaxTimeoutMs, 24 * 60 * 60 * 1000)
+
+  // .env.example shipped exactly 600000 for years; copied deployments must not
+  // keep killing healthy tasks at ten minutes after this release.
+  const copiedSample = loadConfig({
+    TELEGRAM_BOT_TOKEN: "token",
+    TELEGRAM_ALLOW_USERS: "1",
+    TASK_TIMEOUT_MS: "600000",
+    TASK_MAX_TIMEOUT_MS: "600000",
+  })
+  assert.equal(copiedSample.taskMaxTimeoutMs, 24 * 60 * 60 * 1000)
+
+  // A deliberate ten-minute ceiling paired with a different idle window is kept.
+  const deliberate = loadConfig({
+    TELEGRAM_BOT_TOKEN: "token",
+    TELEGRAM_ALLOW_USERS: "1",
+    TASK_TIMEOUT_MS: "300000",
+    TASK_MAX_TIMEOUT_MS: "600000",
+  })
+  assert.equal(deliberate.taskMaxTimeoutMs, 600_000)
 
   const extended = loadConfig({
     TELEGRAM_BOT_TOKEN: "token",
@@ -290,6 +309,13 @@ test("loadConfig keeps legacy timeout env and supports a longer hard cap", () =>
     TASK_MAX_TIMEOUT_MS: "1800000",
   })
   assert.equal(extended.taskMaxTimeoutMs, 1_800_000)
+
+  const unlimited = loadConfig({
+    TELEGRAM_BOT_TOKEN: "token",
+    TELEGRAM_ALLOW_USERS: "1",
+    TASK_MAX_TIMEOUT_MS: "0",
+  })
+  assert.equal(unlimited.taskMaxTimeoutMs, 0)
 })
 
 test("loadConfig resolves the agent CLI profile path", () => {

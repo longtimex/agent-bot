@@ -32,6 +32,11 @@ export interface BotConfig {
     agent?: string
   }
   taskTimeoutMs: number
+  /**
+   * Overall wall-clock ceiling for one task. `0` disables the ceiling and leaves
+   * the inactivity watchdog as the only bound, which is the right default for
+   * agents that legitimately stream progress for many hours.
+   */
   taskMaxTimeoutMs: number
   maxReplyLength: number
   maxMediaBytes: number
@@ -213,6 +218,28 @@ function int(value: string | undefined, fallback: number, min = 1, max = Number.
   return Math.min(max, Math.max(min, Math.floor(parsed)))
 }
 
+/**
+ * The 24-hour default is a runaway guard, not a task budget. The sample `.env`
+ * used to ship 600000, and deployments copied it verbatim, so merely changing
+ * the code default would leave every existing chat killed at ten minutes. Only
+ * that exact legacy sample value is migrated; a deliberately chosen hard cap
+ * (including 10 minutes) is still honoured.
+ */
+const LEGACY_HARD_TIMEOUT_MS = 600_000
+const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1000
+
+function taskMaxTimeout(value: string | undefined, idleTimeoutMs: number): number {
+  const raw = value?.trim()
+  if (!raw) return DEFAULT_HARD_TIMEOUT_MS
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return DEFAULT_HARD_TIMEOUT_MS
+  if (parsed === LEGACY_HARD_TIMEOUT_MS && idleTimeoutMs === LEGACY_HARD_TIMEOUT_MS) {
+    return DEFAULT_HARD_TIMEOUT_MS
+  }
+  if (parsed <= 0) return 0
+  return Math.max(idleTimeoutMs, Math.floor(parsed))
+}
+
 function pick(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
@@ -316,7 +343,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   const dataDir = resolve(pick(env.DATA_DIR) ?? "./data")
   const taskTimeoutMs = int(pick(env.TASK_TIMEOUT_MS) ?? env.OPENCODE_TIMEOUT_MS, 600_000, 10_000)
-  const taskMaxTimeoutMs = int(env.TASK_MAX_TIMEOUT_MS, taskTimeoutMs, taskTimeoutMs)
+  const taskMaxTimeoutMs = taskMaxTimeout(env.TASK_MAX_TIMEOUT_MS, taskTimeoutMs)
   const ccswitchApp = pick(env.CC_SWITCH_APP) ?? "opencode"
   if (!CC_SWITCH_APPS.includes(ccswitchApp as (typeof CC_SWITCH_APPS)[number])) {
     throw new StartupConfigError(

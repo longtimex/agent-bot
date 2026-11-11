@@ -763,6 +763,10 @@ export function normalizeWorkDirInput(raw: string, cwd: string, home: string): s
 }
 
 function describeDuration(ms: number): string {
+  if (ms >= 3_600_000) {
+    const hours = ms / 3_600_000
+    return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} 小时`
+  }
   if (ms >= 60_000) return `${Math.round(ms / 60_000)} 分钟`
   return `${Math.max(1, Math.round(ms / 1_000))} 秒`
 }
@@ -791,7 +795,7 @@ export class AgentCliService {
     this.#store = store
     this.#log = log
     this.#timeoutMs = timeoutMs
-    this.#maxTimeoutMs = Math.max(maxTimeoutMs, timeoutMs)
+    this.#maxTimeoutMs = maxTimeoutMs > 0 ? Math.max(maxTimeoutMs, timeoutMs) : 0
     this.#proxyEnv = proxyEnv
     this.registry = registry ?? new AgentCliRegistry({ log })
   }
@@ -944,11 +948,13 @@ export class AgentCliService {
         }, this.#timeoutMs)
       }
       resetIdle()
-      hardTimer = setTimeout(() => {
-        fail(
-          `${profile.label} 执行超时：任务总耗时已达到 ${describeDuration(this.#maxTimeoutMs)}上限。已输出:\n${outputTail()}`,
-        )
-      }, this.#maxTimeoutMs)
+      if (this.#maxTimeoutMs > 0) {
+        hardTimer = setTimeout(() => {
+          fail(
+            `${profile.label} 执行超时：任务总耗时已达到 ${describeDuration(this.#maxTimeoutMs)}上限。已输出:\n${outputTail()}`,
+          )
+        }, this.#maxTimeoutMs)
+      }
 
       const feedProgress = (chunk: string, flush = false): void => {
         if (!onProgress) return
