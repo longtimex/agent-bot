@@ -121,11 +121,11 @@ keyPassword=...
 推送匹配 `android-v*` 的标签即触发 `.github/workflows/android-release.yml`：
 
 ```bash
-git tag -a android-v1.1.4 -m "Android v1.1.4"
-git push origin android-v1.1.4
+git tag -a android-v1.1.6 -m "Android v1.1.6"
+git push origin android-v1.1.6
 ```
 
-发布前先把 `android/app/build.gradle.kts` 的 `versionName` / `versionCode` 改成同一个版本；工作流会先跑完整项目检查，再按标签把 `versionName` 写成标签版本（如 `1.1.4`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，最后执行 `gradle assembleRelease`。标签与仓库内版本不一致会直接失败，不会签出一个版本错乱的包。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
+发布前先把 `android/app/build.gradle.kts` 的 `versionName` / `versionCode` 改成同一个版本；工作流会先跑完整项目检查，再按标签把 `versionName` 写成标签版本（如 `1.1.6`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，最后执行 `gradle assembleRelease`。标签与仓库内版本不一致会直接失败，不会签出一个版本错乱的包。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
 
 - `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -139,12 +139,12 @@ git push origin android-v1.1.4
 不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`：
 
 ```bash
-# 把 <tag> 换成实际版本，例如 android-v1.1.4
-tag=android-v1.1.4
+# 把 <tag> 换成实际版本，例如 android-v1.1.6
+tag=android-v1.1.6
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -o agent-bot-v1.1.4.apk "$base/agent-bot-v1.1.4.apk"
-curl -L -o agent-bot-v1.1.4.apk.sha256 "$base/agent-bot-v1.1.4.apk.sha256"
-sha256sum -c agent-bot-v1.1.4.apk.sha256
+curl -L -o agent-bot-v1.1.6.apk "$base/agent-bot-v1.1.6.apk"
+curl -L -o agent-bot-v1.1.6.apk.sha256 "$base/agent-bot-v1.1.6.apk.sha256"
+sha256sum -c agent-bot-v1.1.6.apk.sha256
 ```
 
 当前 Release 由 CI 正式签名，因此需要在手机上允许「安装未知来源应用」。同一 release keystore
