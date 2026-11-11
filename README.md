@@ -231,17 +231,17 @@ npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.4`）：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.1.5`）：
 
 ```bash
-tag=android-v1.1.4                  # 换成实际版本
+tag=android-v1.1.5                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.1.4.apk"
-curl -L -O "$base/agent-bot-v1.1.4.apk.sha256"
-sha256sum -c agent-bot-v1.1.4.apk.sha256
+curl -L -O "$base/agent-bot-v1.1.5.apk"
+curl -L -O "$base/agent-bot-v1.1.5.apk.sha256"
+sha256sum -c agent-bot-v1.1.5.apk.sha256
 ```
 
-- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.4` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页等移动端行为。
+- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.1.5` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页等移动端行为。
 - `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名；同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留。首次安装需允许「安装未知来源应用」。
 - 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
