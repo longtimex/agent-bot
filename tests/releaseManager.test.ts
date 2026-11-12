@@ -89,6 +89,8 @@ test("release build runs in a staging clone and leaves the checkout untouched", 
     assert.ok(npmCalls.length > 0)
     assert.ok(npmCalls.every((call) => !("NODE_OPTIONS" in call.env)), "npm must not inherit the host's Node preload")
     assert.ok(npmCalls.every((call) => !("DATA_DIR" in call.env)), "npm must not point the gate at the live data directory")
+    assert.ok(npmCalls.every((call) => !("UPDATE_BRANCH" in call.env)), "npm must not inherit the live update branch")
+    assert.ok(npmCalls.every((call) => !("UPDATE_CHANNEL" in call.env)), "npm must not inherit the live update channel")
     assert.equal(release.readState().current, undefined, "building must not activate a release")
     assert.equal(release.readState().pending?.commit, "0123456789abcdef0123456789abcdef01234567")
   } finally {

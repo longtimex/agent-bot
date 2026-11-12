@@ -128,9 +128,13 @@ test("a release gate does not inherit ambient Node or data routing", () => {
     PATH: "/usr/bin",
     NODE_OPTIONS: "--require /usr/local/lib/instabox/headed-browser.cjs",
     DATA_DIR: "/data/workspace/live-instance/data",
+    UPDATE_BRANCH: "test/update-e2e",
+    UPDATE_CHANNEL: "beta",
     KEEP: "yes",
   })
   assert.ok(!("NODE_OPTIONS" in env))
   assert.ok(!("DATA_DIR" in env), "gate tests must use the staging checkout's own ./data")
+  assert.ok(!("UPDATE_BRANCH" in env), "gate tests must see the default stable channel")
+  assert.ok(!("UPDATE_CHANNEL" in env), "gate tests must see the default stable channel")
   assert.equal(env.KEEP, "yes")
 })
