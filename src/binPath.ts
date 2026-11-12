@@ -118,6 +118,8 @@ export function installerChildEnv(env: Record<string, string | undefined>): Reco
  * makes gate tests read/write live state, and a test release branch changes
  * assertions that describe the default main channel. The staging cwd must
  * choose its own ./data and the tests' default channel instead.
+ * API_* and the bot's home/log pointers are the same kind of live wiring: a
+ * copied .env would otherwise make the gate probe or bind the running API.
  * Never let ambient runtime wiring decide whether a release is safe to activate.
  */
 export function releaseChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
@@ -126,5 +128,8 @@ export function releaseChildEnv(env: Record<string, string | undefined>): Record
   delete out.DATA_DIR
   delete out.UPDATE_BRANCH
   delete out.UPDATE_CHANNEL
+  for (const name of Object.keys(out)) {
+    if (name.startsWith("API_") || name === "BOT_LOG_FILE" || name === "AGENT_BOT_HOME") delete out[name]
+  }
   return out
 }

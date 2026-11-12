@@ -130,11 +130,23 @@ test("a release gate does not inherit ambient Node or data routing", () => {
     DATA_DIR: "/data/workspace/live-instance/data",
     UPDATE_BRANCH: "test/update-e2e",
     UPDATE_CHANNEL: "beta",
+    API_PORT: "3082",
+    API_BIND: "0.0.0.0",
+    API_PUBLIC_URL: "https://example.invalid",
+    API_TOKEN: "live-token",
+    AGENT_BOT_HOME: "/data/workspace/live-instance",
+    BOT_LOG_FILE: "/data/workspace/live-instance/data/bot.log",
     KEEP: "yes",
   })
   assert.ok(!("NODE_OPTIONS" in env))
   assert.ok(!("DATA_DIR" in env), "gate tests must use the staging checkout's own ./data")
   assert.ok(!("UPDATE_BRANCH" in env), "gate tests must see the default stable channel")
   assert.ok(!("UPDATE_CHANNEL" in env), "gate tests must see the default stable channel")
+  assert.ok(!("API_PORT" in env), "gate tests must not bind the live API port")
+  assert.ok(!("API_BIND" in env), "gate tests must not bind the live API interface")
+  assert.ok(!("API_PUBLIC_URL" in env), "gate tests must not advertise the live pairing URL")
+  assert.ok(!("API_TOKEN" in env), "gate tests must never receive the live API bearer")
+  assert.ok(!("AGENT_BOT_HOME" in env), "gate tests must use the staging checkout")
+  assert.ok(!("BOT_LOG_FILE" in env), "gate tests must not write the live log")
   assert.equal(env.KEEP, "yes")
 })
