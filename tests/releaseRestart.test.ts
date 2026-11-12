@@ -12,7 +12,7 @@ function tempDir(): string {
 
 function state(dir: string): RuntimeState {
   return {
-    paths: runtimePaths(dir),
+    paths: runtimePaths(dir, { ...process.env, AGENT_BOT_HOME: "" }),
     supervisor: "systemd",
     releaseId: "checkout",
     entrySource: "missing",
