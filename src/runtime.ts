@@ -181,9 +181,10 @@ export function runtimePaths(projectDir = process.cwd(), env: NodeJS.ProcessEnv 
 export function projectEnv(
   projectDir: string,
   base: NodeJS.ProcessEnv = process.env,
-  options: { preferProject?: boolean } = {},
+  options: { preferProject?: boolean; ignoreHome?: boolean } = {},
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base }
+  if (options.ignoreHome) delete env.AGENT_BOT_HOME
   try {
     const file = join(projectDir, ".env")
     if (existsSync(file)) {
@@ -217,7 +218,7 @@ export function detectSupervisor(env: NodeJS.ProcessEnv = process.env): Supervis
 export function readInstallManifest(projectDir = process.cwd()): InstallManifest | undefined {
   let dataDir: string
   try {
-    dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true })).dataDir
+    dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true, ignoreHome: true })).dataDir
   } catch {
     dataDir = runtimePaths(projectDir).dataDir
   }
@@ -233,7 +234,7 @@ export function readInstallManifest(projectDir = process.cwd()): InstallManifest
 }
 
 export function writeInstallManifest(projectDir: string, manifest: InstallManifest): string {
-  const dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true })).dataDir
+  const dataDir = runtimePaths(projectDir, projectEnv(projectDir, process.env, { preferProject: true, ignoreHome: true })).dataDir
   mkdirSync(dataDir, { recursive: true })
   const path = join(dataDir, MANIFEST)
   const temp = `${path}.${process.pid}.tmp`
@@ -257,7 +258,7 @@ function currentEntry(paths: RuntimePaths): { entry?: string; source: RuntimeSta
 }
 
 export function readRuntimeState(projectDir = process.cwd()): RuntimeState {
-  const env = projectEnv(projectDir, process.env, { preferProject: true })
+  const env = projectEnv(projectDir, process.env, { preferProject: true, ignoreHome: true })
   const paths = runtimePaths(projectDir, env)
   const lock = readLockIdentity(paths.lockPath)
   const fromPid = lock ? undefined : readPidIdentity(paths.pidPath, isBotCommand)

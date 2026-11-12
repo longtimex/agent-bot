@@ -92,6 +92,33 @@ test("install manifest is atomic and scoped to DATA_DIR from .env", () => {
   }
 })
 
+test("explicit project paths ignore a caller AGENT_BOT_HOME", () => {
+  const dir = tempProject()
+  const home = tempProject()
+  const previousHome = process.env.AGENT_BOT_HOME
+  try {
+    writeFileSync(join(dir, ".env"), "DATA_DIR=./custom-data\n")
+    process.env.AGENT_BOT_HOME = home
+
+    const path = writeInstallManifest(dir, {
+      version: 1,
+      projectDir: dir,
+      supervisor: "script",
+      installedAt: "2026-01-01T00:00:00.000Z",
+    })
+
+    assert.equal(path, join(dir, "custom-data", "install.json"))
+    assert.equal(readInstallManifest(dir)?.projectDir, dir)
+    assert.equal(readRuntimeState(dir).paths.dataDir, join(dir, "custom-data"))
+    assert.equal(existsSync(join(home, "data", "install.json")), false)
+  } finally {
+    if (previousHome === undefined) delete process.env.AGENT_BOT_HOME
+    else process.env.AGENT_BOT_HOME = previousHome
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test("supervisor detection distinguishes explicit, systemd and script modes", () => {
   assert.equal(detectSupervisor({ AGENT_BOT_SUPERVISOR: "docker" }), "docker")
   assert.equal(detectSupervisor({ INVOCATION_ID: "abc" }), "systemd")
