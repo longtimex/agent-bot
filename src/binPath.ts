@@ -108,3 +108,15 @@ export function childEnv(env: Record<string, string | undefined>): Record<string
 export function installerChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   return extendedEnv(scrubEnv(env, true))
 }
+
+/**
+ * Environment for release-gate commands. A supervisor may inject NODE_OPTIONS
+ * (browser preloads on hosted desktops, coverage hooks, etc.); those preloads
+ * are not part of the project and can break forked test runners or stale paths.
+ * Never let an ambient loader decide whether a release is safe to activate.
+ */
+export function releaseChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const out = installerChildEnv(env)
+  delete out.NODE_OPTIONS
+  return out
+}

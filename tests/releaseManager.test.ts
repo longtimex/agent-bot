@@ -10,6 +10,7 @@ interface Call {
   command: string
   args: string[]
   cwd: string
+  env: NodeJS.ProcessEnv
 }
 
 function tempDir(): string {
@@ -27,7 +28,7 @@ function service(
     dataDir: join(dir, "data"),
     which: (bin) => `/usr/bin/${bin}`,
     run: async (command, args, options) => {
-      calls.push({ command, args, cwd: options.cwd })
+      calls.push({ command, args, cwd: options.cwd, env: options.env })
       return responses(command, args, options.cwd) ?? { code: 0, stdout: "", stderr: "" }
     },
     ...overrides,
@@ -37,6 +38,8 @@ function service(
 
 test("release build runs in a staging clone and leaves the checkout untouched", async () => {
   const dir = tempDir()
+  const oldNodeOptions = process.env.NODE_OPTIONS
+  process.env.NODE_OPTIONS = "--require /tmp/hosted-browser-preload.cjs"
   try {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.3.0" }))
     const { release, calls } = service(dir, (command, args, cwd) => {
@@ -82,9 +85,14 @@ test("release build runs in a staging clone and leaves the checkout untouched", 
     assert.notEqual(clone.args[3], dir, "staging must come from origin, not the local checkout's stale refs")
     assert.ok(calls.some((call) => call.args[0] === "ci"))
     assert.ok(calls.some((call) => call.args[0] === "run" && call.args[1] === "check:release"))
+    const npmCalls = calls.filter((call) => call.command.endsWith("npm"))
+    assert.ok(npmCalls.length > 0)
+    assert.ok(npmCalls.every((call) => !("NODE_OPTIONS" in call.env)), "npm must not inherit the host's Node preload")
     assert.equal(release.readState().current, undefined, "building must not activate a release")
     assert.equal(release.readState().pending?.commit, "0123456789abcdef0123456789abcdef01234567")
   } finally {
+    if (oldNodeOptions === undefined) delete process.env.NODE_OPTIONS
+    else process.env.NODE_OPTIONS = oldNodeOptions
     rmSync(dir, { recursive: true, force: true })
   }
 })

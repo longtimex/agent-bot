@@ -11,7 +11,7 @@ import {
 } from "node:fs"
 import { join, resolve } from "node:path"
 import process from "node:process"
-import { installerChildEnv } from "./binPath.js"
+import { releaseChildEnv } from "./binPath.js"
 import { writePrivateAtomic } from "./jsonStore.js"
 import type { OpsCommandResult, OpsStep } from "./ops.js"
 
@@ -243,7 +243,7 @@ export class ReleaseManager {
         : ["install", "--no-audit", "--no-fund"]
       const install = await this.#run(npm, installArgs, {
         cwd: workDir,
-        env: installerChildEnv(env),
+        env: releaseChildEnv(env),
         timeoutMs: INSTALL_TIMEOUT_MS,
       })
       steps.push(outputStep(`npm ${installArgs[0]}`, install))
@@ -251,7 +251,7 @@ export class ReleaseManager {
 
       const gate = await this.#run(npm, ["run", "check:release"], {
         cwd: workDir,
-        env: installerChildEnv(env),
+        env: releaseChildEnv(env),
         timeoutMs: GATE_TIMEOUT_MS,
       })
       steps.push(outputStep("npm run check:release", gate))
@@ -259,7 +259,7 @@ export class ReleaseManager {
 
       const build = await this.#run(npm, ["run", "build"], {
         cwd: workDir,
-        env: installerChildEnv(env),
+        env: releaseChildEnv(env),
         timeoutMs: BUILD_TIMEOUT_MS,
       })
       steps.push(outputStep("npm run build", build))

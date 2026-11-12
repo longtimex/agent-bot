@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { childEnv, extendedEnv, extendedPath, installerChildEnv, scrubEnv } from "../src/binPath.js"
+import { childEnv, extendedEnv, extendedPath, installerChildEnv, releaseChildEnv, scrubEnv } from "../src/binPath.js"
 
 test("extendedPath appends existing per-user bin dirs and skips missing ones", () => {
   const home = mkdtempSync(join(tmpdir(), "bot-path-"))
@@ -118,4 +118,17 @@ test("an installer drops every credential-shaped variable", () => {
   }
   assert.equal(env.NPM_CONFIG_REGISTRY, "https://registry.example")
   assert.ok((env.PATH ?? "").startsWith("/usr/bin"), env.PATH)
+})
+
+test("a release gate does not inherit an ambient Node preload", () => {
+  // Instabox injects a headed-browser preload through NODE_OPTIONS. That module
+  // belongs to the desktop wrapper, not this repository, and made every forked
+  // test in the release gate fail before it could even import its test file.
+  const env = releaseChildEnv({
+    PATH: "/usr/bin",
+    NODE_OPTIONS: "--require /usr/local/lib/instabox/headed-browser.cjs",
+    KEEP: "yes",
+  })
+  assert.ok(!("NODE_OPTIONS" in env))
+  assert.equal(env.KEEP, "yes")
 })
