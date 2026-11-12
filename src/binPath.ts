@@ -120,6 +120,7 @@ export function installerChildEnv(env: Record<string, string | undefined>): Reco
  * choose its own ./data and the tests' default channel instead.
  * API_* and the bot's home/log pointers are the same kind of live wiring: a
  * copied .env would otherwise make the gate probe or bind the running API.
+ * PROJECT_DIR is likewise the live checkout selector.
  * Never let ambient runtime wiring decide whether a release is safe to activate.
  */
 export function releaseChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
@@ -129,7 +130,9 @@ export function releaseChildEnv(env: Record<string, string | undefined>): Record
   delete out.UPDATE_BRANCH
   delete out.UPDATE_CHANNEL
   for (const name of Object.keys(out)) {
-    if (name.startsWith("API_") || name === "BOT_LOG_FILE" || name === "AGENT_BOT_HOME") delete out[name]
+    if (name.startsWith("API_") || name === "BOT_LOG_FILE" || name === "AGENT_BOT_HOME" || name === "PROJECT_DIR") {
+      delete out[name]
+    }
   }
   return out
 }

@@ -136,6 +136,7 @@ test("a release gate does not inherit ambient Node or data routing", () => {
     API_TOKEN: "live-token",
     AGENT_BOT_HOME: "/data/workspace/live-instance",
     BOT_LOG_FILE: "/data/workspace/live-instance/data/bot.log",
+    PROJECT_DIR: "/data/workspace/live-instance",
     KEEP: "yes",
   })
   assert.ok(!("NODE_OPTIONS" in env))
@@ -148,5 +149,6 @@ test("a release gate does not inherit ambient Node or data routing", () => {
   assert.ok(!("API_TOKEN" in env), "gate tests must never receive the live API bearer")
   assert.ok(!("AGENT_BOT_HOME" in env), "gate tests must use the staging checkout")
   assert.ok(!("BOT_LOG_FILE" in env), "gate tests must not write the live log")
+  assert.ok(!("PROJECT_DIR" in env), "gate tests must not switch to the live checkout")
   assert.equal(env.KEEP, "yes")
 })
