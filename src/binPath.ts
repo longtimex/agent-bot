@@ -113,10 +113,14 @@ export function installerChildEnv(env: Record<string, string | undefined>): Reco
  * Environment for release-gate commands. A supervisor may inject NODE_OPTIONS
  * (browser preloads on hosted desktops, coverage hooks, etc.); those preloads
  * are not part of the project and can break forked test runners or stale paths.
- * Never let an ambient loader decide whether a release is safe to activate.
+ * DATA_DIR is also runtime routing, not project config: forwarding the running
+ * instance's absolute data directory makes gate tests read/write live state
+ * from a staged checkout. The staging cwd must choose its own ./data instead.
+ * Never let ambient runtime wiring decide whether a release is safe to activate.
  */
 export function releaseChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   const out = installerChildEnv(env)
   delete out.NODE_OPTIONS
+  delete out.DATA_DIR
   return out
 }

@@ -120,15 +120,17 @@ test("an installer drops every credential-shaped variable", () => {
   assert.ok((env.PATH ?? "").startsWith("/usr/bin"), env.PATH)
 })
 
-test("a release gate does not inherit an ambient Node preload", () => {
+test("a release gate does not inherit ambient Node or data routing", () => {
   // Instabox injects a headed-browser preload through NODE_OPTIONS. That module
   // belongs to the desktop wrapper, not this repository, and made every forked
   // test in the release gate fail before it could even import its test file.
   const env = releaseChildEnv({
     PATH: "/usr/bin",
     NODE_OPTIONS: "--require /usr/local/lib/instabox/headed-browser.cjs",
+    DATA_DIR: "/data/workspace/live-instance/data",
     KEEP: "yes",
   })
   assert.ok(!("NODE_OPTIONS" in env))
+  assert.ok(!("DATA_DIR" in env), "gate tests must use the staging checkout's own ./data")
   assert.equal(env.KEEP, "yes")
 })
