@@ -40,6 +40,7 @@ import type { UsageStore } from "./usage.js"
 import type { TaskHistoryStore } from "./history.js"
 import { BOT_COMMAND_ALIASES, BOT_MENU_COMMANDS, helpSections } from "./help.js"
 import type { AgentCliService } from "./agentCli.js"
+import { AgentModelCatalog } from "./agentModelCatalog.js"
 import type { BotConfig } from "./config.js"
 import type { ChannelIdResolver } from "./channelRegistry.js"
 import type { Opencode } from "./opencode.js"
@@ -185,6 +186,7 @@ export class ApiServer {
   #magpieActionRunning = false
   readonly #taskManager: ApiTaskManager
   readonly #agentActions: ApiAgentActions
+  readonly #agentModels: AgentModelCatalog
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
   readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
   readonly #resKeys = new WeakMap<ServerResponse, Buffer>()
@@ -211,6 +213,7 @@ export class ApiServer {
     this.#log = options.log
     this.#token = token
     this.#encKey = encKey
+    this.#agentModels = new AgentModelCatalog(options.agents.registry, { log: options.log })
     this.#taskManager = new ApiTaskManager({
       cfg: options.cfg,
       oc: options.oc,
@@ -223,6 +226,7 @@ export class ApiServer {
       ownerChatId: () => this.ownerChatId,
       fetchMedia: options.fetchMedia,
       appKey: options.appKey ?? "api:app",
+      agentModels: this.#agentModels,
     })
     this.#agentActions = new ApiAgentActions({
       agents: options.agents,
@@ -566,7 +570,14 @@ export class ApiServer {
     }
 
     if (resource === "models" && method === "GET") {
-      this.#json(ctx.res, 200, { models: modelsView(this.#personalDeps(), ctx.url.searchParams.get("engine") ?? undefined) })
+      const refresh = ctx.url.searchParams.get("refresh") === "1"
+      this.#json(ctx.res, 200, {
+        models: await modelsView(
+          this.#personalDeps(),
+          ctx.url.searchParams.get("engine") ?? undefined,
+          refresh,
+        ),
+      })
       return
     }
 
@@ -815,6 +826,7 @@ export class ApiServer {
       store: this.#opts.store,
       cfg: this.#opts.cfg,
       registry: this.#opts.agents.registry,
+      agentModels: this.#agentModels,
       reminders: this.#opts.reminders,
       schedules: this.#opts.schedules,
       usage: this.#opts.usage,
@@ -943,10 +955,17 @@ export class ApiServer {
     this.#requireIdle("切换模型")
     const engine = this.#opts.store.getEngine(this.appKey)
     const word = raw.trim().toLowerCase()
+    let catalog: Awaited<ReturnType<AgentModelCatalog["list"]>> | undefined
+    if (engine !== "opencode") catalog = await this.#agentModels.list(engine)
     // Non-strict CLI profiles take any string as a model id, so only a model the engine
-    // really declares may shadow the reset keyword
+    // really declares (live or explicitly configured) may shadow the reset keyword.
     const declared =
-      engine === "opencode" ? resolveModelKey(word) !== undefined : this.#opts.agents.registry.declaresModel(engine, word)
+      engine === "opencode"
+        ? resolveModelKey(word) !== undefined
+        : this.#agentModels.declares(engine, word) ||
+          Boolean(this.#opts.agents.registry.get(engine)?.models?.some((m) =>
+            [m.id, m.label, ...(m.aliases ?? [])].some((value) => value.toLowerCase() === word),
+          ))
     if (forceReset || (!declared && isModelResetWord(word))) {
       return engine === "opencode" ? this.#clearOpenCodeModel() : this.#clearCliModel(engine)
     }
@@ -965,19 +984,28 @@ export class ApiServer {
       await this.#resetSession()
       return `模型已切换为 ${info.label}（会话上下文已重置）`
     }
-    const resolved = this.#opts.agents.registry.resolveModel(engine, raw)
+    // The live catalog has already been fetched above, so a reset word check uses the
+    // same rows the Discord/App panel will show instead of a bundled legacy list.
+    const resolved =
+      this.#agentModels.resolve(engine, raw) ??
+      catalog?.models.find((model) =>
+        [model.id, model.label, ...(model.aliases ?? [])].some((value) => value.toLowerCase() === word),
+      )?.id
     if (!resolved) {
-      const profile = this.#opts.agents.registry.get(engine)
-      const options = (profile?.models ?? []).map((m) => m.id).join(", ")
-      throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
+      const detail = catalog?.hint ? `（${catalog.hint}）` : ""
+      throw new ApiError(400, `未知的模型：${raw}${detail}。可直接发送 /model <模型ID>。`)
     }
+    const label =
+      catalog?.models.find((model) => model.id === resolved)?.label ??
+      this.#opts.agents.registry.get(engine)?.models?.find((model) => model.id === resolved)?.label ??
+      this.#agentModels.label(engine, resolved)
     const current = this.#opts.store.getCliModel(this.appKey, engine)
     if (current === resolved) {
-      return `当前已经是 ${this.#opts.agents.registry.modelLabel(engine, resolved)}，无需切换，会话上下文保持不变`
+      return `当前已经是 ${label}，无需切换，会话上下文保持不变`
     }
     this.#opts.store.setCliModel(this.appKey, engine, resolved)
     this.#opts.store.clearCliSession(this.appKey, engine)
-    return `模型已切换为 ${this.#opts.agents.registry.modelLabel(engine, resolved)}（会话上下文已重置）`
+    return `模型已切换为 ${label}（会话上下文已重置）`
   }
 
   /** `/model <reset word>` on OpenCode: false when the session never picked one itself. */

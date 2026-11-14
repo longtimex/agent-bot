@@ -25,16 +25,16 @@ import { whichSync } from "./agentCli.js"
 import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import { rotateLogIfNeeded } from "./logger.js"
 import type { Logger } from "./logger.js"
-import { clip, clipTail } from "./messages.js"
+import { clipTail } from "./messages.js"
 import { ReleaseManager, type ReleaseState } from "./releaseManager.js"
 import { buildReleaseDiagnostics, resolveUpdateTarget, UpdateChecker, type ReleaseDiagnostics } from "./updateChecker.js"
 import { UpdateOrchestrator } from "./updateOrchestrator.js"
 import { readStartupSelfCheck, type StartupSelfCheck } from "./startupSelfCheck.js"
 import { buildReleaseOverview, type ReleaseOverview } from "./releaseStatus.js"
+import { summarizeStepOutput } from "./failureDigest.js"
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024
-const MAX_STEP_OUTPUT = 1500
 const LOG_TAIL_BYTES = 256 * 1024
 const OPENCODE_START_WAIT_MS = 8_000
 const VERSION_RE = /^(?:latest|v?\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.-]+)?)$/
@@ -1191,9 +1191,6 @@ export class OpsService {
 
   #output(result: OpsCommandResult): string {
     const text = stripAnsi(redactSecrets(`${result.stdout}\n${result.stderr}`)).trim()
-    if (!text) return ""
-    if (text.length <= MAX_STEP_OUTPUT) return text
-    // The halves go back to Telegram, which rejects a cut that splits a surrogate pair
-    return `${clip(text, MAX_STEP_OUTPUT / 2) ?? ""}\n…\n${clipTail(text, MAX_STEP_OUTPUT / 2)}`
+    return text ? summarizeStepOutput(text) : ""
   }
 }

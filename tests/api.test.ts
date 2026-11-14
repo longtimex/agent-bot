@@ -920,8 +920,16 @@ test("api switch engine, reset session and list models", async () => {
     assert.equal(h.store.getCliSession("api:app", "claude"), undefined)
 
     const models = await fetch(`${h.base}/api/v1/models`, { headers: authHeaders() })
-    const body = (await models.json()) as { models: { models: Array<{ id?: string; label: string }> } }
-    assert.ok(body.models.models.length > 0)
+    const body = (await models.json()) as {
+      models: { engine: string; models: Array<{ id?: string; label: string }>; modelHint?: string; source?: string }
+    }
+    // Claude has no list command, so discovery must say so rather than falling back to the
+    // old hand-maintained sonnet/opus/haiku list. The CLI's own hint has different spacing
+    // from the catalogue's message, so assert on the stable shared phrase.
+    assert.equal(body.models.engine, "claude")
+    assert.deepEqual(body.models.models, [])
+    assert.equal(body.models.source, "none")
+    assert.match(body.models.modelHint ?? "", /提供模型查询接口|未检测到 claude/)
 
     // `/agents` hands a client everything Telegram's `/engine <word>` matching uses:
     // aliases, the executable name, whether context carries over, and if models are switchable
@@ -953,7 +961,7 @@ test("api switch engine, reset session and list models", async () => {
     assert.equal(other.status, 200)
     const otherBody = (await other.json()) as { models: { engine: string; models: Array<{ id?: string }> } }
     assert.equal(otherBody.models.engine, "claude")
-    assert.ok(otherBody.models.models.some((model) => model.id === "sonnet"))
+    assert.deepEqual(otherBody.models.models, [])
     const stillOpencode = await fetch(`${h.base}/api/v1/session`, { headers: authHeaders() })
     assert.equal(((await stillOpencode.json()) as { engine: string }).engine, "opencode")
 

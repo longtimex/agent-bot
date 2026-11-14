@@ -369,7 +369,11 @@ private fun AppUpdateCard(vm: AppViewModel) {
             SecondaryButton(text = "检查更新", onClick = { vm.refreshAndroidRelease() })
             Spacer(modifier = Modifier.width(AppSpacing.sm))
             PrimaryButton(
-                text = vm.appUpdateStage ?: if (release?.updateAvailable == true) "下载并安装" else "已是最新",
+                text = vm.appUpdateStage ?: when {
+                    release?.updateAvailable == true -> "下载并安装"
+                    release?.configured != true -> "暂不可更新"
+                    else -> "已是最新"
+                },
                 modifier = Modifier.weight(1f),
                 enabled = vm.appUpdateStage == null && release?.updateAvailable == true,
                 onClick = { vm.downloadAndInstallAppUpdate() },

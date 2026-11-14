@@ -197,14 +197,6 @@ export function isModelResetWord(raw: string): boolean {
   return MODEL_DEFAULT_WORDS.has(raw.trim().toLowerCase())
 }
 
-export function resolveQoderModel(raw: string): string | undefined {
-  const norm = raw.trim().toLowerCase()
-  if (!norm) return undefined
-  if (norm.includes("deepseek") || norm === "ds") return "DeepSeek-Flash"
-  if (norm.includes("qwen")) return "Qwen3.8-Flash"
-  return undefined
-}
-
 const BUILTIN_MODEL_KEYS = new Set(Object.keys(AVAILABLE_MODELS))
 const BUILTIN_ALIASES: Record<string, string> = { ...MODEL_ALIASES }
 const CUSTOM_KEY_RE = /^[a-z0-9][a-z0-9._-]*$/

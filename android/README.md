@@ -27,8 +27,8 @@ Telegram 与飞书控制方式不受影响——App 通过 bot 进程内置的 H
 - **返回键**：先收起侧边抽屉；在其它页面按返回会回到聊天页，不会直接退出 App
 - **前台刷新**：从后台切回 App 时静默刷新当前页与会话信息——聊天以外的每个页面（队列、状态、历史、提醒、定时、会话、引擎/模型、代理、cc-switch、配置、运维、快捷指令、白名单、帮助）都会重新拉取，静默失败不弹错误；正在执行的长操作（cc-switch 切换、运维动作）不会被刷新打断。唯一例外是「Hermes 记忆」页：它是一份正在被编辑的长文本，回到前台只保留草稿，要更新请点页内「刷新」
 - **抽屉总从顶部打开**：左抽屉是一张导航图而不是可续读的文档。每次重新打开都会回到起始位置，不会因为你上次滑到中段而把上方入口藏起来；抽屉保持打开时，界面重组也不会突然把列表拽回顶部
-- **引擎与模型切换**：顶栏芯片点开即切 OpenCode / Claude Code / Codex / Gemini 等引擎与模型；模型列表与 Telegram 同源，模型没有中文说明时副行直接显示可输入的值（OpenCode 的 `provider/modelID`、CLI 的别名），引擎只给提示不给列表时（如 `deepseek / qwen`）面板直接写明「模型由 CLI 自身配置，可用提示：…」，`/model <词>` 也认这些别名与提示里的 ID；复位词整套通用（`default`/`reset`/`clear`/`auto`/`默认`/`恢复默认`），App 把词原样交给服务器按 Telegram 的规则判定——引擎真的声明了同名模型就切模型，否则清除本会话的模型选择，由引擎自身配置决定；换模型与清除选择都会丢弃上一个模型的会话上下文，重复选中当前模型则保持不动，「清除本会话模型选择」按钮则始终清除（`POST /model {model, reset:true}`）
-- **单条消息换引擎/模型**：输入框右侧的「本条指定引擎」（🎚）可把下一条消息临时交给别的已安装引擎，并可为该引擎再点选一个模型（留空＝不传模型，由该引擎自身配置决定，列表来自 `GET /models?engine=`；Claude/Qoder/Codex 等未列出模型时也按此规则执行）；发送后两项指定自动恢复，会话设置与 Telegram 端都不受影响，输入框上方显示「引擎 / 模型」并可一键取消；发送失败时指定会保留，重试仍发同一条请求
+- **引擎与模型切换**：顶栏芯片点开即切 OpenCode / Claude Code / Codex / Gemini 等引擎与模型；模型列表与 Telegram 同源，由服务器在打开面板或使用「刷新」时实时询问已安装的 CLI（`GET /models?engine=…&refresh=1`），不再使用任何内置静态清单。查询成功时列出当前账号真正可用的模型；CLI 未安装、当前账号没有模型或查询失败时，面板直接显示服务器返回的原因，并提示可发送 `/model <模型ID>` 直接指定。Claude/Qwen/Cursor 等没有非交互模型列表命令的 CLI 仍接受安全模型 ID 透传。`/model <词>` 也认实时列表里的 ID、显示名与自定义档案别名；复位词整套通用（`default`/`reset`/`clear`/`auto`/`默认`/`恢复默认`），App 把词原样交给服务器按 Telegram 的规则判定——引擎真的声明了同名模型就切模型，否则清除本会话的模型选择，由引擎自身配置决定；换模型与清除选择都会丢弃上一个模型的会话上下文，重复选中当前模型则保持不动，「清除本会话模型选择」按钮则始终清除（`POST /model {model, reset:true}`）
+- **单条消息换引擎/模型**：输入框右侧的「本条指定引擎」（🎚）可把下一条消息临时交给别的已安装引擎，并可为该引擎再点选一个模型（留空＝不传模型，由该引擎自身配置决定，列表来自 `GET /models?engine=`；CLI 未提供查询命令或当前账号查不到模型时，仍可直接输入安全模型 ID）；发送后两项指定自动恢复，会话设置与 Telegram 端都不受影响，输入框上方显示「引擎 / 模型」并可一键取消；发送失败时指定会保留，重试仍发同一条请求
 - **引擎管理**：与 Telegram 的 `/agents` 一致——查看安装状态、按内置 npm/pip 命令安装、更新或卸载 Bot 托管 CLI，破坏性操作会先展示完整命令并要求确认；页面顶部标出当前引擎，每个引擎卡片都有「使用此引擎」，一处即可完成 Telegram 里 `/agent <id>` 的切换（未安装的引擎标为 ⚠️，切过去后任务会失败，切换成功的轻提示直接复用服务器 `POST /agent` 的 `message`——`已切换至 X`／`当前已经是 X，无需切换`／`但未检测到命令 <bin>`，与 Telegram 按钮的回答一字不差），列表第一项始终是内置的 OpenCode，切到别的 CLI 后也能一键切回来；每张卡片还写明该引擎是否保留上下文（无状态引擎标「每次全新会话」）、模型能否由 Bot 切换，以及可输入别名（`/engine q`、`/engine claude-code` 与 Telegram 一样命中同一个引擎，别名与 `bin` 来自服务器 `GET /agents`）
 - **模型管理**：与 `/cc model` 一致——查看/添加/删除自定义 OpenCode 模型（`简称 provider/modelID [显示名]`，还能接 Telegram 的同一串参数 `--attachment`（含 `--vision`/`-a`）、`--context 200000`、`--output 64000`，写没写进 `opencode.json` 由服务器的回执说明），删除被引用模型时提示并可强制删除；Agent 绑定列表支持直接「设为模型」（同 `/cc model assign`，绑定 self 会切换当前会话）。格式错误时添加框保持打开、原输入不丢，并在框内直接说明原因；服务器拒绝添加、绑定或删除时，错误条留在模型页，不再写进只有聊天页可见的横幅。
 - **cc-switch 控制台**：与 Telegram 的 `/cc` 一致——查看安装状态/版本/当前 Provider，每个 Provider 可切换（需确认）、测速、📡 流检、🧾 拉取模型、📊 配额，列表头部「＋ 新建」按 `/cc provider add` 创建 Provider（模板与 API 格式取自服务器，密钥只上传、不回显；OpenCode 等非 Claude/Codex/Gemini 应用会自动改为只填 settings JSON），MCP 列表/同步/导入（粘贴 `mcpServers` JSON）、提示词查看/启用/停用/新建（名称 + 内容）、环境检查/工具、代理状态，「只读视图」卡片整表来自服务器 `GET /cc/views`（配置、配置路径、会话列表/详情/消息、当前 Provider、认证状态/账号列表、技能列表/详情/仓库可用/更新检查/已添加仓库、MCP 命令校验、故障转移状态/队列/可选项、提示词当前/生效/内容、守护进程与其日志、设置；需要参数的先弹输入框；`provider export` 不在表内，因为它会往工作目录写 settings 文件），会话关键词搜索与 `ccswitch://` Deep Link 导入（覆盖配置前先展示链接并二次确认），「全部命令」直接跳到帮助页的 cc-switch 指令段（与 Telegram 的「📋 全部命令」同一份文案）；「高级操作」列出服务器白名单下发的命令（删除 Provider/MCP/提示词/技能/会话、安装技能、MCP 启用/停用/设置生效应用、Provider 复制/设为默认/live 导入与移除、代理开关与监听地址/端口、配置校验、会话用量同步、技能同步与更新、故障转移入队/出队/上下移/开关与清空、ChatGPT 账号移除/登出/设为默认、提示词启用/停用/重命名、配置重置与备份、守护进程启停、cc-switch 语言切换、技能仓库添加、检查/执行 cc-switch 自更新），需要参数的先弹输入框——App 一次输入即够，`failover move p1 up`、`mcp set-apps fs open-code,codex`、`prompts rename review 新名称` 这类「ID + 第二个值」由服务器拆开并分别校验，标记 ⚠️ 的还要二次确认，等价于 Telegram 的确认按钮；未安装时可一键安装或升级二进制；白名单没覆盖到的写法（如 `/cc mcp enable fs --apps opencode`）照原样发给 cc-switch，输出进「最近结果」卡片，交互式/常驻命令由服务器与 Telegram 共用的同一套判定挡下并给出可改用的写法，`-a/--app` 的任何形式都被拒绝
@@ -121,11 +121,11 @@ keyPassword=...
 推送匹配 `android-v*` 的标签即触发 `.github/workflows/android-release.yml`：
 
 ```bash
-git tag -a android-v1.2.0 -m "Android v1.2.0"
-git push origin android-v1.2.0
+git tag -a android-v1.2.1 -m "Android v1.2.1"
+git push origin android-v1.2.1
 ```
 
-发布前先把 `android/app/build.gradle.kts` 的 `versionName` / `versionCode` 改成同一个版本；工作流会先跑完整项目检查，再按标签把 `versionName` 写成标签版本（如 `1.2.0`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，最后执行 `gradle assembleRelease`。标签与仓库内版本不一致会直接失败，不会签出一个版本错乱的包。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
+发布前先把 `android/app/build.gradle.kts` 的 `versionName` / `versionCode` 改成同一个版本；工作流会先跑完整项目检查，再按标签把 `versionName` 写成标签版本（如 `1.2.1`），并按 `major*1000000+minor*1000+patch` 计算 `versionCode`，最后执行 `gradle assembleRelease`。标签与仓库内版本不一致会直接失败，不会签出一个版本错乱的包。它要求仓库配置以下 Secrets，缺任一项都会直接失败，绝不回退到 debug 或未签名 APK：
 
 - `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -139,12 +139,12 @@ git push origin android-v1.2.0
 不想搭构建环境就从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 选择最新的 `android-v*` 版本，下载 `agent-bot-vX.Y.Z.apk` 与同名 `.sha256`：
 
 ```bash
-# 把 <tag> 换成实际版本，例如 android-v1.2.0
-tag=android-v1.2.0
+# 把 <tag> 换成实际版本，例如 android-v1.2.1
+tag=android-v1.2.1
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -o agent-bot-v1.2.0.apk "$base/agent-bot-v1.2.0.apk"
-curl -L -o agent-bot-v1.2.0.apk.sha256 "$base/agent-bot-v1.2.0.apk.sha256"
-sha256sum -c agent-bot-v1.2.0.apk.sha256
+curl -L -o agent-bot-v1.2.1.apk "$base/agent-bot-v1.2.1.apk"
+curl -L -o agent-bot-v1.2.1.apk.sha256 "$base/agent-bot-v1.2.1.apk.sha256"
+sha256sum -c agent-bot-v1.2.1.apk.sha256
 ```
 
 当前 Release 由 CI 正式签名，因此需要在手机上允许「安装未知来源应用」。同一 release keystore

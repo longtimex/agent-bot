@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder"
 import { childEnv, extendedPath } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { EXIT_DRAIN_MS, terminateProcess, terminateProcesses } from "./childKill.js"
+import { sanitizeModelProbe, type AgentCliModelProbe } from "./agentModelProbe.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
 import type { SessionStore } from "./store.js"
@@ -87,6 +88,8 @@ export interface AgentCliProfile {
   strictModels?: boolean
   modelHint?: string
   models?: AgentCliModel[]
+  /** Replaces a hard-coded model list with a live query against the installed CLI. */
+  modelProbe?: AgentCliModelProbe
   args: AgentCliArgs
   resumeErrorPattern?: string
   env?: Record<string, string>
@@ -254,8 +257,11 @@ function mergeProfile(id: string, raw: Record<string, unknown>, base?: AgentCliP
     : (base?.parse ?? "text")
 
   const models = "models" in raw ? sanitizeModels(raw.models) : base?.models
+  const modelProbe = "modelProbe" in raw ? sanitizeModelProbe(raw.modelProbe, label) : base?.modelProbe
   const supportsModel =
-    typeof raw.supportsModel === "boolean" ? raw.supportsModel : (base?.supportsModel ?? (models?.length ?? 0) > 0)
+    typeof raw.supportsModel === "boolean"
+      ? raw.supportsModel
+      : (base?.supportsModel ?? (Boolean(modelProbe) || (models?.length ?? 0) > 0))
   const strictModels = typeof raw.strictModels === "boolean" ? raw.strictModels : (base?.strictModels ?? false)
 
   const args = parseArgs(raw.args, label) ?? {}
@@ -285,6 +291,7 @@ function mergeProfile(id: string, raw: Record<string, unknown>, base?: AgentCliP
     strictModels,
     modelHint: typeof raw.modelHint === "string" ? raw.modelHint : base?.modelHint,
     models,
+    modelProbe,
     args: mergedArgs,
     resumeErrorPattern,
     env: "env" in raw ? sanitizeEnv(raw.env) : base?.env,
@@ -411,6 +418,8 @@ export class AgentCliRegistry {
     const value = raw.trim()
     if (!value) return undefined
     const lower = value.toLowerCase()
+    // Built-in profiles no longer carry a hard-coded list. Their model ids come from the
+    // live catalog (AgentModelCatalog), not from this compatibility path for custom files.
     const normalized = norm(value)
     for (const model of profile.models ?? []) {
       if (model.id.toLowerCase() === lower || model.label.toLowerCase() === lower) return model.id

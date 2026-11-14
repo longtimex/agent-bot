@@ -68,21 +68,23 @@ test("registry ships the mainstream Linux agent CLIs and resolves aliases", () =
   assert.equal(profileById(registry, "qoder").installSpec, undefined)
 })
 
-test("registry resolves strict and open models per profile", () => {
+test("built-in profiles carry no hard-coded model catalogue", () => {
   const registry = new AgentCliRegistry({ log })
-  assert.equal(registry.resolveModel("qoder", "deepseek"), "DeepSeek-Flash")
-  assert.equal(registry.resolveModel("qoder", "Qwen3.8-Flash"), "Qwen3.8-Flash")
-  assert.equal(registry.resolveModel("qoder", "llama"), undefined)
-  assert.equal(registry.resolveModel("claude", "sonnet"), "sonnet")
-  assert.equal(registry.resolveModel("claude", "claude-opus"), "opus")
+  // Models are discovered from the installed CLI and the signed-in account. Keeping a
+  // second list here would make Qoder/Claude panels show models the account cannot run.
+  for (const id of ["qoder", "claude", "codex", "gemini", "qwen", "cursor", "copilot"]) {
+    assert.equal(profileById(registry, id).models, undefined, `${id} still has a static model list`)
+    assert.equal("defaultModel" in profileById(registry, id), false, `${id} still has a default model`)
+  }
+  assert.deepEqual(profileById(registry, "qoder").modelProbe, { args: ["--list-models"], format: "auto" })
+  assert.deepEqual(profileById(registry, "codex").modelProbe, { args: ["debug", "models"], format: "json" })
+  assert.deepEqual(profileById(registry, "gemini").modelProbe, {
+    args: ["--list-models", "--output-format", "json"],
+    format: "json",
+  })
+  // Claude has no non-interactive list command, so it must accept a model id the user knows.
   assert.equal(registry.resolveModel("claude", "some-other-model"), "some-other-model")
   assert.equal(registry.resolveModel("goose", "anything"), undefined)
-
-  assert.equal(registry.modelLabel("claude", "sonnet"), "Claude Sonnet")
-  assert.equal(registry.modelLabel("claude", "custom"), "custom")
-  assert.equal(profileById(registry, "qoder").models?.some((model) => model.id === "Qwen3.8-Flash"), true)
-  assert.equal("defaultModel" in profileById(registry, "qoder"), false)
-  assert.equal("defaultModel" in profileById(registry, "claude"), false)
 })
 
 test("model ids cannot smuggle extra CLI flags into argv", () => {
@@ -137,7 +139,6 @@ test("registry loads custom profiles, overrides builtins and ignores invalid ent
     assert.equal(registry.resolveModel("mycli", "anything-else"), "anything-else")
 
     assert.equal("defaultModel" in profileById(registry, "qoder"), false)
-    assert.equal(registry.resolveModel("qoder", "qwen"), "Qwen3.8-Flash")
 
     assert.equal(registry.get("bad id"), undefined)
     assert.equal(registry.get("badplaceholder"), undefined)

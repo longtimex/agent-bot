@@ -1574,7 +1574,7 @@ private fun ChatInputBar(
     LaunchedEffect(enginePicker) {
         if (enginePicker) {
             vm.refreshAgentsQuietly()
-            if (vm.oneOffEngine == null) vm.refreshModels()
+            if (vm.oneOffEngine == null) vm.refreshModels(force = true)
         }
     }
     // A bare `/engine` or `/model!` typed into the box asks for this picker
@@ -1961,20 +1961,19 @@ private fun ChatInputBar(
                                 QuietButton(
                                     text = "重试加载模型",
                                     onClick = {
-                                        if (vm.oneOffEngine == null) vm.refreshModels()
+                                        if (vm.oneOffEngine == null) vm.refreshModels(force = true)
                                         else vm.reloadOneOffModels()
                                     },
                                 )
                             } else if (vm.pinPickerModels.isEmpty()) {
                                 Text(
-                                    if (vm.pinPickerModelsLoading) {
-                                        "正在读取模型…"
-                                    } else vm.pinPickerModelHint?.let {
-                                        "该引擎不列出可选模型，可在聊天里发送 /model! <模型ID>（提示：$it）"
-                                    } ?: if (modelEngine == null) {
-                                        "尚无可用的会话引擎；请先连接并在「会话设置」中选择引擎。"
-                                    } else {
-                                        "该引擎不列出可选模型，留空即由该引擎自身配置决定。"
+                                    when {
+                                        vm.pinPickerModelsLoading -> "正在从 Agent 读取可用模型…"
+                                        modelEngine == null ->
+                                            "尚无可用的会话引擎；请先连接并在「会话设置」中选择引擎。"
+                                        vm.pinPickerModelHint != null ->
+                                            "${vm.pinPickerModelHint}（也可在聊天里发送 /model! <模型ID>）"
+                                        else -> "暂未发现可用模型；留空即由该引擎自身配置决定，或发送 /model! <模型ID>。"
                                     },
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.bodyMedium,

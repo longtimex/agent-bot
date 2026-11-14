@@ -1,6 +1,7 @@
 import type { ModelRef } from "./config.js"
 import { clip } from "./messages.js"
 import { pathToFileURL } from "node:url"
+import { Agent, fetch, type Dispatcher } from "undici"
 
 export class OpencodeError extends Error {
   /** HTTP status when the failure came from a responded request, otherwise undefined. */
@@ -113,6 +114,15 @@ const CONTROL_TIMEOUT_MS = 15_000
 const STATUS_PROBE_TIMEOUT_MS = 5_000
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
+/**
+ * OpenCode holds the `/message` response until the whole turn finishes. undici's
+ * default five-minute headers timeout therefore kills a healthy long task before
+ * the bot's own idle/wall-clock watchdogs can decide. Those watchdogs are the
+ * product-level timeout; the HTTP layer only needs to bound ordinary control
+ * requests (which still pass AbortSignal.timeout explicitly).
+ */
+export const OPENCODE_HTTP_TIMEOUT_MS = 0
+
 const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g
 
 /**
@@ -157,21 +167,48 @@ export function describeFetchError(err: unknown): string | undefined {
 export class Opencode {
   readonly #baseUrl: string
   readonly #authorization?: string
+  readonly #dispatcher: Dispatcher
+  readonly #ownsDispatcher: boolean
+  readonly #fetch: typeof fetch
   #capabilities = new Map<string, ModelInputs>()
   #capabilitiesAt = 0
 
-  constructor(baseUrl: string, username: string, password: string | undefined) {
+  constructor(
+    baseUrl: string,
+    username: string,
+    password: string | undefined,
+    options: {
+      dispatcher?: Dispatcher
+      headersTimeoutMs?: number
+      bodyTimeoutMs?: number
+      fetch?: typeof fetch
+    } = {},
+  ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "")
     this.#authorization = password
       ? `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
       : undefined
+    this.#ownsDispatcher = options.dispatcher === undefined
+    this.#fetch = options.fetch ?? fetch
+    this.#dispatcher =
+      options.dispatcher ??
+      new Agent({
+        headersTimeout: options.headersTimeoutMs ?? OPENCODE_HTTP_TIMEOUT_MS,
+        bodyTimeout: options.bodyTimeoutMs ?? OPENCODE_HTTP_TIMEOUT_MS,
+      })
+  }
+
+  /** Release keep-alive sockets; the process normally lives as long as the bot. */
+  async close(): Promise<void> {
+    if (this.#ownsDispatcher) await this.#dispatcher.close().catch(() => {})
   }
 
   async health(): Promise<boolean> {
     try {
-      const res = await fetch(`${this.#baseUrl}/global/health`, {
+      const res = await this.#fetch(`${this.#baseUrl}/global/health`, {
         headers: this.#headers(),
         signal: AbortSignal.timeout(5_000),
+        dispatcher: this.#dispatcher,
       })
       if (!res.ok) {
         // An unread body holds the pooled connection open
@@ -297,9 +334,10 @@ export class Opencode {
       let failures = 0
       while (!feed.closed) {
         try {
-          const res = await fetch(`${this.#baseUrl}/event`, {
+          const res = await this.#fetch(`${this.#baseUrl}/event`, {
             headers: this.#headers(),
             signal: controller.signal,
+            dispatcher: this.#dispatcher,
           })
           if (!res.ok || !res.body) {
             // A rejected stream answers with a body (401 on a wrong password); leaving it
@@ -575,11 +613,12 @@ export class Opencode {
   ): Promise<T> {
     let res: Response
     try {
-      res = await fetch(`${this.#baseUrl}${path}`, {
+      res = await this.#fetch(`${this.#baseUrl}${path}`, {
         method,
         headers: this.#headers(),
         body: body === undefined ? undefined : JSON.stringify(body),
         signal,
+        dispatcher: this.#dispatcher,
       })
     } catch (err) {
       throw this.#fetchError(method, path, err)

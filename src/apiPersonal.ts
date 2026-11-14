@@ -4,6 +4,7 @@ import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import type { AgentCliProfile, AgentCliRegistry } from "./agentCli.js"
 import { normalizeWorkDirInput } from "./agentCli.js"
+import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
@@ -35,6 +36,7 @@ export interface PersonalRouteDeps {
   store: SessionStore
   cfg: BotConfig
   registry: AgentCliRegistry
+  agentModels: AgentModelCatalog
   reminders: ReminderService
   schedules: ScheduleService
   usage: UsageStore
@@ -709,7 +711,9 @@ export function agentView(deps: PersonalRouteDeps, profile: AgentCliProfile): Re
     install: profile.install,
     sessionMode: profile.sessionMode,
     supportsModel: Boolean(profile.supportsModel),
-    models: profile.models,
+    // Models are discovered per account at request time; a client asks /models?engine=…
+    // instead of receiving a stale, hand-maintained list with every engine.
+    models: undefined,
     experimental: profile.experimental,
     managed: installer?.isManaged(profile.id) ?? false,
     installable: Boolean(!installed && installer?.installCommand(profile)),
@@ -730,7 +734,11 @@ export function agentsView(deps: PersonalRouteDeps): Array<Record<string, unknow
   return entries.sort((a, b) => Number(b.installed) - Number(a.installed))
 }
 
-export function modelsView(deps: PersonalRouteDeps, requestedEngine?: string): Record<string, unknown> {
+export async function modelsView(
+  deps: PersonalRouteDeps,
+  requestedEngine?: string,
+  refresh = false,
+): Promise<Record<string, unknown>> {
   // A one-off pin can target another engine than the session, so callers may ask
   // explicitly instead of only getting the current engine's list.
   const engine = requestedEngine?.trim() || deps.store.getEngine(deps.appKey)
@@ -744,9 +752,21 @@ export function modelsView(deps: PersonalRouteDeps, requestedEngine?: string): R
     return { engine, models: [...customEntries, ...builtin] }
   }
   const profile = deps.registry.get(engine)
+  if (!profile) throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
+  if (!profile.supportsModel) {
+    return {
+      engine,
+      models: [],
+      modelHint: `${profile.label} 不支持通过 Bot 切换模型，请在 CLI 配置中设置。`,
+      source: "none",
+    }
+  }
+  const discovered = await deps.agentModels.list(engine, refresh)
   return {
     engine,
-    models: profile?.supportsModel ? (profile.models ?? []) : [],
-    modelHint: profile?.modelHint,
+    models: discovered.models,
+    modelHint: discovered.hint,
+    source: discovered.source,
+    checkedAt: discovered.checkedAt,
   }
 }

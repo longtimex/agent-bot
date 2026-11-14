@@ -6,20 +6,29 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { AddressInfo } from "node:net"
 import test, { mock } from "node:test"
-import { describeFetchError, oneLine, Opencode, OpencodeError } from "../src/opencode.js"
+import {
+  describeFetchError,
+  oneLine,
+  Opencode,
+  OpencodeError,
+  OPENCODE_HTTP_TIMEOUT_MS,
+} from "../src/opencode.js"
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function withServer(
   handler: Parameters<typeof createServer>[1],
   run: (oc: Opencode) => Promise<void>,
+  options: ConstructorParameters<typeof Opencode>[3] = {},
 ): Promise<void> {
   const server: Server = createServer(handler)
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const { port } = server.address() as AddressInfo
+  const oc = new Opencode(`http://127.0.0.1:${port}`, "user", "pass", options)
   try {
-    await run(new Opencode(`http://127.0.0.1:${port}`, "user", "pass"))
+    await run(oc)
   } finally {
+    await oc.close()
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
@@ -139,6 +148,41 @@ test("prompt tolerates an empty 200 response", async () => {
         "",
       )
     },
+  )
+})
+
+test("the OpenCode client leaves long-turn HTTP timeouts to the task watchdog", async () => {
+  assert.equal(OPENCODE_HTTP_TIMEOUT_MS, 0)
+
+  const delayedHandler: Parameters<typeof createServer>[1] = (_req, res) => {
+    // OpenCode only sends headers once the entire turn has finished. Waiting past
+    // undici's short test timeout models a minute-long tool call without the wait.
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ parts: [{ type: "text", text: "finished" }] }))
+    }, 1_200)
+  }
+
+  await withServer(
+    delayedHandler,
+    async (oc) => {
+      await assert.rejects(
+        oc.prompt("ses_test", "slow", { idleTimeoutMs: 5_000, maxTimeoutMs: 10_000 }),
+        (err: unknown) => err instanceof OpencodeError && /UND_ERR_HEADERS_TIMEOUT/.test(err.message),
+      )
+    },
+    { headersTimeoutMs: 500, bodyTimeoutMs: 0 },
+  )
+
+  await withServer(
+    delayedHandler,
+    async (oc) => {
+      assert.equal(
+        await oc.prompt("ses_test", "slow", { idleTimeoutMs: 5_000, maxTimeoutMs: 10_000 }),
+        "finished",
+      )
+    },
+    { headersTimeoutMs: 0, bodyTimeoutMs: 0 },
   )
 })
 
@@ -515,12 +559,11 @@ test("subscribeSession reconnects instead of buffering a stream that never frame
 })
 
 test("subscribeSession backs off when a 200 stream closes without sending bytes", async () => {
-  const originalFetch = globalThis.fetch
   let calls = 0
   let stop: (() => void) | undefined
 
   mock.timers.enable({ apis: ["setTimeout"] })
-  globalThis.fetch = (async () => {
+  const stubFetch = (async () => {
     calls += 1
     // A peer that answers 200 and immediately ends the event stream
     return new Response(
@@ -539,7 +582,9 @@ test("subscribeSession backs off when a 200 stream closes without sending bytes"
   }
 
   try {
-    const oc = new Opencode("http://127.0.0.1:9", "user", "pass")
+    const oc = new Opencode("http://127.0.0.1:9", "user", "pass", { fetch: stubFetch })
+    // Make sure a regressed client cannot reach the test peer on port 9
+    assert.notEqual(stubFetch, fetch)
     stop = oc.subscribeSession("ses_test", () => {})
 
     await flush()
@@ -557,7 +602,6 @@ test("subscribeSession backs off when a 200 stream closes without sending bytes"
     assert.equal(calls, 3, "subscription must still retry after the longer wait")
   } finally {
     stop?.()
-    globalThis.fetch = originalFetch
     mock.timers.reset()
   }
 })

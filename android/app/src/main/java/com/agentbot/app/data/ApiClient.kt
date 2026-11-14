@@ -585,9 +585,20 @@ class ApiClient {
         return json.decodeFromJsonElement(EngineSwitch.serializer(), res)
     }
 
-    /** Switchable models for an engine; defaults to the session engine like `/model`. */
-    suspend fun models(connection: Connection, engine: String? = null): ModelChoices {
-        val query = engine?.takeIf { it.isNotBlank() }?.let { "/models?engine=" + Uri.encode(it) } ?: "/models"
+    /**
+     * Switchable models for an engine; defaults to the session engine like `/model`.
+     * The server discovers them from the installed CLI, so [refresh] bypasses its cache.
+     */
+    suspend fun models(
+        connection: Connection,
+        engine: String? = null,
+        refresh: Boolean = false,
+    ): ModelChoices {
+        val params = buildList {
+            engine?.takeIf { it.isNotBlank() }?.let { add("engine=" + Uri.encode(it)) }
+            if (refresh) add("refresh=1")
+        }
+        val query = if (params.isEmpty()) "/models" else "/models?" + params.joinToString("&")
         // The server nests the list under { models: { engine, models: [...], modelHint } }
         val view = getBody(connection, query)["models"]?.jsonObject ?: return ModelChoices()
         return json.decodeFromJsonElement(ModelChoices.serializer(), view)

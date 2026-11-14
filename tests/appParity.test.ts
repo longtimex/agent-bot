@@ -459,6 +459,28 @@ test("clearing history reports how many records the server actually deleted", ()
   assert.match(view, /没有可清空的历史/, "an empty clear must not claim a deletion")
 })
 
+test("share sheets never offer Agent Bot as their own destination", () => {
+  const helper = readFileSync(`${UI_DIR}/../data/ShareIntents.kt`, "utf8")
+  assert.match(helper, /Intent\.EXTRA_EXCLUDE_COMPONENTS/, "the chooser must exclude the App's own SEND filter")
+  assert.match(helper, /context\.packageName/, "the excluded component must come from this installation")
+  assert.match(helper, /queryIntentActivities\(send/, "only a matching self activity belongs in the exclusion list")
+  assert.match(
+    helper,
+    /Intent\.createChooser\(send, title\)\.apply\s*\{\s*if \(own\.isNotEmpty\(\)\) putExtra\(Intent\.EXTRA_EXCLUDE_COMPONENTS/,
+    "the resolver only reads EXTRA_EXCLUDE_COMPONENTS from the outer chooser intent",
+  )
+
+  const history = readFileSync(`${UI_DIR}/ListScreens.kt`, "utf8")
+  const viewModel = readFileSync(VIEWMODEL_SOURCE, "utf8")
+  assert.match(history, /ShareIntents\.chooser\(context, send, "分享任务历史"\)/)
+  assert.match(viewModel, /ShareIntents\.chooser\(appContext, send, "分享每日报告"\)/)
+  assert.match(viewModel, /ShareIntents\.chooser\(appContext, share, "数据备份"\)/)
+  assert.match(viewModel, /ShareIntents\.chooser\(appContext, share, media\.name\)/)
+  for (const [name, source] of [["history", history], ["the ViewModel", viewModel]] as const) {
+    assert.doesNotMatch(source, /Intent\.createChooser\(/, `${name} must use the shared self-excluding chooser`)
+  }
+})
+
 test("deleting a reminder or schedule asks before discarding the user's setup", () => {
   const source = readFileSync(`${UI_DIR}/ListScreens.kt`, "utf8")
   for (const [screen, title, call] of [
@@ -797,6 +819,20 @@ test("an APK update resumes after the install-permission page", () => {
   assert.ok(
     viewModel.includes("授权并返回后会自动继续安装"),
     "the permission prompt has to say installation resumes automatically",
+  )
+})
+
+test("an unconfigured update feed does not claim the installed App is current", () => {
+  const settings = readFileSync(SETTINGS_SOURCE, "utf8")
+  const button = /PrimaryButton\(\s*text = vm\.appUpdateStage[\s\S]*?onClick = \{ vm\.downloadAndInstallAppUpdate\(\) \}/.exec(settings)?.[0]
+  assert.ok(button, "the Settings update action must stay one PrimaryButton block")
+  assert.ok(
+    /release\?\.configured != true -> "暂不可更新"/.test(button),
+    "a missing server manifest is not the same as running the newest release",
+  )
+  assert.ok(
+    button.includes("enabled = vm.appUpdateStage == null && release?.updateAvailable == true"),
+    "the install action must only be enabled for an advertised newer release",
   )
 })
 

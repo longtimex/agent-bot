@@ -2,6 +2,7 @@ import { statSync } from "node:fs"
 import { homedir } from "node:os"
 import { InlineKeyboard } from "grammy"
 import { normalizeWorkDirInput, type AgentCliService } from "./agentCli.js"
+import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { resolveOpencodeModel } from "./engineCall.js"
 import type { Logger } from "./logger.js"
 import { escapeMarkdown, type Panel } from "./messages.js"
@@ -19,7 +20,8 @@ export interface ModelCommandDeps {
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
   sendPanel: (chatId: number, panel: Panel) => Promise<void>
   dirPanel: (key: string) => Panel
-  modelPanel: (key: string) => Panel
+  modelPanel: (key: string, refresh?: boolean) => Promise<Panel>
+  agentModels: AgentModelCatalog
 }
 
 export class TelegramModelCommands {
@@ -98,7 +100,7 @@ export class TelegramModelCommands {
 
     if (engine !== "opencode") {
       if (!arg) {
-        await this.#deps.sendPanel(job.chatId, this.#deps.modelPanel(job.key))
+        await this.#deps.sendPanel(job.chatId, await this.#deps.modelPanel(job.key))
         return
       }
 
@@ -113,10 +115,15 @@ export class TelegramModelCommands {
       }
 
       const word = arg.trim().toLowerCase()
-      // Only a model the profile actually declares may shadow the reset keyword: engines
-      // without `strictModels` pass any string through
-      const declared = this.#deps.agents.registry.declaresModel(engine, arg)
-      const selectedModel = this.#deps.agents.registry.resolveModel(engine, arg)
+      const catalog = await this.#deps.agentModels.list(engine)
+      // Only a model the engine actually declares (live, or an explicit custom list) may
+      // shadow the reset keyword; otherwise a non-strict profile passes the id through.
+      const declared =
+        this.#deps.agentModels.declares(engine, arg) ||
+        Boolean(profile.models?.some((model) =>
+          [model.id, model.label, ...(model.aliases ?? [])].some((value) => value.toLowerCase() === word),
+        ))
+      const selectedModel = this.#deps.agentModels.resolve(engine, arg)
       if (!declared && MODEL_DEFAULT_WORDS.has(word)) {
         if (!this.clearCliModelSelection(job.key, engine)) {
           await this.#deps.sendText(
@@ -133,7 +140,7 @@ export class TelegramModelCommands {
       }
 
       if (!selectedModel) {
-        const hint = profile.models?.map((model) => `\`${model.id}\``).join("、") ?? profile.modelHint
+        const hint = profile.modelHint
         await this.#deps.sendText(
           job.chatId,
           `❌ 未识别的模型：\`${escapeMarkdown(arg)}\`${hint ? `\n\n可用：${hint}` : ""}`,
@@ -145,7 +152,7 @@ export class TelegramModelCommands {
       if (current === selectedModel) {
         await this.#deps.sendText(
           job.chatId,
-          `✅ 当前已经是 *${escapeMarkdown(this.#deps.agents.registry.modelLabel(engine, selectedModel))}*，无需切换，会话上下文保持不变。`,
+          `✅ 当前已经是 *${escapeMarkdown(this.#agentModelLabel(engine, selectedModel, catalog.models))}*，无需切换，会话上下文保持不变。`,
         )
         return
       }
@@ -153,14 +160,14 @@ export class TelegramModelCommands {
       this.applyCliModel(job.key, engine, selectedModel)
       await this.#deps.sendText(
         job.chatId,
-        `✅ *${escapeMarkdown(profile.label)} 模型已切换为：${escapeMarkdown(this.#deps.agents.registry.modelLabel(engine, selectedModel))}* (已开启新会话上下文)`,
+        `✅ *${escapeMarkdown(profile.label)} 模型已切换为：${escapeMarkdown(this.#agentModelLabel(engine, selectedModel, catalog.models))}* (已开启新会话上下文)`,
       )
       return
     }
 
     // Handle OpenCode models
     if (!arg) {
-      await this.#deps.sendPanel(job.chatId, this.#deps.modelPanel(job.key))
+      await this.#deps.sendPanel(job.chatId, await this.#deps.modelPanel(job.key))
       return
     }
 
@@ -256,8 +263,16 @@ export class TelegramModelCommands {
     return true
   }
 
+  #agentModelLabel(
+    engine: string,
+    model: string,
+    models: Array<{ id: string; label: string }>,
+  ): string {
+    return models.find((entry) => entry.id === model)?.label ?? this.#deps.agentModels.label(engine, model)
+  }
+
   cliModelLabel(engine: string, model: string | undefined): string {
-    if (model) return this.#deps.agents.registry.modelLabel(engine, model)
+    if (model) return this.#deps.agentModels.label(engine, model)
     const profile = this.#deps.agents.registry.get(engine)
     if (!profile) return "由 CLI 决定"
     return profile.supportsModel ? "由 CLI 决定" : "CLI 固定"

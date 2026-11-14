@@ -151,7 +151,7 @@ fun HistoryScreen(vm: AppViewModel) {
                         putExtra(android.content.Intent.EXTRA_TEXT, text)
                     }
                     context.startActivity(
-                        android.content.Intent.createChooser(send, "分享任务历史"),
+                        com.agentbot.app.data.ShareIntents.chooser(context, send, "分享任务历史"),
                     )
                 }
                 .onFailure { vm.connectionError = "导出失败：${it.message}" }

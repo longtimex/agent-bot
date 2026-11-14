@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import type { Logger } from "./logger.js"
 import { writePrivateAtomic } from "./jsonStore.js"
 import { clip } from "./messages.js"
-import { AVAILABLE_MODELS, resolveModelKey, resolveQoderModel } from "./models.js"
+import { AVAILABLE_MODELS, resolveModelKey } from "./models.js"
 import {
   DEFAULT_TIMEZONE,
   nextReminderDue,
@@ -143,11 +143,9 @@ export function parseScheduleAdd(
     } else {
       const resolved = resolver
         ? resolver.resolveModel(engine, flags.model)
-        : engine === "qoder"
-          ? resolveQoderModel(flags.model)
-          : flags.model.trim()
+        : flags.model.trim()
       if (!resolved) {
-        throw new Error(engine === "qoder" ? "Qoder 仅支持 deepseek 或 qwen 模型。" : `未识别的模型：${flags.model}。`)
+        throw new Error(`未识别的模型：${flags.model}。`)
       }
       cliModel = resolved
     }

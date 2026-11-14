@@ -54,7 +54,7 @@ import com.agentbot.app.ui.theme.TextTertiary
 fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
     LaunchedEffect(Unit) {
         vm.refreshAgents()
-        vm.refreshModels()
+        vm.refreshModels(force = true)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -101,10 +101,9 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                 }
                 if (vm.models.isEmpty()) {
                     item {
-                        // Telegram says so in words instead of showing an empty panel
+                        // The server's live probe names missing CLI, account, or failure cause.
                         Text(
-                            vm.modelHint?.let { "该引擎的模型由 CLI 自身配置，可用提示：$it" }
-                                ?: "该引擎不支持通过 Bot 切换模型，请在 CLI 配置中设置。",
+                            vm.modelEmptyText,
                             color = TextTertiary,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(vertical = 8.dp),

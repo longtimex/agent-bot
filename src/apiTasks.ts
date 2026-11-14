@@ -3,6 +3,7 @@ import type { IncomingMessage } from "node:http"
 import type { ApiRequestContext } from "./apiCore.js"
 import { ApiError } from "./apiCore.js"
 import type { AgentCliService } from "./agentCli.js"
+import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { buildAttachmentSections } from "./attachmentInput.js"
 import { multipartParts, readMultipartPart } from "./multipart.js"
 import {
@@ -46,6 +47,7 @@ export interface TaskManagerDeps {
   usage: UsageStore
   history: TaskHistoryStore
   models: ModelAdmin
+  agentModels?: AgentModelCatalog
   /** Live owner chat; the API server may learn it after startup (e.g. first Feishu message). */
   ownerChatId?: number | (() => number | undefined)
   fetchMedia?: (target: string) => Promise<Buffer>
@@ -229,7 +231,7 @@ export class ApiTaskManager {
         throw new ApiError(400, "消息太长（上限 12000 字），请分段发送")
       }
       // A bad engine/model pin must not leave this request's uploads behind.
-      this.#select(engine, model)
+      await this.#select(engine, model)
       pruneInbox(this.#deps.cfg.inboxDir)
       return {
         text,
@@ -256,12 +258,12 @@ export class ApiTaskManager {
   }
 
   /** Submits already-persisted attachments, used by the multipart path. */
-  submitSaved(text: string, engineOverride?: string, modelOverride?: string, saved?: SavedAttachment[], failed: string[] = []): ApiTask {
+  async submitSaved(text: string, engineOverride?: string, modelOverride?: string, saved?: SavedAttachment[], failed: string[] = []): Promise<ApiTask> {
     try {
       if (this.waitingCount() >= MAX_API_QUEUE) {
         throw new ApiError(409, `待处理消息过多（最多排队 ${MAX_API_QUEUE} 条），请等待当前任务完成或发送 /stop 取消。`)
       }
-      const selection = this.#select(engineOverride, modelOverride)
+      const selection = await this.#select(engineOverride, modelOverride)
       const promptText = failed.length > 0 ? [text, `[附件处理失败]\n${failed.join("\n")}`].filter(Boolean).join("\n\n") : text
       return this.#submit(text, modelOverride, saved ?? [], promptText, selection)
     } catch (err) {
@@ -270,11 +272,11 @@ export class ApiTaskManager {
     }
   }
 
-  submit(text: string, engineOverride?: string, modelOverride?: string, attachments?: ApiAttachment[]): ApiTask {
+  async submit(text: string, engineOverride?: string, modelOverride?: string, attachments?: ApiAttachment[]): Promise<ApiTask> {
     if (this.waitingCount() >= MAX_API_QUEUE) {
       throw new ApiError(409, `待处理消息过多（最多排队 ${MAX_API_QUEUE} 条），请等待当前任务完成或发送 /stop 取消。`)
     }
-    const selection = this.#select(engineOverride, modelOverride)
+    const selection = await this.#select(engineOverride, modelOverride)
     const { saved: savedAttachments, failed: saveFailed } = attachments
       ? this.#saveAttachments(attachments)
       : { saved: [], failed: [] }
@@ -284,17 +286,19 @@ export class ApiTaskManager {
   }
 
   /** Validates the engine and model pin before any upload is persisted. */
-  #select(engineOverride: string | undefined, modelOverride: string | undefined): {
+  async #select(engineOverride: string | undefined, modelOverride: string | undefined): Promise<{
     engine: string
     autoEngine: boolean
+    cliModel?: string
     modelRef?: ResolvedModel
-  } {
+  }> {
     const explicitEngine = engineOverride?.trim() || this.#deps.store.getExplicitEngine(this.#appKey)
     const engine = explicitEngine ?? "opencode"
     const autoEngine = explicitEngine === undefined
     const profile = engine === "opencode" ? undefined : this.#deps.agents.registry.get(engine)
     if (!profile && engine !== "opencode") throw new ApiError(400, `未知的 Agent 引擎：${engine}`)
     let modelRef: ResolvedModel | undefined
+    let cliModel: string | undefined
     if (modelOverride) {
       if (engine === "opencode") {
         try {
@@ -303,12 +307,22 @@ export class ApiTaskManager {
         } catch (err) {
           throw new ApiError(400, err instanceof Error ? err.message : `未识别的模型：${modelOverride}`)
         }
-      } else if (!this.#deps.agents.registry.resolveModel(engine, modelOverride)) {
-        const options = (profile?.models ?? []).map((model) => model.id).join(", ")
-        throw new ApiError(400, options ? `未知的模型，可用：${options}` : "该引擎不支持指定模型")
+      } else {
+        const catalog = this.#deps.agentModels
+        const resolved = catalog ? await catalog.list(engine) : undefined
+        const chosen = catalog
+          ? catalog.resolve(engine, modelOverride)
+          : this.#deps.agents.registry.resolveModel(engine, modelOverride)
+        if (!chosen) {
+          const detail = resolved?.hint ? `（${resolved.hint}）` : ""
+          throw new ApiError(400, `未知的模型：${modelOverride}${detail}。可直接传模型 ID。`)
+        }
+        // Persist the catalog's canonical id (including case), not the user's alias. The
+        // CLI receives this value verbatim on every retry and scheduled task.
+        cliModel = chosen
       }
     }
-    return { engine, autoEngine, modelRef }
+    return { engine, autoEngine, cliModel, modelRef }
   }
 
   #submit(
@@ -316,7 +330,7 @@ export class ApiTaskManager {
     modelOverride: string | undefined,
     savedAttachments: SavedAttachment[],
     promptText: string,
-    selection: { engine: string; autoEngine: boolean; modelRef?: ResolvedModel },
+    selection: { engine: string; autoEngine: boolean; cliModel?: string; modelRef?: ResolvedModel },
   ): ApiTask {
     const id = `t${Date.now().toString(36)}${++this.#sequence}`
     const task: ApiTask = {
@@ -326,7 +340,7 @@ export class ApiTaskManager {
       text: promptText,
       engine: selection.engine,
       autoEngine: selection.autoEngine,
-      model: modelOverride,
+      model: selection.cliModel ?? modelOverride,
       modelRef: selection.modelRef,
       createdAt: Date.now(),
       savedAttachments: savedAttachments.length > 0 ? savedAttachments : undefined,

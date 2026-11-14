@@ -160,7 +160,7 @@ test("a rejected model pin leaves no attachment behind in the inbox", async () =
   const dir = mkdtempSync(join(tmpdir(), "bot-task-order-"))
   try {
     const manager = makeManager(dir, "good-model")
-    assert.throws(() => manager.submit("正文", "opencode", "bad-model", [attachment]), /未识别的模型/)
+    await assert.rejects(manager.submit("正文", "opencode", "bad-model", [attachment]), /未识别的模型/)
     assert.deepEqual(inboxFiles(dir), [], "the 400 must be raised before anything is written")
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -171,8 +171,8 @@ test("an accepted model pin still stores the attachment it was given", async () 
   const dir = mkdtempSync(join(tmpdir(), "bot-task-order-ok-"))
   try {
     const manager = makeManager(dir, "good-model")
-    const task = manager.submit("正文", "opencode", "good-model", [attachment])
-    assert.equal(task.status, "queued")
+    const task = await manager.submit("正文", "opencode", "good-model", [attachment])
+    assert.ok(task.status === "queued" || task.status === "running", `task was committed (${task.status})`)
     assert.equal(task.modelRef?.modelID, "good-model")
     assert.equal(task.savedAttachments?.length, 1, "the valid request must keep writing its attachment")
     assert.equal(inboxFiles(dir).length, 1)
@@ -180,6 +180,58 @@ test("an accepted model pin still stores the attachment it was given", async () 
       await new Promise((resolve) => setImmediate(resolve))
     }
     assert.notEqual(manager.get(task.id)?.status, "queued", "the run started, so the task was really committed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a CLI model alias is stored as the catalogue's canonical id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-task-canonical-"))
+  try {
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    store.setEngine("api:app", "demo")
+    const seen: string[] = []
+    const manager = new ApiTaskManager({
+      cfg: {
+        dataDir: dir,
+        inboxDir: join(dir, "inbox"),
+        outboxDir: join(dir, "outbox"),
+        maxInputBytes: 0,
+        maxMediaBytes: 1024,
+        stt: undefined,
+        taskTimeoutMs: 60_000,
+        opencode: { agent: "assistant" },
+      } as never,
+      agents: {
+        registry: {
+          get: () => ({ id: "demo", label: "Demo CLI", supportsModel: true }),
+          resolveModel: () => undefined,
+          modelLabel: () => "DeepSeek",
+          label: () => "Demo CLI",
+        },
+        prompt: async (_key: string, _engine: string, _text: string, model?: string) => {
+          seen.push(model ?? "")
+          return "ok"
+        },
+      } as never,
+      oc: { health: async () => true } as never,
+      store: store as never,
+      log,
+      usage: { record: () => {} } as never,
+      history: { record: () => {} } as never,
+      models: { resolveModel: () => { throw new Error("not used") } } as never,
+      agentModels: {
+        list: async () => ({ models: [{ id: "DeepSeek-V4", label: "DeepSeek V4" }], source: "probe" }),
+        resolve: (_engine: string, raw: string) => (raw.toLowerCase() === "deepseek" ? "DeepSeek-V4" : undefined),
+      } as never,
+      ownerChatId: 42,
+      appKey: "api:app",
+    })
+
+    const task = await manager.submit("你好", "demo", "deepseek")
+    assert.equal(task.model, "DeepSeek-V4", "the raw alias must not reach the CLI")
+    await waitForSettled(manager, task.id)
+    assert.deepEqual(seen, ["DeepSeek-V4"])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -193,7 +245,7 @@ test("task media re-checks its local file before serving it", async () => {
     writeFileSync(join(outbox, "pic.png"), "safe")
 
     const swappedManager = makeManager(dir, "good-model", "[[file: pic.png]]")
-    const swappedId = swappedManager.submit("发文件").id
+    const swappedId = (await swappedManager.submit("发文件")).id
     await waitForSettled(swappedManager, swappedId)
     const secret = join(dir, "secret.txt")
     writeFileSync(secret, "must-not-leak")
@@ -210,7 +262,7 @@ test("task media re-checks its local file before serving it", async () => {
     rmSync(join(outbox, "pic.png"))
     writeFileSync(join(outbox, "pic.png"), "safe")
     const grewManager = makeManager(dir, "good-model", "[[file: pic.png]]", 16)
-    const grewId = grewManager.submit("发文件").id
+    const grewId = (await grewManager.submit("发文件")).id
     await waitForSettled(grewManager, grewId)
     writeFileSync(join(outbox, "pic.png"), "x".repeat(64))
     await assert.rejects(
@@ -221,7 +273,7 @@ test("task media re-checks its local file before serving it", async () => {
 
     writeFileSync(join(outbox, "pic.png"), "safe")
     const prunedManager = makeManager(dir, "good-model", "[[file: pic.png]]")
-    const prunedId = prunedManager.submit("发文件").id
+    const prunedId = (await prunedManager.submit("发文件")).id
     await waitForSettled(prunedManager, prunedId)
     rmSync(join(outbox, "pic.png"))
     await assert.rejects(
@@ -264,7 +316,7 @@ test("an unset engine falls back from a dead OpenCode to an installed CLI", asyn
   const dir = mkdtempSync(join(tmpdir(), "bot-task-fallback-"))
   try {
     const manager = makeFallbackManager(dir, { healthy: false }) as ApiTaskManager & { logs: string[]; prompted: string[] }
-    const task = manager.submit("你好")
+    const task = await manager.submit("你好")
     await waitForSettled(manager, task.id)
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
@@ -285,7 +337,7 @@ test("a saved OpenCode model alone still allows the implicit default to fall bac
       logs: string[]
       prompted: string[]
     }
-    const task = manager.submit("你好")
+    const task = await manager.submit("你好")
     await waitForSettled(manager, task.id)
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
@@ -306,7 +358,7 @@ test("an explicitly selected OpenCode is never silently replaced", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-task-explicit-"))
   try {
     const manager = makeFallbackManager(dir, { healthy: false, explicitEngine: "opencode" }) as ApiTaskManager & { prompted: string[] }
-    const task = manager.submit("你好")
+    const task = await manager.submit("你好")
     await waitForSettled(manager, task.id)
     assert.equal(manager.get(task.id)?.engine, "opencode")
     assert.deepEqual(manager.prompted, ["opencode"], "the explicit choice must be attempted")
@@ -323,13 +375,13 @@ test("cancelling a queued task records an error code and a terminal log line", a
   })
   try {
     const manager = makeFallbackManager(dir, { healthy: true, gate }) as ApiTaskManager & { logs: string[] }
-    const first = manager.submit("第一条")
+    const first = await manager.submit("第一条")
     // Hold the first run so the second stays queued regardless of scheduler timing.
     for (let i = 0; i < 100 && manager.get(first.id)?.status !== "running"; i++) {
       await new Promise((resolve) => setImmediate(resolve))
     }
     assert.equal(manager.get(first.id)?.status, "running")
-    const second = manager.submit("第二条")
+    const second = await manager.submit("第二条")
     const cleared = manager.clearQueue()
     assert.deepEqual(cleared.cleared, [second.id])
     const cancelled = manager.get(second.id)!
@@ -353,7 +405,7 @@ test("terminal task logs carry stable fields and a classified failure code", asy
   const dir = mkdtempSync(join(tmpdir(), "bot-task-log-"))
   try {
     const manager = makeFallbackManager(dir, { healthy: false, fail: true }) as ApiTaskManager & { logs: string[] }
-    const task = manager.submit("触发失败")
+    const task = await manager.submit("触发失败")
     await waitForSettled(manager, task.id)
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "failed")
@@ -478,7 +530,7 @@ test("a failed API task persists its error code and redacted detail in history",
       ownerChatId: 42,
       appKey: "api:app",
     })
-    const task = manager.submit("失败任务")
+    const task = await manager.submit("失败任务")
     await waitForSettled(manager, task.id)
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "failed")

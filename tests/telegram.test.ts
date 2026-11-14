@@ -384,7 +384,7 @@ test("telegram bridge creates and manages scheduled AI tasks", async () => {
 
     await h.send("/schedule add --engine qoder --model deepseek every 2h 汇总日志")
     assert.match(h.lastText(), /定时任务已创建.*#2/)
-    assert.match(h.lastText(), /Qoder CLI \/ DeepSeek-Flash/)
+    assert.match(h.lastText(), /Qoder CLI \/ deepseek/)
     assert.match(h.lastText(), /每 2 小时/)
 
     await h.send("/schedule")
@@ -1306,7 +1306,7 @@ test("model selection can be dropped with /model default and the panel button", 
     await h.send("/agent qoder")
     await h.waitFor(() => h.texts().some((text) => text.includes("已切换至")))
     await h.send("/model deepseek")
-    await h.waitFor(() => h.texts().some((text) => text.includes("模型已切换为")))
+    await h.waitFor(() => h.texts().some((text) => text.includes("模型已切换为")), 12_000)
 
     await h.send("/model default")
     assert.match(h.lastText(), /已取消本会话的模型选择/)
@@ -1351,6 +1351,7 @@ test("a model named after a reset keyword is selected instead of resetting", asy
         sessionMode: "stateless",
         supportsModel: true,
         models: [{ id: "auto", label: "Auto" }],
+        modelProbe: { args: ["models"], format: "json" },
         args: {},
       },
     },
@@ -1385,6 +1386,7 @@ test("telegram model buttons keep pointing at the model they were drawn for", as
       sessionMode: "stateless",
       supportsModel: true,
       models,
+      modelProbe: { args: ["models"], format: "json" },
       args: {},
     },
   })

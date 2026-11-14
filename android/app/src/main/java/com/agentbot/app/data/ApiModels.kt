@@ -120,8 +120,6 @@ data class AgentInfo(
     /** "session" / "preassign" / "capture" / "stateless": whether context carries over. */
     val sessionMode: String? = null,
     val supportsModel: Boolean? = null,
-    /** The models this CLI offers, sent only for engines that can switch them. */
-    val models: List<AgentModelOption> = emptyList(),
     val experimental: Boolean? = null,
     val managed: Boolean = false,
     val installable: Boolean = false,
@@ -134,14 +132,6 @@ data class AgentInfo(
     /** Telegram treats every mode except "stateless" as keeping context between messages. */
     val stateless: Boolean get() = sessionMode == "stateless"
 }
-
-@Serializable
-data class AgentModelOption(
-    val id: String,
-    val label: String,
-    val desc: String? = null,
-    val aliases: List<String> = emptyList(),
-)
 
 @Serializable
 data class AgentActionResult(
@@ -399,8 +389,14 @@ data class ModelEntry(
 data class ModelChoices(
     val engine: String? = null,
     val models: List<ModelEntry> = emptyList(),
-    /** Engines whose model list the CLI owns get a one-line hint instead of a list. */
+    /**
+     * Why the list is empty (CLI missing, account without models, probe failure) or where
+     * it came from. The CLI's live answer is authoritative; there is no built-in fallback.
+     */
     val modelHint: String? = null,
+    /** `probe` / `configured` / `none` — nil on servers older than dynamic discovery. */
+    val source: String? = null,
+    val checkedAt: String? = null,
 )
 
 @Serializable

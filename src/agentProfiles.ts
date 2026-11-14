@@ -1,19 +1,4 @@
-import type { AgentCliModel, AgentCliProfile } from "./agentCli.js"
-
-const QODER_MODELS: AgentCliModel[] = [
-  {
-    id: "DeepSeek-Flash",
-    label: "DeepSeek-Flash",
-    aliases: ["deepseek", "ds", "deepseek-flash"],
-    desc: "DeepSeek 快速模型",
-  },
-  {
-    id: "Qwen3.8-Flash",
-    label: "Qwen3.8-Flash",
-    aliases: ["qwen", "qwen3.8", "qwen3.8-flash"],
-    desc: "Qwen 快速模型",
-  },
-]
+import type { AgentCliProfile } from "./agentCli.js"
 
 /**
  * Built-in profiles for the mainstream agent CLIs that run on Linux.
@@ -26,14 +11,13 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     label: "Qoder CLI",
     bin: "qoder",
     aliases: ["q", "qoder-cli"],
-    desc: "本地 Qoder 编程助手，支持 DeepSeek / Qwen",
+    desc: "本地 Qoder 编程助手，按当前账号动态查询模型",
     install: "https://qoder.com/",
     sessionMode: "preassign",
     parse: "text",
     supportsModel: true,
-    strictModels: true,
-    modelHint: "deepseek / qwen",
-    models: QODER_MODELS,
+    modelHint: "发送 /model <模型ID> 可直接指定",
+    modelProbe: { args: ["--list-models"], format: "auto" },
     args: {
       base: ["-p"],
       newSession: ["--session-id", "{sessionId}", "--dangerously-skip-permissions", "-w", "{workDir}"],
@@ -54,12 +38,7 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "preassign",
     parse: "claude-json",
     supportsModel: true,
-    modelHint: "sonnet / opus / haiku",
-    models: [
-      { id: "sonnet", label: "Claude Sonnet", aliases: ["claude-sonnet"] },
-      { id: "opus", label: "Claude Opus", aliases: ["claude-opus"] },
-      { id: "haiku", label: "Claude Haiku", aliases: ["claude-haiku"] },
-    ],
+    modelHint: "该 CLI 未提供模型列表命令，可发送 /model <模型ID>",
     args: {
       base: ["-p", "--output-format", "json", "--dangerously-skip-permissions"],
       newSession: ["--session-id", "{sessionId}"],
@@ -80,12 +59,8 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "capture",
     parse: "codex-jsonl",
     supportsModel: true,
-    modelHint: "gpt-5-codex / gpt-5 / o3",
-    models: [
-      { id: "gpt-5-codex", label: "GPT-5 Codex" },
-      { id: "gpt-5", label: "GPT-5" },
-      { id: "o3", label: "o3" },
-    ],
+    modelHint: "按当前 Codex 账号动态查询",
+    modelProbe: { args: ["debug", "models"], format: "json" },
     args: {
       base: ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"],
       resumeBase: [
@@ -112,7 +87,8 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "capture",
     parse: "gemini-stream",
     supportsModel: true,
-    modelHint: "gemini-3-pro-preview / gemini-2.5-pro",
+    modelHint: "按当前 Gemini 账号动态查询",
+    modelProbe: { args: ["--list-models", "--output-format", "json"], format: "json" },
     args: {
       base: ["--output-format", "stream-json", "--approval-mode", "yolo"],
       resumeSession: ["--resume", "{sessionId}"],
@@ -132,11 +108,7 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "preassign",
     parse: "json-result",
     supportsModel: true,
-    modelHint: "qwen3-coder-plus / qwen3-coder-flash",
-    models: [
-      { id: "qwen3-coder-plus", label: "Qwen3 Coder Plus", aliases: ["plus"] },
-      { id: "qwen3-coder-flash", label: "Qwen3 Coder Flash", aliases: ["flash"] },
-    ],
+    modelHint: "该 CLI 未提供模型列表命令，可发送 /model <模型ID>",
     args: {
       base: ["-p", "--output-format", "json", "--approval-mode", "yolo"],
       newSession: ["--session-id", "{sessionId}"],
@@ -156,12 +128,7 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "capture",
     parse: "json-result",
     supportsModel: true,
-    modelHint: "composer-1 / sonnet-4.5 / gpt-5",
-    models: [
-      { id: "composer-1", label: "Composer 1" },
-      { id: "sonnet-4.5", label: "Sonnet 4.5", aliases: ["sonnet"] },
-      { id: "gpt-5", label: "GPT-5" },
-    ],
+    modelHint: "该 CLI 未提供模型列表命令，可发送 /model <模型ID>",
     args: {
       base: ["-p", "--output-format", "json", "--force"],
       resumeSession: ["--resume", "{sessionId}"],
@@ -181,7 +148,7 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "stateless",
     parse: "text",
     supportsModel: true,
-    modelHint: "gpt-5 / claude-sonnet-4.5",
+    modelHint: "该 CLI 未提供模型列表命令，可发送 /model <模型ID>",
     args: {
       base: ["-p", "--allow-all-tools", "--allow-all-paths", "--silent"],
       model: ["--model", "{model}"],
@@ -199,7 +166,8 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "stateless",
     parse: "text",
     supportsModel: true,
-    modelHint: "provider/model",
+    modelHint: "按本地 OpenCode 配置动态查询",
+    modelProbe: { args: ["models"], format: "lines" },
     args: {
       base: ["run"],
       cwd: ["--dir", "{workDir}"],
@@ -218,7 +186,7 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "stateless",
     parse: "text",
     supportsModel: true,
-    modelHint: "sonnet / gpt-5 / deepseek",
+    modelHint: "该 CLI 未确认模型列表命令，可发送 /model <模型ID>",
     args: {
       base: ["--yes-always", "--no-pretty", "--no-stream", "--no-auto-commits", "--no-check-update"],
       model: ["--model", "{model}"],

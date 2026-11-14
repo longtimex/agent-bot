@@ -20,6 +20,7 @@ export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { AgentCliService } from "./agentCli.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
+import { AgentModelCatalog } from "./agentModelCatalog.js"
 import { appVersion } from "./version.js"
 import {
   AVAILABLE_MODELS,
@@ -51,6 +52,7 @@ import { TelegramPersonalPanels } from "./telegramPersonalPanels.js"
 import { TelegramCorePanels } from "./telegramCorePanels.js"
 import { TelegramPersonalCommands } from "./telegramPersonalCommands.js"
 import { TelegramModelCommands } from "./telegramModelCommands.js"
+import { resolveCliModelCallback } from "./telegramCliModelCallback.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
 import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
 import { TelegramProxyCommands } from "./telegramProxyCommands.js"
@@ -121,6 +123,7 @@ export class TelegramBridge {
   readonly #bot: Bot
   readonly #oc: Opencode
   readonly #agents: AgentCliService
+  readonly #agentModels: AgentModelCatalog
   readonly #store: SessionStore
   readonly #log: Logger
   readonly #proxies: ProxyService
@@ -199,6 +202,7 @@ export class TelegramBridge {
     this.#bot = bot ?? createChannelBot(cfg.telegram.token)
     this.#oc = oc
     this.#agents = agents
+    this.#agentModels = new AgentModelCatalog(agents.registry, { log })
     this.#store = store
     this.#log = log
     this.#proxies = proxies
@@ -317,6 +321,7 @@ export class TelegramBridge {
       pendingCount: (key) => this.#pending.get(key)?.length ?? 0,
       currentModel: (key) => this.#modelCommands.getCurrentModel(key),
       cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
+      agentModels: this.#agentModels,
     })
     this.#personalCommands = new TelegramPersonalCommands({
       reminders: this.#reminders,
@@ -341,7 +346,8 @@ export class TelegramBridge {
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
       dirPanel: (key) => this.#corePanels.dirPanel(key),
-      modelPanel: (key) => this.#corePanels.modelPanel(key),
+      agentModels: this.#agentModels,
+      modelPanel: (key, refresh) => this.#corePanels.modelPanel(key, refresh),
     })
     this.#opsCommands = new TelegramOpsCommands({
       ops: this.#ops,
@@ -1258,10 +1264,22 @@ export class TelegramBridge {
         return
       }
 
+      // Refresh is a global panel action and must be handled before the OpenCode-only
+      // `model:` branch below (otherwise its exact callback is swallowed as a model id).
+      if (data === "model:refresh") {
+        if (this.#store.getEngine(key) === "opencode") {
+          await answer("OpenCode 模型由服务端配置")
+        } else {
+          await answer("正在重新探测模型…")
+        }
+        await this.#editPanel(ctx, await this.#modelPanel(key, true))
+        return
+      }
+
       if (data.startsWith("model:")) {
         if (this.#store.getEngine(key) !== "opencode") {
           await answer("当前不是 OpenCode 引擎")
-          await this.#editPanel(ctx, this.#modelPanel(key))
+          await this.#editPanel(ctx, await this.#modelPanel(key))
           return
         }
         // Deleting the session while it is generating would fail the running task
@@ -1275,7 +1293,7 @@ export class TelegramBridge {
             return
           }
           await answer("已清除模型选择，之后由 OpenCode 自身配置决定")
-          await this.#editPanel(ctx, this.#modelPanel(key))
+          await this.#editPanel(ctx, await this.#modelPanel(key))
           return
         }
         const targetKey = resolveModelKey(data.slice("model:".length))
@@ -1291,7 +1309,7 @@ export class TelegramBridge {
         }
         await answer(`已切换至 ${target.label}`)
         await this.#applyOpenCodeModel(key, target)
-        await this.#editPanel(ctx, this.#modelPanel(key))
+        await this.#editPanel(ctx, await this.#modelPanel(key))
         return
       }
 
@@ -1300,7 +1318,7 @@ export class TelegramBridge {
         const profile = this.#agents.registry.get(engine)
         if (!profile || this.#store.getEngine(key) !== engine) {
           await answer("引擎已切换，请重新打开模型面板")
-          await this.#editPanel(ctx, this.#modelPanel(key))
+          await this.#editPanel(ctx, await this.#modelPanel(key))
           return
         }
         if (this.#runningSince.has(key)) {
@@ -1312,32 +1330,19 @@ export class TelegramBridge {
           return
         }
         await answer("已清除模型选择，之后由 CLI 自身配置决定")
-        await this.#editPanel(ctx, this.#modelPanel(key))
+        await this.#editPanel(ctx, await this.#modelPanel(key))
         return
       }
 
       if (data.startsWith("cmodel:") || data.startsWith("qmodel:")) {
-        const legacy = data.startsWith("qmodel:")
-        const payload = data.slice(legacy ? "qmodel:".length : "cmodel:".length)
-        let engine: string
-        let model: string | undefined
-        if (legacy) {
-          engine = "qoder"
-          model = this.#agents.registry.resolveModel(engine, payload)
-        } else {
-          // Split on the first colon only: a model id may itself contain one
-          const at = payload.indexOf(":")
-          engine = at < 0 ? payload : payload.slice(0, at)
-          const value = at < 0 ? "" : payload.slice(at + 1)
-          const profile = this.#agents.registry.get(engine)
-          // Panels built before a profile reload carry the position; the id is what survives
-          // the list changing under the tap, so it wins whenever the panel offered one
-          model = profile?.models?.find((entry) => entry.id === value)?.id ?? this.#indexedModel(profile, value)
-        }
+        const { engine, model } = resolveCliModelCallback(data, {
+          registry: this.#agents.registry,
+          catalog: this.#agentModels,
+        })
 
         if (this.#store.getEngine(key) !== engine) {
           await answer("引擎已切换，请重新打开模型面板")
-          await this.#editPanel(ctx, this.#modelPanel(key))
+          await this.#editPanel(ctx, await this.#modelPanel(key))
           return
         }
         if (!model) {
@@ -1354,8 +1359,8 @@ export class TelegramBridge {
           return
         }
         this.#applyCliModel(key, engine, model)
-        await answer(`已切换至 ${this.#agents.registry.modelLabel(engine, model)}`)
-        await this.#editPanel(ctx, this.#modelPanel(key))
+        await answer(`已切换至 ${this.#agentModels.label(engine, model)}`)
+        await this.#editPanel(ctx, await this.#modelPanel(key))
         return
       }
 
@@ -1828,7 +1833,7 @@ export class TelegramBridge {
       const modelLabel = isOpencode
         ? activeModel?.label
         : cliModel
-          ? this.#agents.registry.modelLabel(engine, cliModel)
+          ? this.#agentModels.label(engine, cliModel)
           : undefined
       const ms = Date.now() - taskStarted
       this.#outcomes.record({ task: job, engine, model: modelLabel, outcome, detail: failureDetail, ms, startedAt: taskStarted })
@@ -1950,8 +1955,8 @@ export class TelegramBridge {
     return this.#corePanels.agentPanel(key)
   }
 
-  #modelPanel(key: string): Panel {
-    return this.#corePanels.modelPanel(key)
+  #modelPanel(key: string, refresh = false): Promise<Panel> {
+    return this.#corePanels.modelPanel(key, refresh)
   }
 
   #remindersPanel(chatId: number, page = 1): Panel {
@@ -1994,15 +1999,6 @@ export class TelegramBridge {
     this.#modelCommands.applyCliModel(key, engine, model)
   }
 
-  /**
-   * A panel rendered before this session's callback data carried model ids sends a position
-   * instead, which only means something while the profile list has not changed.
-   */
-  #indexedModel(profile: { models?: Array<{ id: string }> } | undefined, value: string): string | undefined {
-    const index = Number(value)
-    return value !== "" && Number.isInteger(index) && index >= 0 ? profile?.models?.[index]?.id : undefined
-  }
-
   async #panelFor(which: string, chatId: number, key: string): Promise<Panel | undefined> {
     // Page buttons carry their argument in the callback data ("reminders:2"), so dispatch
     // on the panel name; matching the whole string left every pagination link in default.
@@ -2012,7 +2008,7 @@ export class TelegramBridge {
       case "help": return { text: HELP, keyboard: this.#menuKeyboard() }
       case "agent": return this.#agentPanel(key)
       case "agents": return this.#agentInstallerPanel()
-      case "model": return this.#modelPanel(key)
+      case "model": return await this.#modelPanel(key)
       case "dir": return this.#dirPanel(key)
       case "access": return this.#accessPanel(undefined, channelOfChatId(chatId, this.#channel))
       case "reminders": {

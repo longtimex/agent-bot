@@ -1,5 +1,6 @@
 import { InlineKeyboard } from "grammy"
 import type { AgentCliProfile, AgentCliService } from "./agentCli.js"
+import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"
 import { AVAILABLE_MODELS, reloadCustomModels } from "./models.js"
@@ -20,6 +21,7 @@ export interface CorePanelDeps {
   pendingCount: (key: string) => number
   currentModel: (key: string) => { providerID: string; modelID: string; label: string } | undefined
   cliModelLabel: (engine: string, model: string | undefined) => string
+  agentModels: AgentModelCatalog
 }
 
 export class TelegramCorePanels {
@@ -237,7 +239,7 @@ export class TelegramCorePanels {
     }
   }
 
-  modelPanel(key: string): Panel {
+  async modelPanel(key: string, refresh = false): Promise<Panel> {
     const engine = this.#deps.store.getEngine(key)
     if (engine !== "opencode") {
       const profile = this.#deps.agents.registry.get(engine)
@@ -249,26 +251,23 @@ export class TelegramCorePanels {
       }
 
       const current = this.#deps.store.getCliModel(key, engine)
+      const catalog = await this.#deps.agentModels.list(engine, refresh)
+      const models = catalog.models.slice(0, 30)
       const keyboard = new InlineKeyboard()
-      if (profile.supportsModel && profile.models?.length) {
-        profile.models.slice(0, 30).forEach((model, index) => {
-          const mark = current === model.id ? "✅ " : ""
-          // A profile list can be reloaded between rendering this panel and the tap, and then
-          // an index points at whichever model sits there now. The id survives that, up to the
-          // 64 byte limit Telegram puts on callback data.
-          const byId = `cmodel:${engine}:${model.id}`
-          keyboard.text(
-            clip(`${mark}${model.label}`, 60) ?? "",
-            Buffer.byteLength(byId, "utf8") <= 64 ? byId : `cmodel:${engine}:${index}`,
-          )
-          if (index % 2 === 1) keyboard.row()
-        })
-        if (profile.models.slice(0, 30).length % 2 === 1) keyboard.row()
-      }
-      if (this.#deps.store.getCliModel(key, engine)) {
-        keyboard.text("↩️ 清除模型选择", `cmodelreset:${engine}`).row()
-      }
-      keyboard.text("🤖 切换引擎", "show:agent").text("🔄 刷新", "show:model")
+      models.forEach((model) => {
+        const mark = current === model.id ? "✅ " : ""
+        // A catalog can change between rendering this panel and the tap, and then an index
+        // points at whichever model sits there now. The id survives that, up to Telegram's
+        // 64 byte callback-data limit; a long id cannot be safely encoded, so skip its button
+        // and leave the `/model <id>` command as the way to select it.
+        const byId = `cmodel:${engine}:${model.id}`
+        if (Buffer.byteLength(byId, "utf8") > 64) return
+        keyboard.text(clip(`${mark}${model.label}`, 60) ?? "", byId)
+        if (keyboard.inline_keyboard.at(-1)?.length === 2) keyboard.row()
+      })
+      if (models.length > 0 && keyboard.inline_keyboard.at(-1)?.length === 1) keyboard.row()
+      if (current) keyboard.text("↩️ 清除模型选择", `cmodelreset:${engine}`).row()
+      keyboard.text("🤖 切换引擎", "show:agent").text("🔄 重新探测", "model:refresh")
       keyboard.row().text("⬅️ 主菜单", "show:menu")
 
       const modelLine = profile.supportsModel
@@ -276,15 +275,17 @@ export class TelegramCorePanels {
           ? this.#deps.cliModelLabel(engine, current)
           : "未指定（由 CLI 自身配置决定）"
         : "由 CLI 自身配置"
+      const source = catalog.checkedAt ? `\n_探测时间：${catalog.checkedAt}_` : ""
       const hint = profile.supportsModel
-        ? profile.models?.length
-          ? `\n\n也可发送 \`/model <模型ID>\` 直接指定${profile.modelHint ? `（如 \`${profile.modelHint}\`）` : ""}。`
-          : `\n\n该引擎支持任意模型 ID，发送 \`/model <模型ID>\` 切换。${profile.modelHint ? `\n示例：\`${profile.modelHint}\`` : ""}`
+        ? models.length
+          ? `\n\n点击按钮切换，或发送 \`/model <模型ID>\`。${catalog.hint ? `\n${escapeMarkdown(catalog.hint)}` : ""}`
+          : `\n\n${escapeMarkdown(catalog.hint ?? "未发现可用模型。")}\n可直接发送 \`/model <模型ID>\` 指定。`
         : "\n\n该引擎不支持通过 Bot 切换模型，请在 CLI 配置中设置。"
       return {
         text:
           `🧠 *${escapeMarkdown(profile.label)} 模型*\n\n当前：*${escapeMarkdown(modelLine)}*\n` +
-          `\n切换后会重置当前引擎的会话上下文。${hint}`,
+          `${catalog.models.length ? `可用模型：${catalog.models.length} 个\n` : ""}` +
+          `\n切换后会重置当前引擎的会话上下文。${hint}${source}`,
         keyboard,
       }
     }

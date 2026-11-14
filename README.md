@@ -231,17 +231,17 @@ npm run bot -- status  # 查看配置状态、PID、release 与日志路径
 
 #### 直接下载
 
-从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.2.0`）：
+从 [GitHub Releases](https://github.com/longtimex/agent-bot/releases) 下载最新的 `android-v*` 版本：`agent-bot-vX.Y.Z.apk` 与同名 `.sha256`。下载后先校验再安装（示例为当前版本 `1.2.1`）：
 
 ```bash
-tag=android-v1.2.0                  # 换成实际版本
+tag=android-v1.2.1                  # 换成实际版本
 base="https://github.com/longtimex/agent-bot/releases/download/$tag"
-curl -L -O "$base/agent-bot-v1.2.0.apk"
-curl -L -O "$base/agent-bot-v1.2.0.apk.sha256"
-sha256sum -c agent-bot-v1.2.0.apk.sha256
+curl -L -O "$base/agent-bot-v1.2.1.apk"
+curl -L -O "$base/agent-bot-v1.2.1.apk.sha256"
+sha256sum -c agent-bot-v1.2.1.apk.sha256
 ```
 
-- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.2.0` 统一了附件大小显示，并补齐发送失败保留草稿、队列失败保留旧列表、各页面操作失败留在本页、聊天搜索编译修复与长任务超时修复等移动端行为。
+- 请使用 Release 中带版本号的最新 APK；不要使用未在 Releases 页面发布的早期内部构建。当前 `android-v1.2.1` 同步了 Agent 模型实时发现：选择引擎后会向服务器查询该 CLI 当前可用的模型，失败时显示具体原因，不再展示手写清单。
 - `android-v1.1.0` 起由 CI 使用稳定的正式 release keystore 签名；同一签名身份的后续版本可覆盖升级，已保存的地址、令牌与配对密钥会保留。首次安装需允许「安装未知来源应用」。
 - 早期 debug 签名包与正式签名包不是同一签名身份，Android 不允许直接覆盖。从 debug 包切换到正式包必须先卸载旧版，App 本地聊天记录、草稿、设置和配对信息会一并清除，之后重新扫码配对；之后同一正式 keystore 的升级不再需要卸载。
 - 完整发版说明、构建检查与历史问题见 [`android/README.md`](android/README.md)、[`CHANGELOG.md`](CHANGELOG.md) 与对应的 GitHub Release。
@@ -603,7 +603,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `POST /cc/run` | Telegram 的 `/cc run <任意参数>` 在服务端的同一入口：body `{args: ["mcp","enable","fs","--apps","opencode"], confirm?}`，最多 16 段、单段 ≤240 字、总长 ≤2000 字、不得含控制字符。判定与聊天共用一个模块 `src/ccGuards.ts`（交互式/常驻命令一律 400 并给出聊天里能用的替代写法；`-a/--app` 的任何写法都拒绝，`--apps` 不受影响；需要确认的形状先回 400「需要确认」，带 `confirm: true` 重发才真正执行，并按 cc-switch 的要求补上它自己的 `--yes`/`--confirm`）。`provider use\|switch` 走与按钮相同的切换路径（不是裸 argv），`deeplink` 明确指向 `POST /cc/deeplink`。响应 `{ok, code, command, message, text}`，`command` 只回显前三段且已脱敏 |
 | `GET /cc/sessions?q=` · `POST /cc/deeplink` | 对应 `/cc sessions search`（关键词上限 128 字、不得以 `-` 开头或含控制字符，90 秒超时）与 `/cc deeplink`：仅接受 `ccswitch://v1/import?...`（上限 8192 字）、需 `confirm: true`，响应不回显链接本身 |
 | `GET /config` · `PUT /config/:key` · `DELETE /config/:key` | `.env` 配置项：查看（密钥值不下发）、修改、删除；仅允许规则内的键，两个渠道的白名单键仍须走 `/access`，`REMINDER_TIMEZONE` 立即生效 |
-| `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性，并带 `aliases`、`bin`、`sessionMode`、`supportsModel`、`models`，客户端可用与 Telegram 相同的别名输入命中同一引擎）与模型列表；引擎列表第一项是内置的 `opencode`（`installed: true`，不可安装/更新/卸载），与 `POST /agent` 可接受的取值一致，客户端因此总能切回内置引擎；`GET /models?engine=<id>` 可取其他引擎的模型（供单条临时指定使用），未知引擎返回 400，`models` 里每个条目带 `aliases`，CLI 不列模型时改由 `modelHint` 给出可输入的写法 |
+| `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性，并带 `aliases`、`bin`、`sessionMode`、`supportsModel`，客户端可用与 Telegram 相同的别名输入命中同一引擎）与模型列表。引擎列表第一项是内置的 `opencode`（`installed: true`，不可安装/更新/卸载），与 `POST /agent` 可接受的取值一致，客户端因此总能切回内置引擎；`GET /models?engine=<id>` 由已安装 CLI 实时查询当前账号可用的模型（供面板与单条临时指定使用，未知引擎返回 400），`?refresh=1` 跳过 60 秒缓存；响应带 `models`、`modelHint`、`source`（`probe` / `configured` / `none`）与 `checkedAt`。内置 Agent 不携带任何静态模型表，查询失败就返回空列表与原因，不会用过期列表兜底；没有列表命令的 CLI 仍可直接传模型 ID |
 | `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
@@ -630,22 +630,24 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 
 启动时会扫描 `PATH`，`/start` 欢迎页、`/agent` 面板和 `/agents` 管理面板都会展示检测结果；`/agent` 面板按“已安装优先”排序，并用 ⚠️ 标出未安装的 CLI；`/agent <id>` 会显示安装方式与模型提示。
 
-| id | 名称 | 可执行文件 | 会话 | 常用模型 |
+| id | 名称 | 可执行文件 | 会话 | 模型发现 |
 | --- | --- | --- | --- | --- |
-| `qoder` | Qoder CLI | `qoder` | 预分配 | `deepseek` / `qwen` |
-| `claude` | Claude Code | `claude` | 续接 | `sonnet` / `opus` / `haiku` |
-| `codex` | Codex CLI | `codex` | 捕获续接 | `gpt-5-codex` / `gpt-5` / `o3` |
-| `gemini` | Gemini CLI | `gemini` | 捕获续接 | 任意 Gemini 模型 ID |
-| `qwen` | Qwen Code | `qwen` | 续接 | `qwen3-coder-plus` / `flash` |
-| `cursor` | Cursor Agent | `cursor-agent` | 捕获续接 | `composer-1` / `sonnet-4.5` / `gpt-5` |
-| `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 任意 |
-| `opencode-cli` | OpenCode CLI | `opencode` | 单次 | `provider/model` |
-| `aider` | Aider | `aider` | 单次 | 任意 |
-| `goose` | Goose | `goose` | 单次 | 任意 |
-| `amp` | Amp | `amp` | 单次 | 任意 |
-| `droid` | Factory Droid | `droid` | 单次 | 任意 |
-| `amazonq` | Amazon Q Developer | `q` | 单次 | 任意（实验性） |
-| `kiro` | Kiro CLI | `kiro-cli` | 单次 | 任意（实验性） |
+| `qoder` | Qoder CLI | `qoder` | 预分配 | `qoder --list-models` |
+| `claude` | Claude Code | `claude` | 续接 | 无列表命令，模型 ID 透传 |
+| `codex` | Codex CLI | `codex` | 捕获续接 | `codex debug models` |
+| `gemini` | Gemini CLI | `gemini` | 捕获续接 | `gemini --list-models --output-format json` |
+| `qwen` | Qwen Code | `qwen` | 续接 | 无列表命令，模型 ID 透传 |
+| `cursor` | Cursor Agent | `cursor-agent` | 捕获续接 | 无列表命令，模型 ID 透传 |
+| `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 无列表命令，模型 ID 透传 |
+| `opencode-cli` | OpenCode CLI | `opencode` | 单次 | `opencode models` |
+| `aider` | Aider | `aider` | 单次 | 无列表命令，模型 ID 透传 |
+| `goose` | Goose | `goose` | 单次 | 无列表命令，模型 ID 透传 |
+| `amp` | Amp | `amp` | 单次 | 无列表命令，模型 ID 透传 |
+| `droid` | Factory Droid | `droid` | 单次 | 无列表命令，模型 ID 透传 |
+| `amazonq` | Amazon Q Developer | `q` | 单次 | 无列表命令，模型 ID 透传（实验性） |
+| `kiro` | Kiro CLI | `kiro-cli` | 单次 | 无列表命令，模型 ID 透传（实验性） |
+
+内置档案只保存非交互的探测命令，不保存模型清单或默认模型。`/model`、模型面板、定时任务与 Android 的单条指定都会先读取同一次实时探测结果；`/model <模型ID>` 可用列表中的 ID、显示名或 `data/agents.json` 里的别名。CLI 未安装、当前账号无额度或探测失败时，面板会显示具体原因，并仍允许直接输入安全的模型 ID 交给 CLI 判断。
 
 - 每个引擎在同一聊天中拥有独立的会话与模型偏好，切换引擎不会清空其他引擎的上下文；`/new` 只重置当前引擎。
 - `预分配`：先写入 UUID 再启动（`--session-id` 类参数）；`捕获续接`：从输出中提取会话 ID；`单次`：每次独立执行。续接失败时会自动清空会话并重试一次。
@@ -690,9 +692,9 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
       "sessionMode": "stateless",
       "parse": "json-result",
       "supportsModel": true,
-      "modelHint": "fast / deep",
+      "modelHint": "可发送 /model <模型ID>",
       "installSpec": { "method": "npm", "package": "@scope/myagent" },
-      "models": { "fast": "Fast Mode", "deep": "Deep Mode" },
+      "modelProbe": { "args": ["models", "--json"], "format": "json", "timeoutMs": 15000 },
       "args": {
         "base": ["run", "--yes"],
         "cwd": ["--dir", "{workDir}"],
@@ -706,10 +708,11 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 
 字段说明：
 
-- 项目不设置任何 Agent 的默认模型。`models` 只用于 `/model` 面板与别名解析；没有显式选择时，Bot 不会向 OpenCode 或 CLI 传入模型参数，由该引擎自己的配置决定。旧的 `defaultModel` 字段会被忽略。
+- 项目不设置任何 Agent 的默认模型。内置档案没有 `models`，模型由 CLI 在请求时动态查询；没有显式选择时，Bot 不会向 OpenCode 或 CLI 传入模型参数，由该引擎自己的配置决定。旧的 `defaultModel` 字段会被忽略。
 - `sessionMode`：`preassign` / `capture` / `stateless`；`parse`：`text` / `json-result` / `jsonl-result` / `claude-json` / `codex-jsonl` / `gemini-stream`。
 - `args` 支持 `base`、`resumeBase`（续接时替换 `base`）、`newSession`、`resumeSession`、`cwd`、`model`、`prompt`；占位符为 `{workDir}`、`{sessionId}`、`{model}`、`{prompt}`。消息正文若以 `-` 开头（例如粘贴的 `- 项目符号` 列表），会自动补一个空格，避免它被 CLI 当成命令行开关。
-- `models` 可为 `{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`；`strictModels: true` 时只接受列表内模型，否则模型 ID 透传给 CLI——但不接受以 `-` 开头或含控制字符、超过 120 字符的值，这类值会被视为非法模型而拒绝，避免它被 CLI 解析成额外的命令行开关。
+- `modelProbe` 可选，为自定义 CLI 指定固定的非交互查询命令：`args` 是 argv 数组（不经过 shell），`format` 为 `auto` / `json` / `lines`，`timeoutMs` 在 1000–120000 之间。支持 `{"models": [...]}`、`{"data": [...]}`、数组及每行一个 `provider/model` 的常见输出；Codex 的 `visibility: "hide"` 条目会被过滤。探测结果缓存 60 秒，`/models?refresh=1` 或面板的「重新探测」会强制刷新。
+- 自定义档案仍可写 `models`（`{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`）作为兼容路径，仅在 CLI 不可执行且没有探测命令时使用；`strictModels: true` 时只接受列表内模型，否则安全的模型 ID 可透传给 CLI。无论哪条路径，都不接受以 `-` 开头、含控制字符或超过 120 字符的值，避免它被 CLI 解析成额外的命令行开关。
 - `resumeErrorPattern` 是识别“会话失效”的正则，命中后清空会话并重试一次；`env` 可附加进程环境变量。
 - `installSpec` 可选，仅接受 `method: "npm" | "pip"` 与合法包名；Bot 只会执行固定的 `npm install -g` / `python3 -m pip install --user` 命令，不会把包名拼进 shell。
 - id 必须匹配 `^[a-z0-9][a-z0-9._-]*$`，`opencode` 保留给服务端引擎；未知占位符、非法正则或缺少 `bin` 的条目会记录警告并被忽略。`amazonq` / `kiro` 的非交互参数可能随版本变化，标为实验性。
@@ -1162,7 +1165,7 @@ Telegram/飞书凭据、API Key、密码与账号凭据等永远不会在 `/env`
 ```
 
 - 时间格式与 `/remind` 相同（`30m`、`18:30`、`明天 08:30`、`every 2h`、`每天 09:00`），按 `REMINDER_TIMEZONE` 解析。
-- 创建时会快照当前引擎与模型；也可用 `--engine <opencode|任意 Agent CLI>` 和 `--model <简称>` 覆盖。OpenCode 模型简称见 `/model`；Agent CLI 的可用模型见 `/agent <id>` 的提示，未列出的模型 ID 也可直接使用（Qoder 仍限定 `deepseek` / `qwen`）。
+- 创建时会快照当前引擎与模型；也可用 `--engine <opencode|任意 Agent CLI>` 和 `--model <简称>` 覆盖。OpenCode 模型简称见 `/model`；Agent CLI 的可用模型在 `/model` 面板实时查询，未列出的安全模型 ID 也可直接传给 CLI（是否可用由 CLI 自己判断）。
 - 到点后任务进入该会话的普通队列执行，结果以普通回复发到聊天；执行中可发送 `/stop` 取消。
 - 一次性任务执行成功后自动删除；执行失败时按 1 分钟 / 5 分钟 / 15 分钟自动重试，最多 3 次，仍失败才删除（`/schedule` 面板会显示「失败（第 N 次重试中）」）。删除前会在聊天中提示。重复任务在每次执行结束后排下一次（重试计数清零），停机期间错过的周期直接跳过。
 - 排队中的任务被 `/stop` 取消时：重复任务按原周期继续，一次性任务自动暂停并在聊天中提示恢复方式（`/schedule resume 编号`），不会静默丢失。

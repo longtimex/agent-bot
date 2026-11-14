@@ -35,7 +35,8 @@ test("parseScheduleAdd honours engine and model flags in any order", () => {
 
   const qoder = parseScheduleAdd("--model deepseek --engine qoder every 2h 汇总日志", defaults, now)
   assert.equal(qoder.engine, "qoder")
-  assert.equal(qoder.cliModel, "DeepSeek-Flash")
+  // The scheduler passes the model id through; it does not keep a stale Qoder alias table.
+  assert.equal(qoder.cliModel, "deepseek")
   assert.equal(qoder.model, undefined)
   assert.deepEqual(qoder.repeat, { type: "interval", ms: 2 * 3_600_000 })
   assert.equal(qoder.prompt, "汇总日志")
@@ -45,7 +46,7 @@ test("parseScheduleAdd honours engine and model flags in any order", () => {
   assert.deepEqual(sonnet.repeat, { type: "daily", hour: 9, minute: 0 })
 
   const qwen = parseScheduleAdd("-e qoder -m qwen 10m 检查", defaults, now)
-  assert.equal(qwen.cliModel, "Qwen3.8-Flash")
+  assert.equal(qwen.cliModel, "qwen")
 })
 
 test("parseScheduleAdd resolves custom CLI engines and models", () => {
@@ -97,7 +98,9 @@ test("parseScheduleAdd rejects invalid targets", () => {
   const now = 1_700_000_000_000
   assert.throws(() => parseScheduleAdd("--engine nope 30m 检查", defaults, now), /仅支持 opencode 或 qoder/)
   assert.throws(() => parseScheduleAdd("--model nope 30m 检查", defaults, now), /未识别的模型/)
-  assert.throws(() => parseScheduleAdd("--engine qoder --model sonnet 30m 检查", defaults, now), /deepseek 或 qwen/)
+  // Without a resolver, arbitrary CLI ids are passed through unchanged; a typo is the
+  // CLI's own error, not the Bot inventing a two-model allow-list.
+  assert.equal(parseScheduleAdd("--engine qoder --model sonnet 30m 检查", defaults, now).cliModel, "sonnet")
   assert.throws(() => parseScheduleAdd("30m", defaults, now), /补充定时任务内容/)
   assert.throws(() => parseScheduleAdd("5s 检查", defaults, now), /10 秒/)
 })

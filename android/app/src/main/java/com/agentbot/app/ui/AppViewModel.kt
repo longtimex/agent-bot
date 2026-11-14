@@ -54,6 +54,7 @@ import com.agentbot.app.data.OpsResult
 import com.agentbot.app.data.Reminder
 import com.agentbot.app.data.Schedule
 import com.agentbot.app.data.SentAttachment
+import com.agentbot.app.data.ShareIntents
 import com.agentbot.app.data.ServerInfo
 import com.agentbot.app.data.ReleaseInfo
 import com.agentbot.app.data.ServiceStatus
@@ -254,6 +255,19 @@ class AppViewModel(
     /** The session engine's switchable models; `hint` explains an engine that lists none. */
     val models: List<ModelEntry> get() = modelChoices.models
     val modelHint: String? get() = modelChoices.modelHint
+
+    /** Why an empty list is empty, worded for the picker rather than a generic CLI note. */
+    val modelEmptyText: String
+        get() {
+            if (modelsError != null) return modelsError!!
+            if (modelsLoading) return "正在从 Agent 读取可用模型…"
+            modelHint?.takeIf { it.isNotBlank() }?.let { return it }
+            return when (modelChoices.source) {
+                "none" -> "该 Agent 没有提供模型查询接口；可直接发送 /model <模型ID>。"
+                "probe" -> "Agent 当前没有返回可用模型；可直接发送 /model <模型ID> 指定。"
+                else -> "暂未发现可用模型；可直接发送 /model <模型ID>。"
+            }
+        }
 
     var customModels by mutableStateOf<List<CustomModel>>(emptyList())
         private set
@@ -691,7 +705,7 @@ class AppViewModel(
         silent {
             oneOffChoicesLoading = true
             try {
-                val choices = api.models(conn(), pinned)
+                val choices = api.models(conn(), pinned, refresh = true)
                 if (oneOffEngine == pinned) {
                     oneOffChoices = choices
                     oneOffModelsError = null
@@ -2052,13 +2066,13 @@ class AppViewModel(
         }
     }
 
-    fun refreshModels() {
+    fun refreshModels(force: Boolean = false) {
         if (modelsLoading) return
         modelsLoading = true
         viewModelScope.launch {
             try {
                 modelsError = null
-                modelChoices = api.models(conn())
+                modelChoices = api.models(conn(), refresh = force)
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
@@ -3137,8 +3151,8 @@ class AppViewModel(
             return "未找到模型：$query，可选：${choices.models.joinToString("、") { it.label }}"
         }
         return choices.modelHint?.let {
-            "该引擎的模型由 CLI 自身配置，可用提示：$it（也可发送 /model <模型ID>）"
-        } ?: "该引擎不支持通过 Bot 切换模型，可在「引擎管理」改用 OpenCode，或在 CLI 配置中设置。"
+            "当前没有可列出的模型：$it（仍可直接输入模型 ID）"
+        } ?: "该引擎没有返回模型信息；可在「引擎管理」改用 OpenCode，或直接发送 /model <模型ID>。"
     }
 
     /** `/engine <id>` pins the next message to a CLI engine without touching the session. */
@@ -3532,7 +3546,7 @@ class AppViewModel(
             putExtra(Intent.EXTRA_TEXT, text)
         }
         appContext.startActivity(
-            Intent.createChooser(send, "分享每日报告").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            ShareIntents.chooser(appContext, send, "分享每日报告").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
 
@@ -3555,7 +3569,7 @@ class AppViewModel(
                     .putExtra(Intent.EXTRA_STREAM, uri)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 appContext.startActivity(
-                    Intent.createChooser(share, "数据备份").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    ShareIntents.chooser(appContext, share, "数据备份").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
                 toast = "备份已生成（${bytes.size / 1024} KB），请在分享面板选择保存位置"
             } catch (err: Exception) {
@@ -3586,7 +3600,9 @@ class AppViewModel(
                     val share = Intent(Intent.ACTION_SEND).setType(mime)
                         .putExtra(Intent.EXTRA_STREAM, uri)
                         .addFlags(flags)
-                    appContext.startActivity(Intent.createChooser(share, media.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    appContext.startActivity(
+                        ShareIntents.chooser(appContext, share, media.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
                 }
             } catch (err: Exception) {
                 connectionError = "无法打开 ${media.name}：${err.message}"

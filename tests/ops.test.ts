@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import { parseEnv } from "node:util"
+import { failureDigest } from "../src/failureDigest.js"
 import { OpsService, type OpsCommandResult } from "../src/ops.js"
 
 interface Call {
@@ -288,6 +289,40 @@ test("ops update and check never expose provider credentials to npm scripts", as
     else process.env.OPENAI_API_KEY = saved
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("a failed check keeps the names of failing tests instead of only the tail counts", async () => {
+  const dir = tempDir()
+  try {
+    const noise = "still running\n".repeat(500)
+    const failures = Array.from({ length: 5 }, (_, i) =>
+      `not ok ${i + 1} - the release guard fails case ${i + 1}\n  ---\n  error: 'expected true'\n  ---`
+    ).join("\n")
+    const { ops } = makeService(dir, (command, args) => {
+      if (command.endsWith("npm") && args.join(" ") === "run check") {
+        return { code: 1, stdout: `${noise}${failures}\n${noise}1..937\n# fail 5\n`, stderr: "" }
+      }
+      return undefined
+    })
+
+    const result = await ops.runCheck()
+    assert.equal(result.ok, false)
+    const output = result.steps[0]?.output ?? ""
+    for (let i = 1; i <= 5; i += 1) assert.match(output, new RegExp(`not ok ${i} - the release guard fails case ${i}`))
+    assert.match(output, /失败明细：/)
+    assert.ok(output.length <= 1500, `the step output must stay bounded, was ${output.length}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("failureDigest ignores passing tests and bounds a broken reporter", () => {
+  const passing = "ok 1 - works\n".repeat(100)
+  assert.equal(failureDigest(passing, 600), "")
+  const many = Array.from({ length: 80 }, (_, i) => `not ok ${i + 1} - case ${i + 1}`).join("\n")
+  const digest = failureDigest(many, 600)
+  assert.match(digest, /^失败明细：\n- not ok 1 - case 1/)
+  assert.ok(digest.length <= 600, `digest must stay bounded, was ${digest.length}`)
 })
 
 test("ops update stops at the release gate without building or activating", async () => {
