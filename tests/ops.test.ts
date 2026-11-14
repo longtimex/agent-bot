@@ -98,13 +98,19 @@ test("ops diagnostics rounds a fractional backup mtime to a JSON-safe integer", 
     const archive = join(backupDir, "backup-20261110-151932109.tar.gz")
     writeFileSync(archive, "archive")
     // statSync().mtimeMs can carry a fractional nanosecond remainder on Linux. Kotlin's
-    // Long decoder rejects it, so the API must not forward the raw value.
-    utimesSync(archive, 1_794_323_972.109, 1_794_323_972.109)
-    assert.ok(!Number.isInteger(statSync(archive).mtimeMs), "the fixture must expose a fractional mtime")
+    // Long decoder rejects it, so the API must not forward the raw value. utimesSync takes
+    // microseconds, and Node 24 may print a whole millisecond even when the nanosecond
+    // value is fractional; check the fraction against mtimeNs and the product's floor
+    // against the same mtimeMs the service reads.
+    const seconds = 1_794_323_972.109
+    utimesSync(archive, seconds, seconds)
+    const stat = statSync(archive, { bigint: true })
+    assert.notEqual(stat.mtimeNs % 1_000_000n, 0n, "the fixture must expose a fractional mtime")
+    const expected = Math.floor(statSync(archive).mtimeMs)
 
     const { ops } = makeService(dir, () => undefined)
     const diag = await ops.diagnostics()
-    assert.equal(diag.lastBackupAt, Math.floor(statSync(archive).mtimeMs))
+    assert.equal(diag.lastBackupAt, expected)
     assert.ok(Number.isSafeInteger(diag.lastBackupAt))
   } finally {
     rmSync(dir, { recursive: true, force: true })
