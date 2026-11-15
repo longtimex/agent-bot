@@ -1369,16 +1369,8 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | `scripts/send_mail.js` / `check_inbox.js` | Outlook 收发信（Playwright） |
 | `scripts/x_action.js` | X 发推 / 账号信息 |
 | `scripts/search_image.js` | DuckDuckGo 搜图并保存到 `data/outbox/` |
-| `scripts/x_search_free_servers.mjs` | 搜索免费服务器信息 |
-| `scripts/check_free_site.mjs` | 检查站点是否提供免费额度 |
-| `scripts/sniper_free_vps.mjs` | 免费 VPS 抢注守护进程（读取 `SNIPER_*`） |
 | `scripts/proxy-exec.sh` | 按 `/proxy` 当前启用项注入代理环境后执行命令 |
-| `scripts/check-android-sources.mjs` | 无 Android SDK 时的安卓源码静态门：必需源文件是否缺失、是否被 `.gitignore` 吞掉、Kotlin 括号与字符串是否闭合（`npm run check:android`） |
-| `scripts/check-size.mjs` | 模块体积门禁：超过预算即失败，防止已拆分的文件重新长成超大文件（`npm run check:size`） |
 | `scripts/install-cc-switch.sh` | 下载 cc-switch CLI 到 `./bin`（`npm run cc-switch:install`） |
 | `scripts/restart.sh` | 兼容入口，委托 `npm run bot -- restart` |
-| `scripts/run-current.sh` | 兼容入口，委托 `npm run bot -- run`；优先使用 current release 的构建 |
-| `scripts/apply-release.sh` | 兼容入口，委托 `npm run bot -- restart`（含 pending 激活与回滚） |
 | `scripts/release-health.mjs` | 发布健康探针：API 可用时走 `/health`，Telegram/飞书-only 时校验本次启动自检的 release/PID/时间 |
-| `scripts/publish-android-release.mjs` | 把已签名 APK 复制到 `data/android/releases/`，按实际字节计算 SHA-256/大小并原子更新清单（`npm run release:android`） |
 | `scripts/check-release.mjs` | 发布门禁：类型检查、安卓源码检查、体积预算与全部单元测试（`npm run check:release`） |
