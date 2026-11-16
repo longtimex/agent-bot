@@ -417,7 +417,7 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
     assert.ok(source.includes("ScreenHeader("), `${screen} must use the shared page header`)
     // Dialog titles also use titleLarge. Only the page body before the first dialog
     // should be checked: a detached page title there duplicates ScreenHeader.
-    const pageBody = source.split("AlertDialog(", 1)[0]!
+    const pageBody = source.split("AppDialog(", 1)[0]!
     assert.ok(
       !/Text\("[^"]+", style = MaterialTheme\.typography\.titleLarge\)/.test(pageBody),
       `${screen} still has a detached page title`,

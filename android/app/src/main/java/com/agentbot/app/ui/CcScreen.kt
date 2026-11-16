@@ -133,7 +133,7 @@ fun CcScreen(vm: AppViewModel) {
         AppOutputDialog(
             title = "测速结果",
             text = message,
-            onDismiss = { vm.ccTestMessage = null },
+            onDismiss = vm::clearCcTestMessage,
         )
     }
 

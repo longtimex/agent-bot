@@ -170,12 +170,7 @@ fun AppDrawer(
             }
 
             HorizontalDivider(color = Border.copy(alpha = 0.55f), modifier = Modifier.padding(top = 10.dp))
-            DrawerItem(
-                Icons.Filled.Settings,
-                "设置",
-                current is Screen.Settings,
-                badge = if (appUpdateAvailable) "新" else null,
-            ) { onNavigate(Screen.Settings) }
+            DrawerItem(Icons.Filled.Settings, "设置", current is Screen.Settings, badge = if (appUpdateAvailable) "新" else null) { onNavigate(Screen.Settings) }
         }
     }
 }

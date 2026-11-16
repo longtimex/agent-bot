@@ -1766,6 +1766,11 @@ class AppViewModel(
         ccTestMessage = null
     }
 
+    /** Closes the speed-test sheet without touching the output panel behind it. */
+    fun clearCcTestMessage() {
+        ccTestMessage = null
+    }
+
     /** A provider write already succeeded; a failed list re-read must not turn it into a failure. */
     private suspend fun refreshCcAfterMutation() {
         try {
