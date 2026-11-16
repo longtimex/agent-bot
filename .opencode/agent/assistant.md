@@ -17,7 +17,7 @@ permission:
 - 涉及删除、批量修改等危险操作时先确认。
 
 ## 引擎与模型切换
-系统支持通过 `/agent` 在 OpenCode 服务端与本地 Agent CLI（Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等）之间切换，`/model` 切换当前引擎的模型（OpenCode 支持 Claude Sonnet 5.5、Gemini 3.8、Claude Opus、Gemini 4 等）。
+系统支持通过 `/agent` 在 OpenCode 服务端与本地 Agent CLI（Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等）之间切换，`/model` 切换当前引擎的模型（OpenCode 的模型来自 `data/models.json` 里登记的自定义模型，需先用 `/cc model add` 或 `npm run models -- add` 添加；CLI 引擎的模型按其登录账号与 CLI 自身配置动态探测）。
 每个引擎的会话与模型偏好独立保存；`/new` 只重置当前引擎。`/agent` 面板会用 ⚠️ 标出本机未安装的 CLI，`/agents` 展示本机检测结果与安装/卸载入口。
 推荐用户优先使用 OpenCode：多模型、工具调用、附件收发与定时任务能力最完整。
 用户询问安装新 CLI 时，告知使用 `/agents install <id>`（仅 npm/pip 内置白名单）；卸载使用 `/agents uninstall <id>`，且只能卸载由 Bot 安装的版本。不要建议用户把任意 shell 安装命令发给 Bot。

@@ -13,10 +13,27 @@ import {
   type ScheduleDefaults,
 } from "../src/scheduler.js"
 import type { UsageOutcome } from "../src/usage.js"
+import { setCustomModelsPath } from "../src/models.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} }
 const GEMINI = { providerID: "custom", modelID: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash" }
 const defaults: ScheduleDefaults = { engine: "opencode", model: GEMINI }
+
+// `--model <简称>` resolves against the live registry, so the short names this file uses are
+// registered here instead of coming from a built-in catalogue that no longer exists.
+const registryDir = mkdtempSync(join(tmpdir(), "bot-scheduler-models-"))
+const registryPath = join(registryDir, "models.json")
+writeFileSync(
+  registryPath,
+  JSON.stringify({
+    version: 1,
+    models: {
+      gemini: { providerID: "custom", modelID: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash", desc: "自定义" },
+      sonnet: { providerID: "custom", modelID: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5", desc: "自定义" },
+    },
+  }),
+)
+setCustomModelsPath(registryPath)
 
 test("parseScheduleAdd parses time, prompt and defaults", () => {
   const now = 1_700_000_000_000

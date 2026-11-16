@@ -179,9 +179,11 @@ export function parseAgentModelJson(raw: string): AgentModelCatalogEntry[] | und
       if (!row) continue
       const entry = entryFromRecord(row)
       if (!entry) continue
-      // Codex marks internal models with visibility "hide"; they cannot be selected by a user.
+      // Only an explicit hide drops a row. Codex marks its internal models "hide", but other
+      // CLIs use this field for their own vocabulary ("public", "default"…), and treating an
+      // unknown word as hidden would empty the panel for an account that has models.
       const visibility = textValue(row.visibility)
-      if (visibility && visibility !== "list" && visibility !== "visible") continue
+      if (visibility && /^(hide|hidden)$/i.test(visibility)) continue
       models.push(entry)
     }
     return dedupe(models)
@@ -366,10 +368,8 @@ export class AgentModelCatalog {
     if (!profile || !profile.supportsModel) return undefined
     const value = raw.trim()
     if (!value) return undefined
-    // strictModels is meaningful only for an explicit custom list. A built-in probe
-    // can legitimately have no rows (an account with no access), in which case the
-    // user must still be able to type an id the CLI understands.
-    if (profile.strictModels && profile.models?.length) return undefined
+    // A probe can legitimately have no rows (an account with no access), and a declared
+    // list is only a shortcut, so an id the CLI understands is always allowed through.
     return isSafeModelId(value) ? value : undefined
   }
 
@@ -415,7 +415,14 @@ export class AgentModelCatalog {
     // covers a profile that declares both while its binary is not installed on this host.
     // Built-in profiles have no such list anymore, so this never resurrects a stale builtin.
     if ((!profile.modelProbe || !binPath) && profile.models?.length) {
-      return { models: profile.models, source: "configured", hint: profile.modelHint }
+      // The catalogue is the profile's own declaration, so it stays visible either way —
+      // but a missing binary must say so, otherwise a tap can only fail at spawn time.
+      const missing = binPath ? undefined : `未检测到 ${profile.bin}，以下模型来自 profile 配置，安装后才能使用。`
+      return {
+        models: profile.models,
+        source: "configured",
+        hint: [missing, profile.modelHint].filter(Boolean).join(" ") || undefined,
+      }
     }
     if (!binPath) {
       return {
@@ -433,7 +440,10 @@ export class AgentModelCatalog {
       const models = parseAgentModelOutput(result.stdout, profile.modelProbe.format)
       if (models?.length) {
         this.#log?.info(`discovered ${models.length} model(s) for ${profile.id}`)
-        return { models, source: "probe", checkedAt: new Date(this.#now()).toISOString() }
+        // A full page means the CLI may have rows the panel cannot show; say so instead
+        // of silently presenting a truncated list as the whole account catalogue.
+        const hint = models.length >= MAX_MODELS ? `模型较多，仅列出前 ${MAX_MODELS} 个。` : undefined
+        return { models, source: "probe", checkedAt: new Date(this.#now()).toISOString(), hint }
       }
       const hint = models
         ? `${profile.label} 当前账号没有可用模型。`

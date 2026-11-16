@@ -748,7 +748,7 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 AppTextField(
                     value = model,
                     onValueChange = { model = it },
-                    placeholder = "模型（选填，如 gemini / sonnet）",
+                    placeholder = "模型（选填，如 provider/model）",
                     singleLine = true,
                 )
                 Text(

@@ -11,8 +11,7 @@ import {
 import { dirname, resolve } from "node:path"
 import { clip } from "./messages.js"
 import {
-  AVAILABLE_MODELS,
-  isBuiltinModelKey,
+  findModel,
   reloadCustomModels,
   resolveModelKey,
   setCustomModelsPath,
@@ -204,7 +203,7 @@ export class ModelAdmin {
     if (isRecord(parsed) && isRecord(parsed.models)) {
       for (const [rawKey, rawEntry] of Object.entries(parsed.models)) {
         const key = rawKey.trim().toLowerCase()
-        if (isBuiltinModelKey(key) || models[key]) continue
+        if (models[key]) continue
         const entry = sanitizeEntry(key, rawEntry)
         if (entry) models[key] = entry
       }
@@ -248,10 +247,10 @@ export class ModelAdmin {
   resolveModel(selection: string): ModelInfo {
     const key = resolveModelKey(selection)
     if (key) {
-      const info = AVAILABLE_MODELS[key]
+      const info = findModel(key)
       // A stale alias must not silently produce "undefined/undefined"
       if (!info) throw new Error(`未识别的模型：${selection}。请使用模型简称，或 providerID/modelID。`)
-      return { ...info }
+      return info
     }
 
     const trimmed = selection.trim()
@@ -272,10 +271,9 @@ export class ModelAdmin {
     if (!KEY_RE.test(key)) {
       throw new Error("模型简称只能包含小写字母、数字、点、下划线和连字符，且以字母或数字开头。")
     }
-    if (isBuiltinModelKey(key)) throw new Error(`模型简称 ${key} 与内置模型冲突，请换一个。`)
     const aliasTarget = resolveModelKey(key)
     if (aliasTarget && aliasTarget !== key) {
-      throw new Error(`模型简称 ${key} 与内置别名冲突（已对应 ${aliasTarget}），请换一个。`)
+      throw new Error(`模型简称 ${key} 与已有模型 ${aliasTarget} 的 ID/名称冲突，请换一个。`)
     }
 
     const providerID = input.providerID.trim()
@@ -286,8 +284,8 @@ export class ModelAdmin {
     const registry = this.#readRegistry()
     this.#assertRegistryWritable()
     if (registry.models[key]) throw new Error(`模型 ${key} 已存在，请先删除后再添加。`)
-    const clash = Object.entries(AVAILABLE_MODELS).find(
-      ([existingKey, info]) => existingKey === key || (existingKey !== key && info.modelID === modelID && info.providerID === providerID),
+    const clash = Object.entries(registry.models).find(
+      ([, info]) => info.modelID === modelID && info.providerID === providerID,
     )
     if (clash) throw new Error(`模型 ${providerID}/${modelID} 已作为 ${clash[0]} 存在。`)
 

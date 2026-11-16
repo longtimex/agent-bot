@@ -979,6 +979,19 @@ test("api switch engine, reset session and list models", async () => {
 
 test("api model switch matches Telegram's reset-word and context rules", async () => {
   await withApi(async () => "ok", async (h) => {
+    // `opus` is a user-registered short name now, not a built-in catalogue entry
+    const registered = await fetch(`${h.base}/api/v1/models/custom`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        key: "opus",
+        providerID: "custom",
+        modelID: "claude-opus-5-5-high",
+        label: "Claude Opus 5.5",
+      }),
+    })
+    assert.equal(registered.status, 200)
+
     const setModel = (body: Record<string, unknown>) =>
       fetch(`${h.base}/api/v1/model`, {
         method: "POST",
@@ -2367,6 +2380,19 @@ test("api task engine override runs that engine and leaves the session default a
 
 test("api task model override pins one run without touching the session default", async () => {
   await withApi(async () => "ok", async (h) => {
+    // `gemini` must be registered for a one-off pin to resolve
+    const registered = await fetch(`${h.base}/api/v1/models/custom`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        key: "gemini",
+        providerID: "custom",
+        modelID: "gemini-3.8-flash-high",
+        label: "Gemini 3.8 Flash",
+      }),
+    })
+    assert.equal(registered.status, 200)
+
     await fetch(`${h.base}/api/v1/agent`, {
       method: "POST",
       headers: authHeaders(),
@@ -2610,6 +2636,19 @@ test("api views and edits non-secret env config", async () => {
 
 test("api assigns agent models and exposes read-only cc views", async () => {
   await withApi(async () => "ok", async (h) => {
+    // `sonnet` is a user-registered short name now, not a built-in catalogue entry
+    const registered = await fetch(`${h.base}/api/v1/models/custom`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        key: "sonnet",
+        providerID: "custom",
+        modelID: "claude-sonnet-5-5-high",
+        label: "Claude Sonnet 5.5",
+      }),
+    })
+    assert.equal(registered.status, 200)
+
     const agentDir = join(h.dataDir, ".opencode", "agent")
     mkdirSync(agentDir, { recursive: true })
     writeFileSync(join(agentDir, "reviewer.md"), "---\ndescription: 代码审查\n---\n你是审查员。\n")

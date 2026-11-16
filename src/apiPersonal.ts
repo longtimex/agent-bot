@@ -19,7 +19,7 @@ import type { SessionStore } from "./store.js"
 import type { UsageStore } from "./usage.js"
 import { buildDailyReportData, formatDailyReport, sourceLabel } from "./usageReport.js"
 import { sessionKeyForChat, type ChannelIdResolver } from "./channelRegistry.js"
-import { AVAILABLE_MODELS, type ModelInfo } from "./models.js"
+import type { ModelInfo } from "./models.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 
@@ -747,9 +747,8 @@ export async function modelsView(
   }
   if (engine === "opencode") {
     const custom = deps.models.listCustomModels()
-    const builtin = Object.entries(AVAILABLE_MODELS).map(([key, info]) => ({ key, ...info }))
-    const customEntries = Object.entries(custom).map(([key, info]) => ({ key, ...info }))
-    return { engine, models: [...customEntries, ...builtin] }
+    const models = Object.entries(custom).map(([key, info]) => ({ key, ...info }))
+    return { engine, models }
   }
   const profile = deps.registry.get(engine)
   if (!profile) throw new ApiError(400, `未知的 Agent 引擎：${engine}`)

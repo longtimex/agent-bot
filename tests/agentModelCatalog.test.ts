@@ -41,20 +41,23 @@ function catalogFor(
   })
 }
 
-test("the model parsers understand Codex JSON and hide internal models", () => {
+test("the model parsers understand Codex JSON and hide only explicitly hidden models", () => {
   const parsed = parseAgentModelJson(
     JSON.stringify({
       data: [
         { slug: "gpt-visible", display_name: "GPT Visible", visibility: "list", description: "chat" },
         { slug: "codex-hidden", display_name: "Hidden", visibility: "hide" },
         { slug: "gpt-other", display_name: "GPT Other", visibility: "visible" },
+        // Another CLI's vocabulary must not be read as "hidden": only hide/hidden drops a row
+        { slug: "gpt-public", display_name: "GPT Public", visibility: "public" },
+        { slug: "gpt-default", display_name: "GPT Default", visibility: "default" },
       ],
     }),
   )
-  assert.deepEqual(parsed, [
-    { id: "gpt-visible", label: "GPT Visible", desc: "chat", aliases: undefined },
-    { id: "gpt-other", label: "GPT Other", desc: undefined, aliases: undefined },
-  ])
+  assert.deepEqual(
+    parsed?.map((model) => model.id),
+    ["gpt-visible", "gpt-other", "gpt-public", "gpt-default"],
+  )
 })
 
 test("JSON that merely contains a key or value string is not mistaken for a model", () => {
@@ -239,8 +242,12 @@ test("probe failures stay empty with a useful reason, while custom static lists 
     const configured = await catalogFor(registry).list("custom")
     assert.deepEqual(configured.models.map((model) => model.id), ["fast"])
     assert.equal(configured.source, "configured")
-    assert.equal(configured.hint, undefined)
+    // The binary is absent on this host, so the declared catalogue has to say so instead of
+    // looking like a live list the user can pick from.
+    assert.match(configured.hint ?? "", /未检测到/)
     assert.equal(registry.declaresModel("custom", "f"), true)
+    // A declared list never blocks an id the CLI understands
+    assert.equal(catalogFor(registry).resolve("custom", "not-listed"), "not-listed")
 
     const installed = new AgentModelCatalog(registry, {
       log,
@@ -261,6 +268,43 @@ test("probe failures stay empty with a useful reason, while custom static lists 
 
     const noModels = await catalogFor(registry).list("qoder")
     assert.deepEqual(noModels.models, [], "a Qoder account without models must not resurrect stale variants")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a catalogue past the page cap reports the truncation instead of hiding it", async () => {
+  const dir = tempDir("bot-model-cap-")
+  const path = join(dir, "agents.json")
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        agents: {
+          huge: {
+            label: "Huge CLI",
+            bin: "huge-not-on-path",
+            supportsModel: true,
+            modelProbe: { args: ["models"], format: "lines" },
+            args: {},
+          },
+        },
+      }),
+    )
+    const registry = new AgentCliRegistry({ path, log })
+    const catalog = new AgentModelCatalog(registry, {
+      log,
+      which: () => "/fake/huge",
+      run: async () => ({
+        code: 0,
+        stdout: Array.from({ length: 205 }, (_, index) => `model-${index}`).join("\n"),
+        stderr: "",
+      }),
+      env: () => ({}),
+    })
+    const result = await catalog.list("huge")
+    assert.equal(result.models.length, 200)
+    assert.match(result.hint ?? "", /仅列出前 200/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

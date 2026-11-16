@@ -3,7 +3,7 @@ import type { AgentCliProfile, AgentCliService } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"
-import { AVAILABLE_MODELS, reloadCustomModels } from "./models.js"
+import { listModels } from "./models.js"
 import type { ReminderService } from "./reminders.js"
 import type { ScheduleService } from "./scheduler.js"
 import type { SessionStore } from "./store.js"
@@ -290,15 +290,12 @@ export class TelegramCorePanels {
       }
     }
 
-    reloadCustomModels()
     const current = this.#deps.currentModel(key)
-    const currentInfo = current
-      ? Object.values(AVAILABLE_MODELS).find(
-          (item) => item.providerID === current.providerID && item.modelID === current.modelID,
-        )
-      : undefined
     const keyboard = new InlineKeyboard()
-    const entries = Object.entries(AVAILABLE_MODELS)
+    const entries = Object.entries(listModels())
+    const currentInfo = current
+      ? entries.find(([, item]) => item.providerID === current.providerID && item.modelID === current.modelID)?.[1]
+      : undefined
     const limit = 40
     let models = entries.slice(0, limit)
     if (entries.length > limit) {
@@ -320,10 +317,14 @@ export class TelegramCorePanels {
     keyboard.row().text("🔄 刷新", "show:model").text("⬅️ 主菜单", "show:menu")
     const hidden =
       entries.length > models.length ? `\n_另有 ${entries.length - models.length} 个模型未显示，可用 \`/model 简称\` 直接切换。_` : ""
+    const hint =
+      entries.length === 0
+        ? "还没有添加任何自定义模型。用 `/cc model add <简称> <provider>/<modelID>` 添加后即可在这里切换。"
+        : "点击下方按钮切换，或发送 `/model 简称`。"
     const text =
       `🧠 *OpenCode 模型*\n\n当前：*${escapeMarkdown(current?.label ?? "由 OpenCode 决定")}*` +
       `${currentInfo ? `\n_${escapeMarkdown(currentInfo.desc)}_` : ""}\n\n` +
-      `点击下方按钮切换，或发送 \`/model 简称\`。未指定时由 OpenCode 自身配置决定。\n切换后会重置当前会话上下文。${hidden}`
+      `${hint}未指定时由 OpenCode 自身配置决定。\n切换后会重置当前会话上下文。${hidden}`
     return { text, keyboard }
   }
 

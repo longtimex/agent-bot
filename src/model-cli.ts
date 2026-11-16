@@ -2,7 +2,7 @@ import { resolve } from "node:path"
 import process from "node:process"
 import { pathToFileURL } from "node:url"
 import { loadDotEnvFile } from "./config.js"
-import { AVAILABLE_MODELS, resolveModelKey } from "./models.js"
+import { resolveModelKey } from "./models.js"
 import { ModelAdmin, type LiveSessionModels } from "./modelAdmin.js"
 import { SessionStore } from "./store.js"
 import type { Logger } from "./logger.js"
@@ -92,7 +92,7 @@ function positiveInt(value: string | true | undefined, label: string): number | 
 function splitRef(ref: string): { providerID: string; modelID: string } {
   const slash = ref.indexOf("/")
   if (slash <= 0 || slash === ref.length - 1) {
-    throw new Error(`模型请使用 providerID/modelID 形式，例如 custom/gemini-4-argon-high（收到：${ref}）`)
+    throw new Error(`模型请使用 providerID/modelID 形式，例如 myprovider/your-model-id（收到：${ref}）`)
   }
   return { providerID: ref.slice(0, slash).trim(), modelID: ref.slice(slash + 1).trim() }
 }
@@ -218,7 +218,7 @@ function main(): void {
     const selection = rest[0]
     if (!selection) throw new Error("用法：npm run models -- show <简称|providerID/modelID>")
     const key = resolveModelKey(selection)
-    const model = key ? AVAILABLE_MODELS[key]! : admin.resolveModel(selection)
+    const model = admin.resolveModel(selection)
     console.log(`${key ?? "（未登记）"} -> ${model.providerID}/${model.modelID}（${model.label}）\n${model.desc}`)
     return
   }

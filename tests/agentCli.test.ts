@@ -121,6 +121,9 @@ test("registry loads custom profiles, overrides builtins and ignores invalid ent
             args: { prompt: ["--ask", "{prompt}"] },
             models: { fast: "Fast Mode" },
           },
+          // A profile copied from an old config still carries strictModels; the field is gone
+          // and must not turn the declared list back into a whitelist.
+          legacy: { bin: "x", models: { fast: "Fast" }, strictModels: true },
           "Bad Id": { bin: "x" },
           badplaceholder: { bin: "x", args: { prompt: ["{nope}"] } },
           badinstall: { bin: "x", installSpec: { method: "npm", package: "foo; rm -rf /" } },
@@ -137,6 +140,10 @@ test("registry loads custom profiles, overrides builtins and ignores invalid ent
     assert.deepEqual(custom.args.prompt, ["--ask", "{prompt}"])
     assert.equal(registry.resolveModel("mycli", "fast mode"), "fast")
     assert.equal(registry.resolveModel("mycli", "anything-else"), "anything-else")
+    // Declared models are a shortcut, never a whitelist — the flag that used to lock the
+    // Qoder profile to two hard-coded ids must have no effect.
+    assert.equal(registry.resolveModel("legacy", "fast"), "fast")
+    assert.equal(registry.resolveModel("legacy", "unlisted-model"), "unlisted-model")
 
     assert.equal("defaultModel" in profileById(registry, "qoder"), false)
 

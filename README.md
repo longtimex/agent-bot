@@ -158,7 +158,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 或飞书聊天里发 `/api` 查看配对信息。
 - **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等 14 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
-- **多模型切换**：Claude Sonnet/Opus、Gemini 3.8/4、Grok 4.7、GPT OSS、DeepSeek、GLM、MiMo、Nemotron 等。
+- **多模型切换**：OpenCode 的模型由你自己登记（`/cc model add` 或 `npm run models -- add` 写入 `data/models.json`），provider/model 任意组合；CLI 引擎的模型按登录账号与 CLI 自身配置动态探测，不再内置推荐列表。
 - **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
 - **magpie 集成**：`/magpie` 面板与 `/magpie <命令>` 管理 magpie 模型网关（Provider、各 Agent 的模型、路由组、配额、用量、守护进程），`/magpie run` 透传非交互命令；危险操作先确认，密钥与 Token 自动打码，并提供 `/api/v1/magpie/*` 给脚本与后续 App 面板使用。
 - **模型管理**：`/cc model` 或 `npm run models` 为 Bot 与其他 agent 添加/删除模型、同步 `opencode.json`、指定 agent 模型，改动无需重启。
@@ -712,7 +712,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 - `sessionMode`：`preassign` / `capture` / `stateless`；`parse`：`text` / `json-result` / `jsonl-result` / `claude-json` / `codex-jsonl` / `gemini-stream`。
 - `args` 支持 `base`、`resumeBase`（续接时替换 `base`）、`newSession`、`resumeSession`、`cwd`、`model`、`prompt`；占位符为 `{workDir}`、`{sessionId}`、`{model}`、`{prompt}`。消息正文若以 `-` 开头（例如粘贴的 `- 项目符号` 列表），会自动补一个空格，避免它被 CLI 当成命令行开关。
 - `modelProbe` 可选，为自定义 CLI 指定固定的非交互查询命令：`args` 是 argv 数组（不经过 shell），`format` 为 `auto` / `json` / `lines`，`timeoutMs` 在 1000–120000 之间。支持 `{"models": [...]}`、`{"data": [...]}`、数组及每行一个 `provider/model` 的常见输出；Codex 的 `visibility: "hide"` 条目会被过滤。探测结果缓存 60 秒，`/models?refresh=1` 或面板的「重新探测」会强制刷新。
-- 自定义档案仍可写 `models`（`{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`）作为兼容路径，仅在 CLI 不可执行且没有探测命令时使用；`strictModels: true` 时只接受列表内模型，否则安全的模型 ID 可透传给 CLI。无论哪条路径，都不接受以 `-` 开头、含控制字符或超过 120 字符的值，避免它被 CLI 解析成额外的命令行开关。
+- 自定义档案仍可写 `models`（`{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`）作为兼容路径，仅在 CLI 不可执行且没有探测命令时使用；这个列表只是快捷方式，不是白名单——列表外的模型 ID 仍会透传给 CLI（`strictModels` 已移除）。无论哪条路径，都不接受以 `-` 开头、含控制字符或超过 120 字符的值，避免它被 CLI 解析成额外的命令行开关。
 - `resumeErrorPattern` 是识别“会话失效”的正则，命中后清空会话并重试一次；`env` 可附加进程环境变量。
 - `installSpec` 可选，仅接受 `method: "npm" | "pip"` 与合法包名；Bot 只会执行固定的 `npm install -g` / `python3 -m pip install --user` 命令，不会把包名拼进 shell。
 - id 必须匹配 `^[a-z0-9][a-z0-9._-]*$`，`opencode` 保留给服务端引擎；未知占位符、非法正则或缺少 `bin` 的条目会记录警告并被忽略。`amazonq` / `kiro` 的非交互参数可能随版本变化，标为实验性。
@@ -1234,9 +1234,9 @@ AI 也可在 bash 中执行 `npm run models -- <子命令>`：
 ```bash
 npm run models -- list
 npm run models -- agents
-npm run models -- add argon2 custom/gemini-4-argon-high --label "Gemini 4 Argon" --attach --context 200000
-npm run models -- del argon2 --force
-npm run models -- assign self argon2
+npm run models -- add fast myprovider/your-model-id --label "My Model" --attach --context 200000
+npm run models -- del fast --force
+npm run models -- assign self fast
 ```
 
 - 自定义模型保存在 `data/models.json`（权限 600），`add` 会同步写入 `opencode.json` 对应 provider 的 `models`，`/model` 立即可选。`/cc model add` 支持 `--attachment`（声明支持图片输入）、`--context 200000`（上下文窗口）与 `--output 64000`（输出上限），效果与 CLI 的 `--attach` / `--context` 相同。

@@ -23,7 +23,7 @@ import { AgentCliInstaller } from "./agentInstaller.js"
 import { AgentModelCatalog } from "./agentModelCatalog.js"
 import { appVersion } from "./version.js"
 import {
-  AVAILABLE_MODELS,
+  findModel,
   resolveModelKey,
   type ModelInfo,
 } from "./models.js"
@@ -1297,7 +1297,7 @@ export class TelegramBridge {
           return
         }
         const targetKey = resolveModelKey(data.slice("model:".length))
-        const target = targetKey ? AVAILABLE_MODELS[targetKey] : undefined
+        const target = findModel(targetKey)
         if (!target) {
           await answer("模型不存在")
           return

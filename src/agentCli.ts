@@ -85,7 +85,6 @@ export interface AgentCliProfile {
   sessionMode: CliSessionMode
   parse?: CliParseMode
   supportsModel?: boolean
-  strictModels?: boolean
   modelHint?: string
   models?: AgentCliModel[]
   /** Replaces a hard-coded model list with a live query against the installed CLI. */
@@ -262,7 +261,6 @@ function mergeProfile(id: string, raw: Record<string, unknown>, base?: AgentCliP
     typeof raw.supportsModel === "boolean"
       ? raw.supportsModel
       : (base?.supportsModel ?? (Boolean(modelProbe) || (models?.length ?? 0) > 0))
-  const strictModels = typeof raw.strictModels === "boolean" ? raw.strictModels : (base?.strictModels ?? false)
 
   const args = parseArgs(raw.args, label) ?? {}
   const mergedArgs: AgentCliArgs = { ...base?.args, ...args }
@@ -288,7 +286,6 @@ function mergeProfile(id: string, raw: Record<string, unknown>, base?: AgentCliP
     sessionMode,
     parse,
     supportsModel,
-    strictModels,
     modelHint: typeof raw.modelHint === "string" ? raw.modelHint : base?.modelHint,
     models,
     modelProbe,
@@ -429,13 +426,16 @@ export class AgentCliRegistry {
       if (norm(model.id) === normalized || norm(model.label) === normalized) return model.id
       if (model.aliases?.some((alias) => norm(alias) === normalized)) return model.id
     }
-    return profile.strictModels || !MODEL_ARG_RE.test(value) ? undefined : value
+    // Anything the CLI understands is accepted: a declared list is a shortcut, never a
+    // whitelist. Refusing unknown ids was what left the old Qoder profile stuck on two
+    // hand-written models the account could not actually run.
+    return MODEL_ARG_RE.test(value) ? value : undefined
   }
 
   /**
-   * Whether the engine lists this word as one of its own models. A profile without
-   * `strictModels` accepts any string, so without this check `/model default` would set
-   * a model literally named "default" instead of dropping the session's selection.
+   * Whether the engine lists this word as one of its own models. Any profile accepts an
+   * unknown id as a passthrough, so without this check `/model default` would set a model
+   * literally named "default" instead of dropping the session's selection.
    */
   declaresModel(engine: string, raw: string): boolean {
     const profile = this.get(engine)

@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writ
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
-import { AVAILABLE_MODELS, resolveModelKey } from "../src/models.js"
+import { findModel, resolveModelKey } from "../src/models.js"
 import { ModelAdmin, type LiveSessionModels } from "../src/modelAdmin.js"
 
 interface Fixture {
@@ -67,7 +67,7 @@ test("ModelAdmin.add registers a model and syncs opencode.json", () => {
     assert.equal(config.provider.custom.models["zeta-1"].name, "Zeta One")
 
     assert.equal(resolveModelKey("zeta"), "zeta")
-    assert.equal(AVAILABLE_MODELS.zeta!.modelID, "zeta-1")
+    assert.equal(findModel("zeta")?.modelID, "zeta-1")
     assert.equal(fx.admin.listCustomModels().zeta!.providerID, "custom")
   } finally {
     fx.cleanup()
@@ -88,11 +88,14 @@ test("ModelAdmin.add accepts model ids that shadow Object.prototype names", () =
   }
 })
 
-test("ModelAdmin.add rejects builtin keys, duplicates and alias clashes", () => {  const fx = createFixture()
+test("ModelAdmin.add takes names the old builtin catalogue reserved, and still rejects clashes", () => {
+  const fx = createFixture()
   try {
-    assert.throws(() => fx.admin.add({ key: "gemini", providerID: "custom", modelID: "x" }), /内置模型冲突/)
-    assert.throws(() => fx.admin.add({ key: "sonnet", providerID: "custom", modelID: "x" }), /内置模型冲突/)
-    assert.throws(() => fx.admin.add({ key: "claude", providerID: "custom", modelID: "x" }), /别名冲突/)
+    // `gemini` and `sonnet` used to be built-in keys; with no catalogue they are ordinary names
+    assert.equal(fx.admin.add({ key: "gemini", providerID: "custom", modelID: "gemini-x" }).key, "gemini")
+    assert.equal(fx.admin.add({ key: "sonnet", providerID: "custom", modelID: "sonnet-x" }).key, "sonnet")
+    // A key spelled like an existing model's ID still clashes
+    assert.throws(() => fx.admin.add({ key: "gemini-x", providerID: "custom", modelID: "other" }), /冲突/)
     assert.throws(() => fx.admin.add({ key: "base", providerID: "custom", modelID: "base" }), /已存在/)
     assert.throws(() => fx.admin.add({ key: "Bad Key", providerID: "custom", modelID: "x" }), /只能包含/)
   } finally {
@@ -226,10 +229,13 @@ test("ModelAdmin.assignAgent keeps $-sequences in frontmatter literal", () => {
   }
 })
 
-test("ModelAdmin.resolveModel accepts keys and provider/model refs", () => {
+test("ModelAdmin.resolveModel accepts registered keys and provider/model refs", () => {
   const fx = createFixture()
   try {
+    fx.admin.add({ key: "gemini", providerID: "custom", modelID: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash" })
     assert.equal(fx.admin.resolveModel("gemini").modelID, "gemini-3.8-flash-high")
+    // A bare name that was never registered is not a model any more (no built-in catalogue)
+    assert.throws(() => fx.admin.resolveModel("sonnet"), /未识别的模型/)
     assert.deepEqual(
       { providerID: fx.admin.resolveModel("custom/whatever").providerID, modelID: fx.admin.resolveModel("custom/whatever").modelID },
       { providerID: "custom", modelID: "whatever" },

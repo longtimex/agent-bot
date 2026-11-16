@@ -9,6 +9,8 @@ dist/
 .codex/
 bin/
 deploy/generated/
+# Local assistant memory: useful across sessions, never part of the product
+.workbuddy/
 
 # Android toolchain output. Anchored: an unanchored `build/` would also match
 # source directories, and `local.properties` carries this machine's SDK path.

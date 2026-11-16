@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import type { Logger } from "./logger.js"
 import { writePrivateAtomic } from "./jsonStore.js"
 import { clip } from "./messages.js"
-import { AVAILABLE_MODELS, resolveModelKey } from "./models.js"
+import { findModel, resolveModelKey } from "./models.js"
 import {
   DEFAULT_TIMEZONE,
   nextReminderDue,
@@ -86,7 +86,10 @@ interface StoredTask extends Partial<ScheduledTask> {
 }
 
 function modelFromInfo(key: string): ScheduledModel {
-  const info = AVAILABLE_MODELS[key]!
+  const info = findModel(key)
+  // The registry can change between parsing `--model` and this lookup, so the entry is
+  // checked again instead of asserted: a deleted model must fail as a message, not a crash.
+  if (!info) throw new Error(`模型 ${key} 已不存在，请用 --model 重新指定。`)
   return { providerID: info.providerID, modelID: info.modelID, label: info.label }
 }
 

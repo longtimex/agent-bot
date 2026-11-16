@@ -169,9 +169,9 @@ fun ModelsScreen(vm: AppViewModel) {
     assigning?.let { agent ->
         TextPromptDialog(
             title = "绑定 Agent 模型",
-            hint = "为 $agent 指定模型：可用简称（sonnet、gpt-5）或 provider/modelID；绑定 self 会同时切换当前会话（上下文重置）。",
+            hint = "为 $agent 指定模型：可用已登记的简称，或 provider/modelID；绑定 self 会同时切换当前会话（上下文重置）。",
             confirmLabel = "绑定",
-            placeholder = "sonnet",
+            placeholder = "provider/modelID 或简称",
             error = vm.modelActionError.takeIf { vm.modelDraftRejected },
             onDismiss = { assigning = null },
             onConfirm = { model ->

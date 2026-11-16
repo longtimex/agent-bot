@@ -6,7 +6,7 @@ import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { resolveOpencodeModel } from "./engineCall.js"
 import type { Logger } from "./logger.js"
 import { escapeMarkdown, type Panel } from "./messages.js"
-import { AVAILABLE_MODELS, MODEL_DEFAULT_WORDS, resolveModelKey, type ModelInfo } from "./models.js"
+import { MODEL_DEFAULT_WORDS, findModel, listModels, resolveModelKey, type ModelInfo } from "./models.js"
 import type { Opencode } from "./opencode.js"
 import type { SessionStore } from "./store.js"
 import type { Job } from "./telegram.js"
@@ -172,7 +172,7 @@ export class TelegramModelCommands {
     }
 
     const targetKey = resolveModelKey(arg)
-    const targetModel = targetKey ? AVAILABLE_MODELS[targetKey] : undefined
+    const targetModel = findModel(targetKey)
 
     // Same rule as the CLI branch: a model really named `auto` stays reachable
     if (!targetModel && MODEL_DEFAULT_WORDS.has(arg.trim().toLowerCase())) {
@@ -181,10 +181,12 @@ export class TelegramModelCommands {
     }
 
     if (!targetModel) {
-      const valid = Object.keys(AVAILABLE_MODELS).join(", ")
+      const valid = Object.keys(listModels()).join(", ")
       await this.#deps.sendText(
         job.chatId,
-        `❌ 未识别的模型名称：\`${escapeMarkdown(arg)}\`\n\n可选简称有：\`${valid}\`\n发送 \`/model\` 可查看详细列表。`,
+        valid
+          ? `❌ 未识别的模型名称：\`${escapeMarkdown(arg)}\`\n\n可选简称有：\`${valid}\`\n发送 \`/model\` 可查看详细列表。`
+          : `❌ 未识别的模型名称：\`${escapeMarkdown(arg)}\`\n\n还没有添加任何自定义模型。用 \`/cc model add <简称> <provider>/<modelID>\` 添加后再试。`,
       )
       return
     }

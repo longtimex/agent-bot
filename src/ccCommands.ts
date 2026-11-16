@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto"
 import type { Context } from "grammy"
 import { InlineKeyboard } from "grammy"
 import { escapeMarkdown, clip, pruneChatState, type Panel } from "./messages.js"
-import { AVAILABLE_MODELS, reloadCustomModels } from "./models.js"
+import { reloadCustomModels } from "./models.js"
 import { CC_HELP, CC_SUB_ALIASES } from "./help.js"
 import {
   CcSwitchService,
@@ -262,10 +262,9 @@ export class CcCommands {
     reloadCustomModels()
     const custom = this.#models.listCustomModels()
     const keys = Object.keys(custom).sort()
-    const total = Object.keys(AVAILABLE_MODELS).length
     const agents = this.#models.listAgents()
 
-    const lines = ["🧠 *模型管理*", `内置模型：${total - keys.length} 个 · 自定义：${keys.length} 个`]
+    const lines = ["🧠 *模型管理*", `自定义模型：${keys.length} 个`]
     // Telegram rejects messages over 4096 chars; cap the dynamic sections and leave room for the fixed block below
     let used = lines.join("\n").length
     const push = (line: string): boolean => {
@@ -907,7 +906,7 @@ export class CcCommands {
         await this.#host.sendTextMessage(
           chatId,
           "用法：`/cc model add <简称> <provider>/<modelID> [显示名称] [参数]`\n" +
-            "例如：`/cc model add argon2 custom/gemini-4-argon-high Gemini 4 Argon`\n" +
+            "例如：`/cc model add fast myprovider/your-model-id My Model`\n" +
             "参数：`--attachment` 声明支持图片，`--context 200000` 上下文窗口，`--output 64000` 输出上限。",
         )
         return

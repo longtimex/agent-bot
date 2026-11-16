@@ -524,7 +524,7 @@ private fun ProviderCreateDialog(
                         value = model,
                         onValueChange = { model = it },
                         singleLine = true,
-                        placeholder = "模型 ID，例如 claude-sonnet-4",
+                        placeholder = "模型 ID，例如 provider/model-id",
                     )
                 }
                 AppTextField(
