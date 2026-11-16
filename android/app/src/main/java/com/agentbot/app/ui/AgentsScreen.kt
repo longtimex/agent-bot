@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExtensionOff
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -291,7 +290,7 @@ fun AgentsScreen(vm: AppViewModel) {
             "update" -> request.agent.updateCommand
             else -> request.agent.uninstallCommand
         }
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pending = null },
             title = { Text("确认$verb ${request.agent.label}？", style = MaterialTheme.typography.titleLarge) },
             text = {

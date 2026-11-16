@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -158,7 +157,7 @@ fun AccessScreen(vm: AppViewModel) {
     }
 
     pendingRemove?.let { id ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("移除 $id？", style = MaterialTheme.typography.titleLarge) },
             text = {

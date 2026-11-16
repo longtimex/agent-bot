@@ -19,7 +19,6 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -304,7 +303,7 @@ fun SessionScreen(vm: AppViewModel) {
         )
     }
     followTarget?.let { peer ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { followTarget = null },
             title = { Text("跟随${peer.label}？") },
             text = {
@@ -340,7 +339,7 @@ fun SessionScreen(vm: AppViewModel) {
 private fun DirBrowserDialog(vm: AppViewModel, onDismiss: () -> Unit) {
     val listing = vm.dirBrowse
     val busy = vm.dirBrowseBusy
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("选择工作目录") },
         text = {
@@ -608,7 +607,7 @@ fun QueueScreen(vm: AppViewModel) {
     }
 
     if (confirmClear) {
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text("清空排队？") },
             text = { Text("只取消正在排队等待的任务，正在执行的任务不受影响。") },

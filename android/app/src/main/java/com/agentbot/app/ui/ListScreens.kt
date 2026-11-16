@@ -28,7 +28,6 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.IosShare
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -349,7 +348,7 @@ fun HistoryScreen(vm: AppViewModel) {
             }
         }
         selected?.let { entry ->
-            AlertDialog(
+            AppDialog(
                 onDismissRequest = { selected = null },
                 title = { Text("任务详情") },
                 text = {
@@ -396,7 +395,7 @@ fun HistoryScreen(vm: AppViewModel) {
         }
     }
     if (confirmClear) {
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text("清空任务历史？") },
             text = { Text("将删除服务端保留的全部任务记录（最多 50 条），且无法恢复；聊天里已显示的消息不受影响。") },
@@ -503,7 +502,7 @@ fun RemindersScreen(vm: AppViewModel) {
         }
     }
     deleteTarget?.let { target ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除这条提醒？") },
             text = { Text("「${target.text}」将不再触发，且无法恢复。") },
@@ -530,7 +529,7 @@ fun RemindersScreen(vm: AppViewModel) {
         )
     }
     snoozeTarget?.let { target ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { snoozeTarget = null },
             title = { Text("延后提醒") },
             text = {
@@ -676,7 +675,7 @@ fun SchedulesScreen(vm: AppViewModel) {
         }
     }
     deleteTarget?.let { target ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除这个定时任务？") },
             text = { Text("「${target.prompt}」将不再按计划执行，且无法恢复。") },
@@ -711,7 +710,7 @@ private fun ScheduleAddDialog(vm: AppViewModel, onDismiss: () -> Unit) {
     var engineMenu by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.refreshAgentsQuietly() }
     val engineLabel = engine?.let { id -> vm.agents.firstOrNull { it.id == id }?.label ?: id }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("新建定时任务") },
         text = {

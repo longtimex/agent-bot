@@ -76,7 +76,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -1898,7 +1897,7 @@ private fun ChatInputBar(
             if (enginePicker) {
                 val defaultEngine = vm.session?.engine
                 val defaultLabel = vm.session?.engineLabel ?: defaultEngine ?: "默认"
-                AlertDialog(
+                AppDialog(
                     onDismissRequest = { enginePicker = false },
                     title = { Text("本条消息交给哪个引擎？") },
                     text = {

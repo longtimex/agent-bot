@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -125,7 +124,7 @@ fun AliasesScreen(vm: AppViewModel) {
     }
 
     pendingRemove?.let { name ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("删除快捷指令 /$name？", style = MaterialTheme.typography.titleLarge) },
             text = {

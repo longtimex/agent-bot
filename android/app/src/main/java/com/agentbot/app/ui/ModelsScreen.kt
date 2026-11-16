@@ -14,7 +14,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -182,7 +181,7 @@ fun ModelsScreen(vm: AppViewModel) {
     }
 
     pendingRemove?.let { key ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("删除模型 $key？", style = MaterialTheme.typography.titleLarge) },
             text = {
@@ -205,7 +204,7 @@ fun ModelsScreen(vm: AppViewModel) {
 
     vm.modelDeleteBlocked?.let { message ->
         val key = vm.modelDeleteBlockedKey
-        AlertDialog(
+        AppDialog(
             onDismissRequest = vm::clearModelDeleteBlocked,
             title = { Text("模型仍在使用中", style = MaterialTheme.typography.titleLarge) },
             text = { Text(message, style = MaterialTheme.typography.bodyMedium) },

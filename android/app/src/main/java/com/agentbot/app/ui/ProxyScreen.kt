@@ -19,7 +19,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -160,7 +159,7 @@ fun ProxyScreen(vm: AppViewModel) {
     }
 
     pendingRemove?.let { proxy ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("删除代理？", style = MaterialTheme.typography.titleLarge) },
             text = {

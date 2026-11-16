@@ -24,7 +24,6 @@ import androidx.compose.material.icons.filled.InstallDesktop
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +54,10 @@ import com.agentbot.app.ui.theme.TextTertiary
  * arguments stay Telegram-only on purpose. Words typed in the chat box are
  * resolved here, against the same server list.
  */
+
+/** Placeholder the speed test writes before its result arrives; a sheet for it would flash. */
+private const val CC_TEST_PENDING = "测速中…"
+
 @Composable
 fun CcScreen(vm: AppViewModel) {
     var confirmUse by remember { mutableStateOf<CcProvider?>(null) }
@@ -114,6 +117,24 @@ fun CcScreen(vm: AppViewModel) {
                 }
             }
         }
+    }
+
+    // Output leaves the page through a sheet, so the list stays exactly where the user tapped
+    // instead of pushing a card to the end that they then have to scroll down to find.
+    vm.ccPanelText?.let { text ->
+        AppOutputDialog(
+            title = vm.ccPanelTitle ?: "输出",
+            text = text,
+            onDismiss = vm::clearCcPanel,
+        )
+    }
+    // "测速中…" is the placeholder the result replaces; opening a sheet for it would flash
+    vm.ccTestMessage?.takeIf { it != CC_TEST_PENDING }?.let { message ->
+        AppOutputDialog(
+            title = "测速结果",
+            text = message,
+            onDismiss = { vm.ccTestMessage = null },
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
@@ -218,10 +239,6 @@ fun CcScreen(vm: AppViewModel) {
                         },
                     )
                 }
-                vm.ccTestMessage?.let { message -> item { OutputCard("测速结果", message) } }
-                if (vm.ccPanelText != null) {
-                    item { PanelCard(vm) }
-                }
                 if (vm.ccCommands.isNotEmpty()) {
                     item {
                         ExecCard(
@@ -242,7 +259,7 @@ fun CcScreen(vm: AppViewModel) {
     }
 
     confirmUse?.let { provider ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { confirmUse = null },
             title = { Text("切换 Provider", style = MaterialTheme.typography.titleLarge) },
             text = {
@@ -356,7 +373,7 @@ fun CcScreen(vm: AppViewModel) {
     }
 
     pendingLink?.let { link ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pendingLink = null },
             title = { Text("确认导入", style = MaterialTheme.typography.titleLarge) },
             text = {
@@ -397,7 +414,7 @@ fun CcScreen(vm: AppViewModel) {
     }
 
     confirmExec?.let { (command, target) ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { confirmExec = null },
             title = { Text("确认执行", style = MaterialTheme.typography.titleLarge) },
             text = {
@@ -422,7 +439,7 @@ fun CcScreen(vm: AppViewModel) {
 
     // The bot's guard asks for this one; the words are exactly what cc-switch will receive
     vm.ccRawConfirmation?.let { words ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = vm::dismissCcRaw,
             title = { Text("确认执行", style = MaterialTheme.typography.titleLarge) },
             text = {
@@ -463,7 +480,7 @@ private fun ProviderCreateDialog(
     // cc-switch decides which apps take base/key/model instead of raw JSON
     val fieldMode = meta?.fieldMode ?: true
 
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("新建 Provider", style = MaterialTheme.typography.titleLarge) },
         text = {
@@ -582,7 +599,7 @@ private fun ProviderCreateDialog(
 private fun PromptCreateDialog(onDismiss: () -> Unit, onCreate: (String, String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("新建提示词", style = MaterialTheme.typography.titleLarge) },
         text = {
@@ -895,34 +912,6 @@ private fun OutputCard(title: String, text: String) {
                 color = TextSecondary,
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 modifier = Modifier.padding(top = 7.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun PanelCard(vm: AppViewModel) {
-    val title = vm.ccPanelTitle ?: return
-    val text = vm.ccPanelText ?: return
-    AppCard {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            QuietButton(text = "收起", onClick = vm::clearCcPanel)
-        }
-        SelectionContainer {
-            Text(
-                text.ifBlank { "（无输出）" },
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 7.dp)
-                    .heightIn(max = 320.dp)
-                    .verticalScroll(rememberScrollState()),
             )
         }
     }

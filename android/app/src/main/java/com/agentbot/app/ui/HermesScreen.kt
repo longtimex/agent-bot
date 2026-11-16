@@ -16,7 +16,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -153,7 +152,7 @@ fun HermesScreen(vm: AppViewModel) {
     }
 
     pending?.let { write ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pending = null },
             title = { Text(if (write.action == "set") "确认覆盖" else "确认清空", style = MaterialTheme.typography.titleLarge) },
             text = {

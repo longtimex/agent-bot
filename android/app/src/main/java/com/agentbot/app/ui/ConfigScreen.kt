@@ -16,7 +16,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -179,7 +178,7 @@ fun ConfigScreen(vm: AppViewModel) {
     }
 
     deleting?.let { entry ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { deleting = null },
             title = { Text("删除配置", style = MaterialTheme.typography.titleLarge) },
             text = {

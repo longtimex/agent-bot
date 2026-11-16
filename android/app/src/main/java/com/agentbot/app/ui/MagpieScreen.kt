@@ -17,7 +17,6 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -312,7 +311,7 @@ fun MagpieScreen(vm: AppViewModel) {
     }
 
     vm.magpieConfirmation?.let { words ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = vm::dismissMagpieRun,
             confirmButton = {
                 TextButton(onClick = vm::confirmMagpieRun) { Text("确认执行") }
@@ -332,7 +331,7 @@ fun MagpieScreen(vm: AppViewModel) {
     }
 
     vm.magpieCommandConfirmation?.let { (command, target) ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = vm::dismissMagpieCommand,
             confirmButton = {
                 TextButton(onClick = vm::confirmMagpieCommand) { Text("确认执行") }

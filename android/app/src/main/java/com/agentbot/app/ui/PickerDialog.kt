@@ -1,5 +1,6 @@
 package com.agentbot.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
@@ -56,7 +56,7 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
         vm.refreshAgents()
         vm.refreshModels(force = true)
     }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("关闭") }
@@ -213,8 +213,11 @@ private fun DialogShell(onDismiss: () -> Unit, content: @Composable ColumnScope.
         ) {
             Surface(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 640.dp),
-                shape = RoundedCornerShape(AppRadius.lg),
+                shape = RoundedCornerShape(AppRadius.xl),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                // Same surface/border pair as AppDialog, so the prompt box and the confirmation
+                // box that follows it read as one family.
+                border = BorderStroke(1.dp, Border.copy(alpha = 0.72f)),
             ) {
                 Column(modifier = Modifier.fillMaxWidth(), content = content)
             }
@@ -313,7 +316,7 @@ fun OptionPickerDialog(
     onSelect: (String?) -> Unit,
     allowNone: Boolean = false,
 ) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         title = { Text(title, style = MaterialTheme.typography.titleLarge) },

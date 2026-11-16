@@ -18,7 +18,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -139,7 +138,7 @@ fun OpsScreen(vm: AppViewModel) {
             "service/restart" -> "将重启由 Bot 托管的 OpenCode 服务。" to "重启"
             else -> "确定执行该操作？" to "执行"
         }
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { pending = null },
             title = { Text("$label？", style = MaterialTheme.typography.titleLarge) },
             text = { Text(body, style = MaterialTheme.typography.bodyMedium) },
