@@ -121,6 +121,10 @@ data class AgentInfo(
     val sessionMode: String? = null,
     val supportsModel: Boolean? = null,
     val experimental: Boolean? = null,
+    /** True when this CLI runs tools without asking; the engine list warns about it. */
+    val skipPermissions: Boolean = false,
+    /** True when `AGENT_CLI_SAFE_MODE=1` stripped those flags on the server. */
+    val safeMode: Boolean = false,
     val managed: Boolean = false,
     val installable: Boolean = false,
     val updateable: Boolean = false,

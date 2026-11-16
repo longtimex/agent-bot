@@ -687,6 +687,9 @@ export function builtinAgentView(): Record<string, unknown> {
     supportsModel: true,
     models: undefined,
     experimental: undefined,
+    // The built-in engine runs under the bot's own approval rules, never through a CLI flag
+    skipPermissions: false,
+    safeMode: false,
     managed: false,
     installable: false,
     updateable: false,

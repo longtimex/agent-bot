@@ -62,7 +62,21 @@ jobs:
           gradle-version: "8.9"
       - name: Compile debug APK
         working-directory: android
-        run: gradle :app:assembleDebug --no-daemon
+        # Kotlin errors only exist in the job log, which needs admin rights to download.
+        # Mirror them into the step summary so the check-run API exposes them.
+        run: |
+          set +e
+          gradle :app:assembleDebug --no-daemon 2>&1 | tee /tmp/gradle.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo '### Kotlin errors'
+              echo '```'
+              grep -E "^e: |error: |FAILURE:" /tmp/gradle.log | head -40
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
 
   docker:
     name: docker build
