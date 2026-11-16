@@ -10,6 +10,7 @@ import {
   AgentCliService,
   argvBudgetError,
   buildCliArgs,
+  bypassesPermissionChecks,
   normalizeWorkDirInput,
   parseCliOutput,
   whichSync,
@@ -39,12 +40,12 @@ function profileById(registry: AgentCliRegistry, id: string): AgentCliProfile {
 test("registry ships the mainstream Linux agent CLIs and resolves aliases", () => {
   const registry = new AgentCliRegistry({ log })
   const ids = registry.list().map((profile) => profile.id)
-  for (const id of ["qoder", "claude", "codex", "gemini", "qwen", "cursor", "copilot", "opencode-cli", "aider", "goose", "amp", "droid"]) {
+  for (const id of ["qoder", "claude", "codex", "gemini", "cursor", "copilot", "aider", "goose", "antigravity", "kiro"]) {
     assert.ok(ids.includes(id), `missing builtin profile ${id}`)
   }
 
   assert.equal(registry.resolve("claude-code"), "claude")
-  assert.equal(registry.resolve("QWEN"), "qwen")
+  assert.equal(registry.resolve("AGY"), "antigravity")
   assert.equal(registry.resolve("cursor-agent"), "cursor")
   assert.equal(registry.resolve("q"), "qoder")
   assert.equal(registry.resolve("github-copilot"), "copilot")
@@ -72,7 +73,7 @@ test("built-in profiles carry no hard-coded model catalogue", () => {
   const registry = new AgentCliRegistry({ log })
   // Models are discovered from the installed CLI and the signed-in account. Keeping a
   // second list here would make Qoder/Claude panels show models the account cannot run.
-  for (const id of ["qoder", "claude", "codex", "gemini", "qwen", "cursor", "copilot"]) {
+  for (const id of ["qoder", "claude", "codex", "gemini", "cursor", "copilot", "antigravity"]) {
     assert.equal(profileById(registry, id).models, undefined, `${id} still has a static model list`)
     assert.equal("defaultModel" in profileById(registry, id), false, `${id} still has a default model`)
   }
@@ -104,6 +105,30 @@ test("model ids cannot smuggle extra CLI flags into argv", () => {
   const at = kept.indexOf("--model")
   assert.ok(at >= 0)
   assert.equal(kept[at + 1], "sonnet")
+})
+
+test("safe mode drops the flags that hand every tool call to the CLI", () => {
+  const registry = new AgentCliRegistry({ log })
+  const vars = { workDir: "/tmp", prompt: "hi" }
+
+  const claude = profileById(registry, "claude")
+  const normal = buildCliArgs(claude, vars, false)
+  assert.ok(normal.includes("--dangerously-skip-permissions"))
+  const safe = buildCliArgs(claude, vars, false, { safeMode: true })
+  assert.ok(!safe.includes("--dangerously-skip-permissions"))
+  assert.deepEqual(safe, normal.filter((token) => token !== "--dangerously-skip-permissions"))
+
+  // `--approval-mode yolo` is a pair: leaving "yolo" behind would turn it into a prompt token
+  const gemini = profileById(registry, "gemini")
+  assert.ok(buildCliArgs(gemini, vars, false).includes("yolo"))
+  const geminiSafe = buildCliArgs(gemini, vars, false, { safeMode: true })
+  assert.ok(!geminiSafe.includes("--approval-mode"))
+  assert.ok(!geminiSafe.includes("yolo"))
+
+  assert.equal(bypassesPermissionChecks(claude), true)
+  assert.equal(bypassesPermissionChecks(gemini), true)
+  assert.equal(bypassesPermissionChecks(profileById(registry, "goose")), false)
+  assert.equal(bypassesPermissionChecks(profileById(registry, "antigravity")), true)
 })
 
 test("registry loads custom profiles, overrides builtins and ignores invalid entries", () => {

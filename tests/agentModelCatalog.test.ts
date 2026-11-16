@@ -32,7 +32,7 @@ function catalogFor(
   return new AgentModelCatalog(registry, {
     log,
     // Only the profiles this suite intends to probe are pretended to be installed.
-    which: (profile) => ["qoder", "codex", "gemini", "opencode-cli", "failing"].includes(profile.id)
+    which: (profile) => ["qoder", "codex", "gemini", "failing"].includes(profile.id)
       ? "/fake/agent"
       : undefined,
     run: (profile, _binPath, args) => run(profile, args),
@@ -137,14 +137,10 @@ test("catalog probes each built-in shape and never falls back to a static list",
   const gemini = await catalog.list("gemini")
   assert.deepEqual(gemini.models.map((model) => model.id), ["gemini-3-pro"])
 
-  const opencodeCli = await catalog.list("opencode-cli")
-  assert.deepEqual(opencodeCli.models.map((model) => model.id), ["provider/model-a", "provider/model-b"])
-
   assert.deepEqual(calls, [
     ["qoder", "--list-models"],
     ["codex", "debug", "models"],
     ["gemini", "--list-models", "--output-format", "json"],
-    ["opencode-cli", "models"],
   ])
 })
 
@@ -168,8 +164,8 @@ test("catalog caches a probe, deduplicates concurrent calls and refreshes on dem
       { cacheTtlMs: 60_000, now: () => now },
     )
 
-    const first = catalog.list("opencode-cli")
-    const second = catalog.list("opencode-cli")
+    const first = catalog.list("qoder")
+    const second = catalog.list("qoder")
     await Promise.resolve()
     assert.equal(calls, 1, "two simultaneous panel opens must share one probe")
     release?.()
@@ -177,13 +173,13 @@ test("catalog caches a probe, deduplicates concurrent calls and refreshes on dem
     assert.equal(a.models[0]?.id, "model-1")
     assert.equal(b.models[0]?.id, "model-1")
 
-    assert.equal((await catalog.list("opencode-cli")).models[0]?.id, "model-1")
+    assert.equal((await catalog.list("qoder")).models[0]?.id, "model-1")
     assert.equal(calls, 1, "a cache hit must not spawn another probe")
 
     now += 61_000
-    assert.equal((await catalog.list("opencode-cli")).models[0]?.id, "model-2")
+    assert.equal((await catalog.list("qoder")).models[0]?.id, "model-2")
     assert.equal(calls, 2)
-    assert.equal((await catalog.list("opencode-cli", true)).models[0]?.id, "model-3")
+    assert.equal((await catalog.list("qoder", true)).models[0]?.id, "model-3")
     assert.equal(calls, 3)
   } finally {
     rmSync(dir, { recursive: true, force: true })

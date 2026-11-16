@@ -13,7 +13,7 @@
 ```text
 Telegram  ── Bot API 长轮询 ────┐
 飞书      ── 开放平台长连接 ────┼── Agent Bot ──┬── opencode serve ── 模型 / 工具
-安卓 App  ── HTTP API /api/v1 ──┘               └── Agent CLI ─────── Claude Code / Codex / Gemini / Qwen / Qoder …
+安卓 App  ── HTTP API /api/v1 ──┘               └── Agent CLI ─────── Claude Code / Codex / Gemini / Qoder / Antigravity …
 ```
 
 > 安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
@@ -24,7 +24,7 @@ Telegram  ── Bot API 长轮询 ────┐
 
 `install.sh` 会完成「检查环境 → 获取代码 → 安装依赖 → 构建 → 准备 `.env` → 配置控制端 → 检测/安装可选工具」，适合新服务器首次部署，也适合本地已经克隆仓库后直接安装。交互式终端中可以选择 Telegram、安卓 App、飞书中的一个或多个，随后按编号安装 Agent CLI、magpie 和 cc-switch；安装完成后也可随时运行 `npm run clients` 增补其他控制端。
 
-安装过程中还会自动检测 Claude Code、Codex、Gemini、Qwen 等 Agent CLI，以及 magpie 和 cc-switch。交互终端会列出未安装项，可按编号多选安装；非交互安装只做检测，不会在无人值守时下载第三方二进制。之后可随时运行 `npm run setup:tools` 重新检测或安装。
+安装过程中还会自动检测 Claude Code、Codex、Gemini、Qoder 等 Agent CLI，以及 magpie 和 cc-switch。交互终端会列出未安装项，可按编号多选安装；非交互安装只做检测，不会在无人值守时下载第三方二进制。之后可随时运行 `npm run setup:tools` 重新检测或安装。
 
 ### 前置条件
 
@@ -156,7 +156,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - **飞书自建应用 Bot**：通过长连接接收私聊消息，无需公网地址；命令、面板、附件、提醒、定时任务、运维与访问控制与 Telegram 端完全共用。面板按钮需要可选的公网 HTTP 卡片回调（飞书 SDK 长连接不分发卡片回调），不启用时文字命令仍可用。飞书单聊中 @ 机器人或直接发命令均可；群聊默认忽略。
 - **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/视频/文件附件、语音消息、单条消息临时换引擎、图片/视频/语音回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
 - **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 或飞书聊天里发 `/api` 查看配对信息。
-- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等 14 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
+- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qoder、Antigravity、Cursor、Copilot、Aider、Goose、Kiro 等 10 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
 - **多模型切换**：OpenCode 的模型由你自己登记（`/cc model add` 或 `npm run models -- add` 写入 `data/models.json`），provider/model 任意组合；CLI 引擎的模型按登录账号与 CLI 自身配置动态探测，不再内置推荐列表。
 - **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
@@ -608,7 +608,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
 | `GET /ops/check-update?async=1` · `GET /ops/actions/:id` | 长任务版本：立即返回 `{job:{id,state}}`（202），随后轮询任务结果。公网反向代理常在 20–30 秒断开同步请求，App 用这一对接口取回检查与构建结果；`GET /ops/actions/latest?label=<action>` 可在首个响应丢失后重连 |
-| `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；聊天端的 `/ops` 面板也可发送同一份备份 |
+| `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；聊天端的 `/ops` 面板也可发送同一份备份。**恢复只在终端做**：`npm run backup:restore -- --list` 列出备份，`npm run backup:restore -- --file backup-YYYYMMDD-HHMMSSmmm.tar.gz` 恢复；恢复前会自动把当前 JSON 快照到 `data/backups/pre-restore-<时间>/`，且拒绝含路径条目的压缩包 |
 | `GET /ops/release` | 轻量版本卡：current/pending/previous release、stable/beta 通道、最近更新与启动自检；App 轮询它而不触发完整诊断探针 |
 | `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（npm run check）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏。加 `?async=1` 时立即返回 `{job:{id,state}}`，再用 `GET /ops/actions/:id` 轮询，适合会切断长请求的隧道；不带该参数时保持原来的同步响应 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
@@ -630,22 +630,20 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 
 启动时会扫描 `PATH`，`/start` 欢迎页、`/agent` 面板和 `/agents` 管理面板都会展示检测结果；`/agent` 面板按“已安装优先”排序，并用 ⚠️ 标出未安装的 CLI；`/agent <id>` 会显示安装方式与模型提示。
 
+<!-- BEGIN AGENT TABLE: edited by `npm run docs:agents`, do not hand-edit -->
 | id | 名称 | 可执行文件 | 会话 | 模型发现 |
 | --- | --- | --- | --- | --- |
-| `qoder` | Qoder CLI | `qoder` | 预分配 | `qoder --list-models` |
+| `qoder` | Qoder CLI | `qoder` | 续接 | `qoder --list-models` |
 | `claude` | Claude Code | `claude` | 续接 | 无列表命令，模型 ID 透传 |
 | `codex` | Codex CLI | `codex` | 捕获续接 | `codex debug models` |
 | `gemini` | Gemini CLI | `gemini` | 捕获续接 | `gemini --list-models --output-format json` |
-| `qwen` | Qwen Code | `qwen` | 续接 | 无列表命令，模型 ID 透传 |
 | `cursor` | Cursor Agent | `cursor-agent` | 捕获续接 | 无列表命令，模型 ID 透传 |
 | `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 无列表命令，模型 ID 透传 |
-| `opencode-cli` | OpenCode CLI | `opencode` | 单次 | `opencode models` |
 | `aider` | Aider | `aider` | 单次 | 无列表命令，模型 ID 透传 |
-| `goose` | Goose | `goose` | 单次 | 无列表命令，模型 ID 透传 |
-| `amp` | Amp | `amp` | 单次 | 无列表命令，模型 ID 透传 |
-| `droid` | Factory Droid | `droid` | 单次 | 无列表命令，模型 ID 透传 |
-| `amazonq` | Amazon Q Developer | `q` | 单次 | 无列表命令，模型 ID 透传（实验性） |
-| `kiro` | Kiro CLI | `kiro-cli` | 单次 | 无列表命令，模型 ID 透传（实验性） |
+| `goose` | Goose | `goose` | 单次 | 不支持切换 |
+| `antigravity` | Antigravity CLI | `agy` | 单次 | 无列表命令，模型 ID 透传 |
+| `kiro` | Kiro CLI | `kiro-cli` | 单次 | 不支持切换（实验性） |
+<!-- END AGENT TABLE -->
 
 内置档案只保存非交互的探测命令，不保存模型清单或默认模型。`/model`、模型面板、定时任务与 Android 的单条指定都会先读取同一次实时探测结果；`/model <模型ID>` 可用列表中的 ID、显示名或 `data/agents.json` 里的别名。CLI 未安装、当前账号无额度或探测失败时，面板会显示具体原因，并仍允许直接输入安全的模型 ID 交给 CLI 判断。
 
@@ -653,25 +651,25 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 - `预分配`：先写入 UUID 再启动（`--session-id` 类参数）；`捕获续接`：从输出中提取会话 ID；`单次`：每次独立执行。续接失败时会自动清空会话并重试一次。
 - 命令以 argv 数组直接执行，不经过 shell；输出会自动去除 ANSI 控制符并对错误信息脱敏。
 - `/stop`、无活动超时、任务总上限、排队与进度卡片对所有 CLI 引擎一致生效。
+- `qoder`、`claude`、`codex`、`gemini`、`antigravity` 默认带 `--dangerously-*` 或 `--approval-mode yolo`，用于无人值守执行。设 `AGENT_CLI_SAFE_MODE=1` 后这些参数会从 argv 中移除，工具调用重新需要人工确认——但无人值守任务可能因此停在那里等确认，按需开启。
 
 ### 检测、安装与卸载
 
-启动日志会输出 `agent CLI detection: n/14 installed (...)`，并列出可在聊天内安装的 id。首次使用发送 `/start` 或 `/agents` 即可看到本机检测结果。
+启动日志会输出 `agent CLI detection: n/N installed (...)`（N 为当前内置档案数），并列出可在聊天内安装的 id。首次使用发送 `/start` 或 `/agents` 即可看到本机检测结果。
 
 自动安装只支持内置的 npm/pip 包，执行前会展示完整命令并要求点击确认。`/agents` 面板里的 ⬇️ 安装、🔄 更新、🗑 卸载按钮同样先弹出一次性确认（5 分钟有效、点击即失效），确认时还会复查前置条件（是否由 Bot 托管、是否为当前正在使用的引擎）。
 
+<!-- BEGIN AGENT INSTALL TABLE: edited by `npm run docs:agents`, do not hand-edit -->
 | id | 安装命令 |
 | --- | --- |
 | `claude` | `npm install -g @anthropic-ai/claude-code` |
 | `codex` | `npm install -g @openai/codex` |
 | `gemini` | `npm install -g @google/gemini-cli` |
-| `qwen` | `npm install -g @qwen-code/qwen-code` |
 | `copilot` | `npm install -g @github/copilot` |
-| `opencode-cli` | `npm install -g opencode-ai` |
-| `amp` | `npm install -g @sourcegraph/amp` |
 | `aider` | `python3 -m pip install --user aider-chat` |
+<!-- END AGENT INSTALL TABLE -->
 
-- Qoder、Cursor、Goose、Factory Droid、Amazon Q、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。
+- Qoder、Antigravity、Cursor、Goose、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。
 - 卸载只针对 `data/agent-cli-installs.json` 中记录的、由 Bot 安装的 CLI；系统预装或其他方式安装的版本不会被删除。卸载当前正在使用的引擎会被拒绝，请先 `/agent opencode`。
 - 安装/卸载最长 10 分钟，会继承当前启用的代理；同一时间只允许一个任务。输出会自动脱敏。
 - 检测与调用不依赖登录 shell 的 `PATH`：Bot 会在 `PATH` 之后自动补上常见的用户级全局目录（`~/.npm-global/bin`、`~/.local/bin`、`~/.local/share/pnpm`、`~/.bun/bin`、`~/.deno/bin`、`~/.cargo/bin`、`~/.pyenv/shims`、`~/bin`、`/usr/local/bin`、`/snap/bin`），systemd / cron 启动时同样能找到自己装好的 CLI；系统已有同名可执行文件时仍以 `PATH` 中的为准。这些目录每次检测都会重新扫描，因此在聊天里装完 CLI 立刻就能被识别，无需重启 Bot。
@@ -715,7 +713,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 - 自定义档案仍可写 `models`（`{ "id": "显示名" }` 或 `[{ "id", "label", "aliases" }]`）作为兼容路径，仅在 CLI 不可执行且没有探测命令时使用；这个列表只是快捷方式，不是白名单——列表外的模型 ID 仍会透传给 CLI（`strictModels` 已移除）。无论哪条路径，都不接受以 `-` 开头、含控制字符或超过 120 字符的值，避免它被 CLI 解析成额外的命令行开关。
 - `resumeErrorPattern` 是识别“会话失效”的正则，命中后清空会话并重试一次；`env` 可附加进程环境变量。
 - `installSpec` 可选，仅接受 `method: "npm" | "pip"` 与合法包名；Bot 只会执行固定的 `npm install -g` / `python3 -m pip install --user` 命令，不会把包名拼进 shell。
-- id 必须匹配 `^[a-z0-9][a-z0-9._-]*$`，`opencode` 保留给服务端引擎；未知占位符、非法正则或缺少 `bin` 的条目会记录警告并被忽略。`amazonq` / `kiro` 的非交互参数可能随版本变化，标为实验性。
+- id 必须匹配 `^[a-z0-9][a-z0-9._-]*$`，`opencode` 保留给服务端引擎；未知占位符、非法正则或缺少 `bin` 的条目会记录警告并被忽略。`kiro` 的非交互参数可能随版本变化，标为实验性。
 - 安装检测只看 `PATH` 中是否存在可执行文件；个别发行版会放置“安装引导 shim”，此时仍需实际安装后才能执行。
 - 未安装任何 CLI 时仍可正常使用 OpenCode；`npm run bot -- start` 默认会启动受管 OpenCode，`npm run serve` 只用于手工前台启动。
 
@@ -772,7 +770,7 @@ bot/
 │   ├── progress.ts   进度卡片
 │   ├── opencode.ts   opencode HTTP/SSE 客户端
 │   ├── agentCli.ts   通用 Agent CLI 适配层：PATH 检测、子进程、会话与输出解析
-│   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Qwen…）
+│   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Antigravity…）
 │   ├── agentInstaller.ts npm/pip 安装、更新、卸载与 Bot 托管清单
 │   ├── ops.ts        运维：诊断、日志、重启、OpenCode 服务与 .env 编辑
 │   ├── releaseManager.ts 隔离构建、release 存储/state、激活与回滚

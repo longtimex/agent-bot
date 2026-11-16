@@ -666,7 +666,7 @@ export class OpsService {
     if (!bin) {
       return {
         ok: false,
-        message: "未找到 opencode 可执行文件。可发送 `/agents install opencode-cli` 安装。",
+        message: "未找到 opencode 可执行文件。请先在服务器安装 OpenCode CLI（`npm install -g opencode-ai`）后重试。",
         steps: [],
       }
     }

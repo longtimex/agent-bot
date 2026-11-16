@@ -3,7 +3,7 @@ import { statSync, readdirSync, type Dirent } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import type { AgentCliProfile, AgentCliRegistry } from "./agentCli.js"
-import { normalizeWorkDirInput } from "./agentCli.js"
+import { bypassesPermissionChecks, normalizeWorkDirInput, safeModeEnabled } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
@@ -715,6 +715,9 @@ export function agentView(deps: PersonalRouteDeps, profile: AgentCliProfile): Re
     // instead of receiving a stale, hand-maintained list with every engine.
     models: undefined,
     experimental: profile.experimental,
+    // The panel warns before a user hands work to a CLI that never asks for confirmation.
+    skipPermissions: bypassesPermissionChecks(profile),
+    safeMode: safeModeEnabled(),
     managed: installer?.isManaged(profile.id) ?? false,
     installable: Boolean(!installed && installer?.installCommand(profile)),
     updateable: Boolean(installer?.updateCommand(profile.id)),

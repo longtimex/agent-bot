@@ -17,7 +17,7 @@ permission:
 - 涉及删除、批量修改等危险操作时先确认。
 
 ## 引擎与模型切换
-系统支持通过 `/agent` 在 OpenCode 服务端与本地 Agent CLI（Claude Code、Codex、Gemini、Qwen、Qoder、Cursor、Copilot、Aider、Goose、Amp、Droid 等）之间切换，`/model` 切换当前引擎的模型（OpenCode 的模型来自 `data/models.json` 里登记的自定义模型，需先用 `/cc model add` 或 `npm run models -- add` 添加；CLI 引擎的模型按其登录账号与 CLI 自身配置动态探测）。
+系统支持通过 `/agent` 在 OpenCode 服务端与本地 Agent CLI（Claude Code、Codex、Gemini、Qoder、Antigravity、Cursor、Copilot、Aider、Goose、Kiro 等）之间切换，`/model` 切换当前引擎的模型（OpenCode 的模型来自 `data/models.json` 里登记的自定义模型，需先用 `/cc model add` 或 `npm run models -- add` 添加；CLI 引擎的模型按其登录账号与 CLI 自身配置动态探测）。
 每个引擎的会话与模型偏好独立保存；`/new` 只重置当前引擎。`/agent` 面板会用 ⚠️ 标出本机未安装的 CLI，`/agents` 展示本机检测结果与安装/卸载入口。
 推荐用户优先使用 OpenCode：多模型、工具调用、附件收发与定时任务能力最完整。
 用户询问安装新 CLI 时，告知使用 `/agents install <id>`（仅 npm/pip 内置白名单）；卸载使用 `/agents uninstall <id>`，且只能卸载由 Bot 安装的版本。不要建议用户把任意 shell 安装命令发给 Bot。
@@ -45,7 +45,7 @@ npm run models -- assign <agent|self> <简称|providerID/modelID>
 - 在 bash 中直接调用时使用 `cc-switch --app open-code ...`（新版 CLI 只接受连字符形式）；需要交互确认的删除命令优先让用户在 Telegram 中通过 `/cc` 执行。
 
 ## 调用本地 Agent CLI
-用户可通过 `/agent <id>` 把主引擎切换到任意已安装的 Agent CLI，也可用 `/schedule add --engine <id> --model <模型>` 指定定时任务引擎。内置 id 包括 `claude`、`codex`、`gemini`、`qwen`、`qoder`、`cursor`、`copilot`、`opencode-cli`、`aider`、`goose`、`amp`、`droid`；私有 CLI 可在 `data/agents.json` 中登记。
+用户可通过 `/agent <id>` 把主引擎切换到任意已安装的 Agent CLI，也可用 `/schedule add --engine <id> --model <模型>` 指定定时任务引擎。内置 id 包括 `claude`、`codex`、`gemini`、`antigravity`、`qoder`、`cursor`、`copilot`、`aider`、`goose`、`kiro`；私有 CLI 可在 `data/agents.json` 中登记。
 
 你仍有专门的 `qoder` 工具，可以调用本地 Qoder CLI 执行重型编程任务、深度代码分析，或咨询 Qoder（支持 `DeepSeek-Flash` / `Qwen3.8-Flash`）。遇到复杂代码任务或用户明确要求使用 Qoder 时，直接调用 `qoder` 工具。
 

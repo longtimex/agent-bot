@@ -5,6 +5,7 @@ import { homedir } from "node:os"
 import { delimiter, isAbsolute, join, resolve, sep } from "node:path"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
+import { asRecord, stringArray } from "./util.js"
 import { childEnv, extendedPath } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { EXIT_DRAIN_MS, terminateProcess, terminateProcesses } from "./childKill.js"
@@ -129,16 +130,6 @@ export function whichSync(bin: string, envPath = extendedPath()): string | undef
 
 function norm(value: string): string {
   return value.trim().toLowerCase().replace(/[\s_.-]+/g, "")
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
-}
-
-function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const items = value.filter((item): item is string => typeof item === "string")
-  return items.length === value.length ? items : undefined
 }
 
 function sanitizeModels(value: unknown): AgentCliModel[] | undefined {
@@ -710,10 +701,52 @@ export function argvBudgetError(label: string, args: string[]): string | undefin
   )
 }
 
+/**
+ * argv segments that hand every tool call to the CLI without asking. They are what make an
+ * unattended bot able to run arbitrary commands, so a deployment that wants a review-first
+ * posture needs a way to drop them without editing the profile list.
+ */
+const PERMISSION_BYPASS_SEGMENTS: string[][] = [
+  ["--dangerously-skip-permissions"],
+  ["--dangerously-bypass-approvals-and-sandbox"],
+  ["--dangerously-allow-all"],
+  ["--approval-mode", "yolo"],
+]
+
+function segmentAt(argv: string[], segment: string[], from: number): number {
+  for (let i = from; i + segment.length <= argv.length; i += 1) {
+    if (segment.every((token, offset) => argv[i + offset] === token)) return i
+  }
+  return -1
+}
+
+function stripPermissionBypass(argv: string[]): string[] {
+  let out = argv
+  for (const segment of PERMISSION_BYPASS_SEGMENTS) {
+    for (let at = segmentAt(out, segment, 0); at >= 0; at = segmentAt(out, segment, at)) {
+      out = [...out.slice(0, at), ...out.slice(at + segment.length)]
+    }
+  }
+  return out
+}
+
+/** Whether this profile would run tools without asking. Used by the agents panel to warn. */
+export function bypassesPermissionChecks(profile: AgentCliProfile): boolean {
+  const argv = [...(profile.args.base ?? []), ...(profile.args.resumeBase ?? [])]
+  return PERMISSION_BYPASS_SEGMENTS.some((segment) => segmentAt(argv, segment, 0) >= 0)
+}
+
+/** Whether this deployment asked for a review-first posture (`AGENT_CLI_SAFE_MODE=1`). */
+export function safeModeEnabled(): boolean {
+  const raw = process.env.AGENT_CLI_SAFE_MODE?.trim().toLowerCase()
+  return raw === "1" || raw === "true" || raw === "yes"
+}
+
 export function buildCliArgs(
   profile: AgentCliProfile,
   vars: { workDir: string; sessionId?: string; model?: string; prompt: string },
   isNew: boolean,
+  options: { safeMode?: boolean } = {},
 ): string[] {
   // A model id reaching argv as `-something` would be parsed as its own flag
   const model = vars.model && MODEL_ARG_RE.test(vars.model) ? vars.model : undefined
@@ -751,7 +784,7 @@ export function buildCliArgs(
   args.push(...render(profile.args.cwd))
   if (model) args.push(...render(profile.args.model))
   args.push(...render(profile.args.prompt ?? ["{prompt}"]))
-  return args
+  return options.safeMode ? stripPermissionBypass(args) : args
 }
 
 const MAX_WORK_DIR_CHARS = 512
@@ -884,7 +917,9 @@ export class AgentCliService {
       ? (modelOverride ?? this.#store.getCliModel(key, profile.id))
       : undefined
     const workDir = this.#resolveWorkDir(key)
-    const args = buildCliArgs(profile, { workDir, sessionId, model, prompt: query }, isNew)
+    const args = buildCliArgs(profile, { workDir, sessionId, model, prompt: query }, isNew, {
+      safeMode: safeModeEnabled(),
+    })
     const budget = argvBudgetError(profile.label, args)
     if (budget) throw new Error(budget)
     this.#log.debug(

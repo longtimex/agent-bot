@@ -1,5 +1,5 @@
 import { InlineKeyboard } from "grammy"
-import type { AgentCliProfile, AgentCliService } from "./agentCli.js"
+import { bypassesPermissionChecks, safeModeEnabled, type AgentCliProfile, type AgentCliService } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"
@@ -223,6 +223,7 @@ export class TelegramCorePanels {
     const missing = entries.filter((entry) => !entry.installed).length
     const currentLabel = this.#deps.agents.registry.label(current)
     const managed = this.#deps.agentInstaller.managed().length
+    const bypassing = entries.filter((entry) => entry.profile && bypassesPermissionChecks(entry.profile))
     return {
       text:
         `🤖 *Agent 引擎*\n\n当前：*${escapeMarkdown(currentLabel)}*\n\n` +
@@ -231,6 +232,11 @@ export class TelegramCorePanels {
           ? ""
           : `• 📁 工作目录：\`${escapeMarkdown(this.#deps.agents.workDir(key))}\`（\`/dir\` 可修改）\n`) +
         (missing > 0 ? `• ⚠️ ${missing} 个引擎未安装，可点「安装 / 卸载」或发送 \`/agents\`。\n` : "") +
+        (safeModeEnabled()
+          ? "• 🛡️ 安全模式：已移除跳过权限确认的参数（`AGENT_CLI_SAFE_MODE=1`）\n"
+          : bypassing.length > 0
+            ? `• 🔓 ${bypassing.length} 个引擎默认跳过工具权限确认，可设 \`AGENT_CLI_SAFE_MODE=1\` 关闭\n`
+            : "") +
         (managed > 0 ? `• 📦 Bot 托管：${managed} 个（可在 \`/agents\` 中更新或卸载）\n` : "") +
         (entries.length > 30 ? `• 另有 ${entries.length - 30} 个引擎可用 \`/agent <id>\` 切换。\n` : "") +
         `\n💡 *推荐使用 OpenCode*：多模型、工具调用、附件收发与定时任务。\n` +

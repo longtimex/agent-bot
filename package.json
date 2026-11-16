@@ -20,9 +20,11 @@
     "lint": "oxlint src tests scripts",
     "knip": "knip --include files,dependencies --no-config-hints",
     "check:android": "node scripts/check-android-sources.mjs",
+    "check:docs": "node --import tsx scripts/gen-agent-docs.mjs --check",
+    "docs:agents": "node --import tsx scripts/gen-agent-docs.mjs",
     "check:size": "node scripts/check-size.mjs",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
-    "check": "npm run check:android && npm run lint && npm run check:size && npm run knip && npm run typecheck && npm test && npm run build",
+    "test": "node --import tsx --test --test-concurrency=2 tests/*.test.ts",
+    "check": "npm run check:android && npm run check:docs && npm run lint && npm run check:size && npm run knip && npm run typecheck && npm test && npm run build",
     "serve": "opencode serve --port 4096 --hostname 127.0.0.1",
     "serve:proxy": "bash -c 'set -a; [ -f data/proxy.env ] && . data/proxy.env; set +a; exec opencode serve --port 4096 --hostname 127.0.0.1'",
     "restart": "tsx src/bot-cli.ts restart",
@@ -30,6 +32,7 @@
     "cc-switch:install": "bash scripts/install-cc-switch.sh",
     "check:release": "node scripts/check-release.mjs",
     "release:control": "node dist/release-control.js",
+    "backup:restore": "node scripts/restore-backup.mjs",
     "release:android": "node scripts/publish-android-release.mjs"
   },
   "dependencies": {
