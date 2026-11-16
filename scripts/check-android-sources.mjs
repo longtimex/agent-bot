@@ -24,7 +24,7 @@
  * Exits non-zero and prints file:line for the first problem in each file.
  */
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
 import { spawnSync } from "node:child_process"
 import { pathToFileURL } from "node:url"
 
@@ -483,7 +483,10 @@ export function signingMaterialIgnored(root, cwd = process.cwd()) {
   }
   if (!existsSync(join(androidDir, "app", "build.gradle.kts"))) return []
   const probes = candidates.map((name) => join(androidDir, name))
-  const relativeProbes = probes.map((probe) => relative(cwd, probe))
+  // `git check-ignore` always answers with forward slashes, while relative() follows the
+  // platform separator. Normalising keeps the comparison valid on Windows, where the raw
+  // value would be android\release.jks and never match.
+  const relativeProbes = probes.map((probe) => relative(cwd, probe).split(sep).join("/"))
   // --no-index asks the ignore rules even for paths that do not exist yet, which is
   // exactly the state before a developer creates the keystore.
   const result = spawnSync("git", ["check-ignore", "--no-index", "--stdin"], { cwd, input: relativeProbes.join("\n"), encoding: "utf8" })
