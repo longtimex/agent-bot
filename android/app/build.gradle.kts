@@ -16,8 +16,8 @@ android {
         applicationId = "com.agentbot.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1002001
-        versionName = "1.2.1"
+        versionCode = 1002002
+        versionName = "1.2.2"
     }
 
     // Release signing is supplied by CI (or a local keystore.properties file).
@@ -79,6 +79,10 @@ android {
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
+
+    // Plain JVM tests: the parsing helpers are pure Kotlin, so they need no device and
+    // no Robolectric. `gradle :app:testDebugUnitTest` runs them on the CI runner.
+    testImplementation("junit:junit:4.13.2")
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")

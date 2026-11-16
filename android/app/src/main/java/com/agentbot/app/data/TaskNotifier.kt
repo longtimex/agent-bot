@@ -18,6 +18,10 @@ import com.agentbot.app.R
 /** Posts "task finished" notifications for tasks that settle while the app is in the background. */
 object TaskNotifier {
     private const val CHANNEL_ID = "task_updates"
+    // A published APK is a different kind of news than a finished task, so it gets its own
+    // channel and a fixed id: re-checking must replace the notice, not stack copies.
+    private const val UPDATE_CHANNEL_ID = "app_updates"
+    private const val UPDATE_NOTIFICATION_ID = 0x5E771
     const val EXTRA_OPEN_CHAT = "com.agentbot.app.OPEN_CHAT"
     const val EXTRA_TASK_ID = "com.agentbot.app.TASK_ID"
 
@@ -66,6 +70,39 @@ object TaskNotifier {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
         NotificationManagerCompat.from(context).notify(task.id.hashCode() and 0x7fffffff, notification)
+    }
+
+    fun ensureUpdateChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        manager.createNotificationChannel(
+            NotificationChannel(UPDATE_CHANNEL_ID, "应用更新", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "服务器发布了新的安卓版本时提醒"
+            },
+        )
+    }
+
+    /** Tells the user a new build exists; the download stays a deliberate tap in Settings. */
+    @SuppressLint("MissingPermission")
+    fun appUpdateAvailable(context: Context, version: String) {
+        if (!allowed(context)) return
+        ensureUpdateChannel(context)
+        val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pending = PendingIntent.getActivity(
+            context,
+            UPDATE_NOTIFICATION_ID,
+            open,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(context, UPDATE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_task)
+            .setContentTitle("有新版本 v$version")
+            .setContentText("打开 App，到「设置 → 应用更新」下载安装")
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        NotificationManagerCompat.from(context).notify(UPDATE_NOTIFICATION_ID, notification)
     }
 
     private fun allowed(context: Context): Boolean {

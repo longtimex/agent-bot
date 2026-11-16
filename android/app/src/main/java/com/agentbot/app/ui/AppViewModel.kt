@@ -567,6 +567,20 @@ class AppViewModel(
     var appUpdateError by mutableStateOf<String?>(null)
         private set
 
+    /**
+     * The version already announced, stored rather than kept in memory: the check also runs
+     * on launch, and an in-memory flag would notify again every time the App is reopened.
+     */
+    private var appUpdateNotified: String?
+        get() = appContext.getSharedPreferences("agent_bot", Context.MODE_PRIVATE)
+            .getString("app_update_notified", null)
+        set(value) {
+            appContext.getSharedPreferences("agent_bot", Context.MODE_PRIVATE)
+                .edit()
+                .putString("app_update_notified", value)
+                .apply()
+        }
+
     /** A verified APK waiting for the user to grant the installer permission and come back. */
     private var pendingInstallApk: File? = null
 
@@ -804,6 +818,15 @@ class AppViewModel(
         if (settings.connection() != null) {
             messages.filter { it.taskId != null && (it.status == "queued" || it.status == "running") }
                 .forEach { message -> message.taskId?.let { pollTask(it) } }
+            // The release check runs once here and then on a timer: opening the App should be
+            // enough to learn that a new build exists.
+            refreshAndroidReleaseQuietly()
+            viewModelScope.launch {
+                while (true) {
+                    delay(APP_UPDATE_CHECK_INTERVAL_MS)
+                    refreshAndroidReleaseQuietly()
+                }
+            }
         }
     }
 
@@ -2877,8 +2900,17 @@ class AppViewModel(
     }
 
     private fun refreshAndroidReleaseQuietly() = quietly({ appUpdateError = "检查更新失败：$it" }) {
-        androidRelease = api.androidRelease(conn(), appVersionCode.toInt())
+        val release = api.androidRelease(conn(), appVersionCode.toInt())
+        androidRelease = release
         appUpdateError = null
+        if (release?.updateAvailable == true) {
+            // One notice per published version: the timer must not turn into a reminder loop.
+            val version = release.versionName ?: release.versionCode?.toString()
+            if (version != null && version != appUpdateNotified) {
+                appUpdateNotified = version
+                TaskNotifier.appUpdateAvailable(appContext, version)
+            }
+        }
     }
 
     /**
@@ -3710,6 +3742,13 @@ class AppViewModel(
     companion object {
         /** Decoded reply images kept in memory at once; each one costs roughly 10MB of heap. */
         private const val MAX_MEDIA_IMAGES = 8
+
+        /**
+         * How often a running App re-reads the release manifest. The App is often left open
+         * on a desk for hours, and a published build should not wait for someone to open
+         * Settings; six hours keeps it cheap without hiding an update for long.
+         */
+        private const val APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
         /**
          * Minimum spacing between two history writes. A running task pushes a progress frame every
