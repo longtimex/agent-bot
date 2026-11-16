@@ -6,12 +6,12 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { readJsonObject, writePrivateAtomic } from "../src/jsonStore.js"
 
 test("readJsonObject returns undefined for a missing file without warning", () => {
@@ -85,7 +85,7 @@ test("writePrivateAtomic re-modes a file that someone else created world-readabl
 
     writePrivateAtomic(path, '{"token":"abc"}')
     assert.equal(readFileSync(path, "utf8"), '{"token":"abc"}')
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
     assert.equal(readdirSync(dir).length, 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -98,7 +98,7 @@ test("writePrivateAtomic creates the parent directory and leaves no temp file", 
     const path = join(dir, "nested", "state.json")
     writePrivateAtomic(path, '{"ok":true}')
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ok: true })
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
     assert.deepEqual(readdirSync(join(dir, "nested")), ["state.json"])
   } finally {
     rmSync(dir, { recursive: true, force: true })

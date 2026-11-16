@@ -7,12 +7,18 @@ on:
 
 jobs:
   check:
-    name: typecheck · test · build (Node ${{ matrix.node }})
+    name: check (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        include:
+          - node: 22
+            full: true
+          - node: 20
+            full: false
+          - node: 24
+            full: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -21,8 +27,47 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Run checks (typecheck + tests + build)
+      # The full gate (60+ test suites) runs once; the other Node versions only prove that
+      # the code still typechecks and builds there. Running everything three times made the
+      # matrix the slowest job without covering any additional code.
+      - name: Full checks
+        if: matrix.full == true
         run: npm run check
+      - name: Typecheck and build
+        if: matrix.full != true
+        run: npm run typecheck && npm run build
+
+  # `check:android` only balances braces and greps rules; it cannot see an unresolved
+  # reference or a Compose scope error. Compiling here means a Kotlin change that never
+  # built fails on the pull request instead of on a release tag.
+  android:
+    name: android assembleDebug
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+      # Unit tests first: they compile the same Kotlin sources, so they fail faster than
+      # an APK build when something does not compile.
+      - name: Run unit tests
+        working-directory: android
+        run: gradle :app:testDebugUnitTest --no-daemon
+      - name: Compile debug APK
+        working-directory: android
+        run: gradle :app:assembleDebug --no-daemon
 
   docker:
     name: docker build

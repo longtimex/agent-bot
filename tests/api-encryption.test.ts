@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { gunzipSync } from "node:zlib"
 import { decryptPayload, encryptPayload, randomEncKey, decodeEncKey } from "../src/apiCrypto.js"
 import { loadConfig } from "../src/config.js"
@@ -51,7 +52,7 @@ test("resolveEncKey creates a 0600 key store once and reuses it", () => {
     assert.ok(first?.length === 32, "a fresh 256-bit key is generated")
     const path = join(dir, "api-enc-key.json")
     assert.ok(existsSync(path))
-    assert.equal(statSync(path).mode & 0o777, 0o600, "the key store is private")
+    assertFileMode(path, 0o600, "the key store is private")
 
     const second = resolveEncKey(cfg)
     assert.deepEqual(second, first, "the stored key is reused, not regenerated")

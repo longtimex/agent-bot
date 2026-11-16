@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import type { Logger } from "../src/logger.js"
 import { maskProxyUrl, parseProxyUrl, proxyTestUrl, ProxyService, socksCredentials } from "../src/proxy.js"
 
@@ -108,8 +109,8 @@ test("ProxyService adds after a successful test and persists state", async () =>
     service.use(proxy.id)
     assert.equal(service.active()?.id, proxy.id)
     assert.match(readFileSync(envPath, "utf8"), /export HTTPS_PROXY='http:\/\/user:secret@127\.0\.0\.1:7890'/)
-    assert.equal(statSync(envPath).mode & 0o777, 0o600)
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(envPath, 0o600)
+    assertFileMode(path, 0o600)
     assert.equal(service.env().ALL_PROXY, "http://user:secret@127.0.0.1:7890")
 
     const reloaded = new ProxyService(path, log, { envPath, tester: async () => {} })

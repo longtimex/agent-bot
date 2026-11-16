@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import type { Logger } from "../src/logger.js"
 import {
   describeRepeat,
@@ -168,7 +169,7 @@ test("ReminderStore persists reminders and keeps ids monotonic", () => {
     assert.equal(reloaded.cancel(1, sooner.id), undefined)
     assert.equal(reloaded.cancel(2, sooner.id), undefined)
     assert.equal(reloaded.count(1), 2)
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

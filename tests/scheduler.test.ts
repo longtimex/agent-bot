@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import type { Logger } from "../src/logger.js"
 import {
   MAX_SCHEDULES_PER_CHAT,
@@ -148,7 +149,7 @@ test("ScheduleStore persists tasks atomically and recovers crashed runs", () => 
       model: GEMINI,
       runningAt: Date.now(),
     })
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
     assert.equal(store.count(42), 1)
 
     const reloaded = new ScheduleStore(path, log)

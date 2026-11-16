@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { buildAttachmentSections } from "../src/attachmentInput.js"
 import { OPENCODE_ATTACHMENT_LIMIT } from "../src/opencode.js"
 import {
@@ -116,8 +117,8 @@ test("saveAttachment keeps uploads private to the service account", () => {
   try {
     const inbox = join(dir, "inbox")
     const saved = saveAttachment(inbox, 42, ".env", Buffer.from("API_KEY=x"))
-    assert.equal(statSync(saved.path).mode & 0o777, 0o600)
-    assert.equal(statSync(inbox).mode & 0o777, 0o700)
+    assertFileMode(saved.path, 0o600)
+    assertFileMode(inbox, 0o700)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -130,8 +131,8 @@ test("saveAttachment tightens an inbox directory created with a permissive umask
     mkdirSync(inbox, { recursive: true })
     chmodSync(inbox, 0o775)
     const saved = saveAttachment(inbox, 42, "secret.txt", Buffer.from("token"))
-    assert.equal(statSync(saved.path).mode & 0o777, 0o600)
-    assert.equal(statSync(inbox).mode & 0o777, 0o700, "an already-existing inbox must not stay group/other-readable")
+    assertFileMode(saved.path, 0o600)
+    assertFileMode(inbox, 0o700, "an already-existing inbox must not stay group/other-readable")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Six runtime dependencies and a handful of dev tools; a weekly grouped PR keeps the
+  # lockfile current without burying the repo in individual bumps. Major versions stay
+  # out of the group so they arrive as their own reviewable PR.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Compose BOM and the Android toolchain move slower and a bump can change how the app
+  # compiles, so this runs monthly and relies on the assembleDebug CI job to catch breaks.
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

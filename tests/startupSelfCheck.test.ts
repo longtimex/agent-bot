@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { readStartupSelfCheck, writeStartupFailure, writeStartupSelfCheck } from "../src/startupSelfCheck.js"
 
 function tempDir(): string {
@@ -24,7 +25,7 @@ test("startup self-check writes an atomic private snapshot and an append-only hi
     const first = readStartupSelfCheck(dir)
     assert.deepEqual(first, check)
     assert.equal(path, join(dir, "startup-check.json"))
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
 
     writeStartupSelfCheck(dir, { ...check, at: "2026-01-02T03:04:06.000Z" })
     const lines = readFileSync(join(dir, "startup-checks.jsonl"), "utf8").trim().split("\n")

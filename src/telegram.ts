@@ -7,6 +7,7 @@ import type { BotConfig, ModelRef } from "./config.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
+import { parseBotCommand } from "./telegramCommand.js"
 import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
 import { MagpieService } from "./magpie.js"
 import { TaskHistoryStore } from "./history.js"
@@ -757,9 +758,7 @@ export class TelegramBridge {
       const key = this.#sessionKey(chatId)
 
       // Control commands bypass the per-chat queue, otherwise they wait for the running task
-      const rawCommand = text.split(/\s+/, 1)[0] ?? ""
-      const command = rawCommand.toLowerCase().split("@")[0] ?? ""
-      const arg = text.slice(rawCommand.length).trim()
+      const { command, arg } = parseBotCommand(text)
 
       if (command === "/stop") {
         await this.#handleStop(chatId, key)

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import type { Logger } from "../src/logger.js"
 import { dateKey, UsageStore } from "../src/usage.js"
 
@@ -38,7 +39,7 @@ test("UsageStore records outcomes, totals and engines", () => {
 
     const reloaded = new UsageStore(path, log, "Asia/Shanghai")
     assert.deepEqual(reloaded.summary("tg:1", now + 3_000), summary)
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
     assert.equal(reloaded.summary("tg:other", now).tasks, 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })

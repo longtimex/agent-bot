@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
-import { isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { ApiError } from "./apiCore.js"
 import type { ApiRequestContext } from "./apiCore.js"
 import { res_attachment_binary } from "./apiHttp.js"
@@ -155,7 +155,12 @@ export class AndroidReleaseService {
     const real = realpathSync(apkFile)
     // A symlink inside the release directory is fine only when it still points there.
     const base = realpathSync(join(this.manifestPath, ".."))
-    if (!real.startsWith(`${base}/`)) throw new ApiError(404, "APK 路径越界")
+    // Inside means "a relative path that does not climb out". Comparing strings against
+    // `${base}/` rejected every download on Windows, where realpath returns backslashes.
+    const within = relative(base, real)
+    if (!within || within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) {
+      throw new ApiError(404, "APK 路径越界")
+    }
     const bytes = readFileSync(real)
     const digest = createHash("sha256").update(bytes).digest("hex")
     if (digest !== release.sha256) throw new ApiError(500, "APK 校验失败：文件与清单的 SHA-256 不一致")

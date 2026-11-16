@@ -1,3 +1,5 @@
+import { asRecord, stringArray } from "./util.js"
+
 /** How a CLI prints its model catalog. `auto` accepts JSON or one model per line. */
 export type AgentModelProbeFormat = "auto" | "json" | "lines"
 
@@ -6,18 +8,6 @@ export interface AgentCliModelProbe {
   args: string[]
   format?: AgentModelProbeFormat
   timeoutMs?: number
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
-}
-
-function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const items = value.filter((item): item is string => typeof item === "string")
-  return items.length === value.length ? items : undefined
 }
 
 export function sanitizeModelProbe(value: unknown, label: string): AgentCliModelProbe | undefined {

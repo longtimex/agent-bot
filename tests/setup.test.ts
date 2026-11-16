@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import {
   isValidToken,
   maskToken,
@@ -126,7 +127,7 @@ test("writeEnvFile writes the file with mode 0600", () => {
     const path = join(dir, ".env")
     writeEnvFile(path, "A=1\n")
     assert.equal(readFileSync(path, "utf8"), "A=1\n")
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -154,7 +155,7 @@ test("runSetup connects, auto-detects the owner and writes .env", async () => {
     assert.match(env, /^LOG_LEVEL=info$/m)
     assert.match(env, new RegExp(`^TELEGRAM_BOT_TOKEN=${TOKEN}$`, "m"))
     assert.match(env, /^TELEGRAM_ALLOW_USERS=777$/m)
-    assert.equal(statSync(envPath).mode & 0o777, 0o600)
+    assertFileMode(envPath, 0o600)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

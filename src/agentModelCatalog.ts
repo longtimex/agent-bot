@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
+import { asRecord } from "./util.js"
 import type { AgentCliProfile, AgentCliRegistry } from "./agentCli.js"
 import type { AgentModelProbeFormat } from "./agentModelProbe.js"
 import { childEnv } from "./binPath.js"
@@ -63,12 +64,6 @@ interface CacheEntry {
 
 interface PendingProbe {
   promise: Promise<AgentModelCatalogResult>
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
 }
 
 function textValue(value: unknown): string | undefined {

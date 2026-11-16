@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { formatHistoryMarkdown } from "../src/history.js"
 import { MAX_HISTORY_PER_CHAT, TaskHistoryStore } from "../src/history.js"
 import type { Logger } from "../src/logger.js"
@@ -35,7 +36,7 @@ test("TaskHistoryStore keeps the newest entries per chat and persists them", () 
     assert.equal(reloaded.count("tg:1"), MAX_HISTORY_PER_CHAT)
     assert.equal(reloaded.list("tg:1", 1)[0]?.prompt, latest[0]?.prompt)
     assert.equal(reloaded.list("tg:2", 1)[0]?.outcome, "failed")
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

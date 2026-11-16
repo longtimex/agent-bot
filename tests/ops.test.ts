@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { parseEnv } from "node:util"
 import { failureDigest } from "../src/failureDigest.js"
 import { OpsService, type OpsCommandResult } from "../src/ops.js"
@@ -593,7 +594,7 @@ test("ops env editing writes 0600, preserves comments and masks secrets", () => 
     assert.match(content, /# bot config/)
     assert.match(content, /LOG_LEVEL=debug/)
     assert.match(content, /TELEGRAM_BOT_TOKEN=super-secret-token/)
-    assert.equal(statSync(join(dir, ".env")).mode & 0o777, 0o600)
+    assertFileMode(join(dir, ".env"), 0o600)
 
     const spaced = ops.envSet("PROXY_TEST_URL", "https://example.com/path?q=1#frag")
     assert.equal(spaced.ok, true)
@@ -789,8 +790,8 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     assert.ok(result.file, "the backup reports the archive path")
     assert.match(result.file!, /backups\/backup-\d{8}-\d{9}\.tar\.gz$/)
     assert.ok(existsSync(result.file!))
-    assert.equal(statSync(join(dataDir, "backups")).mode & 0o777, 0o700, "an existing backup directory must be private")
-    assert.equal(statSync(result.file!).mode & 0o777, 0o600, "the archive must be private")
+    assertFileMode(join(dataDir, "backups"), 0o700, "an existing backup directory must be private")
+    assertFileMode(result.file!, 0o600, "the archive must be private")
     // tar 收到的就是 data/ 下的状态文件,且不含配对令牌
     const tarCall = calls.find((call) => call.command === "tar")
     assert.ok(tarCall, "backup runs tar")
@@ -809,7 +810,7 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     assert.equal(kept.length, 5)
     assert.ok(!kept.some((name) => name.startsWith("backup-20260100")), "the oldest archives get pruned first")
     for (const name of kept) {
-      assert.equal(statSync(join(dataDir, "backups", name)).mode & 0o777, 0o600, `${name} must be private`)
+      assertFileMode(join(dataDir, "backups", name), 0o600, `${name} must be private`)
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })

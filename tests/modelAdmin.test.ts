@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import { findModel, resolveModelKey } from "../src/models.js"
 import { ModelAdmin, type LiveSessionModels } from "../src/modelAdmin.js"
 
@@ -173,7 +174,7 @@ test("ModelAdmin.force remove clears quoted bindings and keeps file permissions"
     assert.ok(content.includes("description: 'costs $& literal'"), content)
     assert.match(content, /^mode: subagent$/m)
     assert.doesNotMatch(content, /custom\/so-lo/)
-    assert.equal(statSync(file).mode & 0o777, 0o600)
+    assertFileMode(file, 0o600)
 
     // a second delete of an already cleared binding must not rewrite anything
     fx.admin.add({ key: "solo2", providerID: "custom", modelID: "solo-2" })
@@ -339,8 +340,8 @@ test("ModelAdmin keeps a restricted mode on the project config", () => {
 
     fx.admin.add({ key: "modesafe", providerID: "custom", modelID: "m-1" })
 
-    assert.equal(statSync(configPath).mode & 0o777, 0o600, "a hand-restricted config must stay unreadable by others")
-    assert.equal(statSync(fx.admin.registryPath).mode & 0o777, 0o600)
+    assertFileMode(configPath, 0o600, "a hand-restricted config must stay unreadable by others")
+    assertFileMode(fx.admin.registryPath, 0o600)
   } finally {
     fx.cleanup()
   }

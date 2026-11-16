@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { dirname, resolve } from "node:path"
+import { withFileLock } from "./fileLock.js"
 import { clip } from "./messages.js"
 import {
   findModel,
@@ -211,6 +212,10 @@ export class ModelAdmin {
     return { version: 1, models }
   }
 
+  #withLock<T>(fn: () => T): T {
+    return withFileLock(this.#registryPath, fn)
+  }
+
   #writeRegistry(registry: ModelRegistryFile): void {
     this.#assertRegistryWritable()
     writeJson(this.#registryPath, registry, 0o600)
@@ -266,7 +271,16 @@ export class ModelAdmin {
     throw new Error(`未识别的模型：${selection}。请使用模型简称，或 providerID/modelID。`)
   }
 
+  /**
+   * The whole read-modify-write runs under a cross-process lock: the bot and
+   * `npm run models -- add` can otherwise both read the old registry and the later write
+   * silently drops the earlier one.
+   */
   add(input: AddModelInput): AddModelResult {
+    return this.#withLock(() => this.#addUnlocked(input))
+  }
+
+  #addUnlocked(input: AddModelInput): AddModelResult {
     const key = input.key.trim().toLowerCase()
     if (!KEY_RE.test(key)) {
       throw new Error("模型简称只能包含小写字母、数字、点、下划线和连字符，且以字母或数字开头。")
@@ -308,6 +322,10 @@ export class ModelAdmin {
   }
 
   remove(key: string, force = false): RemoveModelResult | undefined {
+    return this.#withLock(() => this.#removeUnlocked(key, force))
+  }
+
+  #removeUnlocked(key: string, force: boolean): RemoveModelResult | undefined {
     const norm = key.trim().toLowerCase()
     const registry = this.#readRegistry()
     this.#assertRegistryWritable()
@@ -478,6 +496,10 @@ export class ModelAdmin {
   }
 
   assignAgent(agent: string, selection: string): AssignAgentResult {
+    return this.#withLock(() => this.#assignAgentUnlocked(agent, selection))
+  }
+
+  #assignAgentUnlocked(agent: string, selection: string): AssignAgentResult {
     const name = agent === "self" ? this.#selfAgent : agent.trim()
     const file = this.#agentFile(agent)
     const model = this.resolveModel(selection)

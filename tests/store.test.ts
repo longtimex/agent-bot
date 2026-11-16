@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
+import { assertFileMode } from "./support/platform.js"
 import type { Logger } from "../src/logger.js"
 import { SessionStore } from "../src/store.js"
 
@@ -16,7 +17,7 @@ test("SessionStore persists state with owner-only permissions", () => {
     store.set("tg:1", "ses_1")
     store.setCliSession("tg:1", "claude", "cli_1")
     store.setCliModel("tg:1", "claude", "sonnet")
-    assert.equal(statSync(path).mode & 0o777, 0o600)
+    assertFileMode(path, 0o600)
 
     const reloaded = new SessionStore(path, log)
     assert.equal(reloaded.get("tg:1"), "ses_1")
