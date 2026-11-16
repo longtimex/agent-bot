@@ -1,5 +1,6 @@
 import { InlineKeyboard } from "grammy"
-import { bypassesPermissionChecks, safeModeEnabled, type AgentCliProfile, type AgentCliService } from "./agentCli.js"
+import { bypassesPermissionChecks, safeModeEnabled } from "./agentPermissions.js"
+import type { AgentCliProfile, AgentCliService } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"

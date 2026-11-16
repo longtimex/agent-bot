@@ -4,13 +4,13 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync,
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import test from "node:test"
+import { bypassesPermissionChecks } from "../src/agentPermissions.js"
 import { extendedPath } from "../src/binPath.js"
 import {
   AgentCliRegistry,
   AgentCliService,
   argvBudgetError,
   buildCliArgs,
-  bypassesPermissionChecks,
   normalizeWorkDirInput,
   parseCliOutput,
   whichSync,
