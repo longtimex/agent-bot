@@ -32,7 +32,19 @@ jobs:
       # matrix the slowest job without covering any additional code.
       - name: Full checks
         if: matrix.full == true
-        run: npm run check
+        # The job log needs admin rights to download, but annotations are readable. Emit the
+        # failing test names and compiler messages as annotations so a red run is diagnosable
+        # from the API instead of only from the web UI.
+        run: |
+          set +e
+          npm run check 2>&1 | tee /tmp/check.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -aE "^not ok |^e: |error TS[0-9]+|budget|disagree|MISS " /tmp/check.log | head -20 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit "$status"
       - name: Typecheck and build
         if: matrix.full != true
         run: npm run typecheck && npm run build
@@ -63,18 +75,15 @@ jobs:
       - name: Compile debug APK
         working-directory: android
         # Kotlin errors only exist in the job log, which needs admin rights to download.
-        # Mirror them into the step summary so the check-run API exposes them.
+        # Annotations are readable without it.
         run: |
           set +e
           gradle :app:assembleDebug --no-daemon 2>&1 | tee /tmp/gradle.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            {
-              echo '### Kotlin errors'
-              echo '```'
-              grep -E "^e: |error: |FAILURE:" /tmp/gradle.log | head -40
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            grep -aE "^e: |error: |what went wrong" /tmp/gradle.log | head -20 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
           exit "$status"
 
