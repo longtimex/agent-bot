@@ -251,7 +251,10 @@ export class TelegramBridge {
     this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.accountStore = new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log)
-    this.#accountCommands = new TelegramAccountCommands({ accounts: this.accountStore, sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) } })
+    this.#accountCommands = new TelegramAccountCommands({
+      accounts: this.accountStore, sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) },
+      sendSecret: async (chatId, text) => { const sent = await this.#bot.api.sendMessage(chatId, this.#maskToken(text), { parse_mode: "Markdown" }); setTimeout(() => void this.#bot.api.deleteMessage(chatId, sent.message_id).catch(() => undefined), 60_000) },
+    })
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
       (chatId, text, reminder) => this.#deliverReminder(chatId, text, reminder),
@@ -2168,7 +2171,6 @@ export class TelegramBridge {
       await this.#bot.api.sendMessage(chatId, safe, { parse_mode: "Markdown", reply_markup: markup })
       return true
     } catch {
-      // Graceful fallback to plain text if Markdown parsing fails
       try {
         await this.#bot.api.sendMessage(chatId, safe, { reply_markup: markup })
         return true

@@ -663,6 +663,8 @@ class ApiClient {
         category: String?,
         url: String?,
         notes: String?,
+        tags: List<String> = emptyList(),
+        extras: Map<String, String> = emptyMap(),
     ): String {
         val body = buildJsonObject {
             put("name", name)
@@ -671,9 +673,43 @@ class ApiClient {
             category?.takeIf { it.isNotBlank() }?.let { put("category", it) }
             url?.takeIf { it.isNotBlank() }?.let { put("url", it) }
             notes?.takeIf { it.isNotBlank() }?.let { put("notes", it) }
+            if (tags.isNotEmpty()) put("tags", buildJsonArray { tags.forEach { add(it) } })
+            if (extras.isNotEmpty()) {
+                put("extras", buildJsonObject { extras.forEach { (key, value) -> put(key, value) } })
+            }
         }
         val res = send(connection, "POST", "/accounts", body)
         return res["message"]?.jsonPrimitive?.content ?: "已保存"
+    }
+
+    /**
+     * Rewrites every field. An empty string clears a field; a blank [password] keeps the old
+     * one, so the form does not require retyping it on every edit.
+     */
+    suspend fun updateAccount(
+        connection: Connection,
+        id: String,
+        name: String,
+        username: String,
+        password: String?,
+        category: String,
+        url: String,
+        notes: String,
+        tags: List<String>,
+        extras: Map<String, String>,
+    ): String {
+        val body = buildJsonObject {
+            put("name", name)
+            put("username", username)
+            password?.takeIf { it.isNotBlank() }?.let { put("password", it) }
+            put("category", category)
+            put("url", url)
+            put("notes", notes)
+            put("tags", buildJsonArray { tags.forEach { add(it) } })
+            put("extras", buildJsonObject { extras.forEach { (key, value) -> put(key, value) } })
+        }
+        val res = send(connection, "PATCH", "/accounts/$id", body)
+        return res["message"]?.jsonPrimitive?.content ?: "已更新"
     }
 
     /** Returns the decrypted password; the caller shows it once and forgets it. */

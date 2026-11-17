@@ -23,6 +23,10 @@ export interface AccountEntry {
   secret?: string
   url?: string
   notes?: string
+  /** Free-form labels: one entry can belong to 「小红书」「美妆」「A组」 at once. */
+  tags: string[]
+  /** Per-entry custom fields, e.g. { "绑定邮箱": "op@xx.com", "负责人": "小王" }. */
+  extras: Record<string, string>
   createdAt: number
   updatedAt: number
 }
@@ -34,6 +38,23 @@ export interface AccountInput {
   category?: string
   url?: string
   notes?: string
+  tags?: string[]
+  extras?: Record<string, string>
+}
+
+/**
+ * A partial rewrite. `undefined` keeps the current value, `null` clears it — that is how
+ * `/account edit` can change a password without retyping the category and notes.
+ */
+export interface AccountUpdate {
+  name?: string
+  username?: string
+  password?: string | null
+  category?: string | null
+  url?: string | null
+  notes?: string | null
+  tags?: string[]
+  extras?: Record<string, string>
 }
 
 export const DEFAULT_CATEGORY = "未分类"
@@ -41,12 +62,48 @@ const MAX_ACCOUNTS = 500
 const MAX_NAME = 60
 const MAX_FIELD = 500
 const ID_RE = /^[a-z0-9]{8,32}$/
+const MAX_TAGS = 12
+const TAG_MAX = 24
+const MAX_EXTRAS = 20
+const EXTRA_KEY_MAX = 32
+const EXTRA_VALUE_MAX = 200
 
 function text(value: unknown, max = MAX_FIELD): string | undefined {
   if (typeof value !== "string") return undefined
   const trimmed = value.trim()
   if (!trimmed) return undefined
   return trimmed.slice(0, max)
+}
+
+/** Tags are lowercased for matching but stored as typed, deduplicated, capped. */
+function sanitizeTags(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    const tag = text(item, TAG_MAX)
+    if (!tag) continue
+    const key = tag.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(tag)
+    if (out.length >= MAX_TAGS) break
+  }
+  return out
+}
+
+function sanitizeExtras(raw: unknown): Record<string, string> {
+  const record = asRecord(raw)
+  if (!record) return {}
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(record)) {
+    const field = text(key, EXTRA_KEY_MAX)
+    const entry = text(value, EXTRA_VALUE_MAX)
+    if (!field || !entry) continue
+    out[field] = entry
+    if (Object.keys(out).length >= MAX_EXTRAS) break
+  }
+  return out
 }
 
 export class AccountStore {
@@ -83,6 +140,8 @@ export class AccountStore {
       username: text(input.username) ?? "",
       url: text(input.url),
       notes: text(input.notes),
+      tags: sanitizeTags(input.tags),
+      extras: sanitizeExtras(input.extras),
       createdAt: now,
       updatedAt: now,
     }
@@ -93,13 +152,63 @@ export class AccountStore {
     return entry
   }
 
+  /**
+   * Rewrites the fields named in [patch]: `undefined` keeps the current value, `null` clears
+   * it. That is how a password can change without retyping the category and notes.
+   */
+  update(ref: string, patch: AccountUpdate): AccountEntry {
+    this.#assertWritable()
+    const current = this.find(ref)
+    if (!current) throw new Error(`没有找到「${ref}」。`)
+    const entry: AccountEntry = { ...current }
+
+    if (patch.name !== undefined) {
+      const name = this.#checkName(patch.name)
+      const clash = this.find(name)
+      if (clash && clash.id !== entry.id) throw new Error(`账号「${name}」已存在，请换一个名称。`)
+      entry.name = name
+    }
+    if (patch.username !== undefined) entry.username = text(patch.username) ?? ""
+    if (patch.password !== undefined) {
+      // An empty string clears it, matching what `/account edit name | | -` means
+      if (!patch.password?.trim()) delete entry.secret
+      else entry.secret = encryptPayload(this.#keyBuffer(), patch.password.trim())
+    }
+    if (patch.category !== undefined) {
+      entry.category = patch.category === null ? DEFAULT_CATEGORY : (text(patch.category, 40) ?? DEFAULT_CATEGORY)
+    }
+    if (patch.url !== undefined) entry.url = patch.url === null ? undefined : text(patch.url)
+    if (patch.notes !== undefined) entry.notes = patch.notes === null ? undefined : text(patch.notes)
+    if (patch.tags !== undefined) entry.tags = sanitizeTags(patch.tags)
+    if (patch.extras !== undefined) entry.extras = sanitizeExtras(patch.extras)
+
+    entry.updatedAt = Date.now()
+    this.#accounts.set(entry.id, entry)
+    this.#save()
+    return entry
+  }
+
   /** Newest first within a category; `category` empty means every entry. */
-  list(category?: string): AccountEntry[] {
+  list(category?: string, tag?: string): AccountEntry[] {
     this.#refresh()
     const wanted = category?.trim()
+    const wantedTag = tag?.trim().toLowerCase()
     return [...this.#accounts.values()]
       .filter((entry) => !wanted || entry.category === wanted)
+      .filter((entry) => !wantedTag || entry.tags.some((item) => item.toLowerCase() === wantedTag))
       .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  /** Tag names with counts, so a panel can offer them beside the categories. */
+  tags(): Array<{ name: string; count: number }> {
+    this.#refresh()
+    const counts = new Map<string, number>()
+    for (const entry of this.#accounts.values()) {
+      for (const tag of entry.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
   }
 
   /** Category names with counts, so a panel can offer them without a fixed list. */
@@ -225,6 +334,8 @@ export class AccountStore {
         secret: typeof record.secret === "string" && record.secret ? record.secret : undefined,
         url: text(record.url),
         notes: text(record.notes),
+        tags: sanitizeTags(record.tags),
+        extras: sanitizeExtras(record.extras),
         createdAt,
         updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : createdAt,
       })

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VpnKey
@@ -38,21 +39,22 @@ import com.agentbot.app.ui.theme.TextSecondary
 import com.agentbot.app.ui.theme.TextTertiary
 
 /**
- * Telegram's `/account` panel: named credentials under free-form categories.
+ * Telegram's /account panel: named credentials under free-form categories and tags.
  *
  * The list never carries a password. A reveal is a separate, explicit request whose answer is
  * kept only in memory for the entry the user opened, and the map is dropped on every refresh.
  */
 @Composable
 fun AccountsScreen(vm: AppViewModel) {
-    var adding by remember { mutableStateOf(false) }
+    var formOpen by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<AccountEntry?>(null) }
     var detail by remember { mutableStateOf<AccountEntry?>(null) }
     var pendingDelete by remember { mutableStateOf<AccountEntry?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
             title = "账号库",
-            subtitle = "密码加密保存，分类自由定义",
+            subtitle = "密码加密保存，分类与标签可自定义",
             modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
@@ -61,7 +63,8 @@ fun AccountsScreen(vm: AppViewModel) {
                     contentDescription = "新增账号",
                     onClick = {
                         vm.accountError = null
-                        adding = true
+                        editing = null
+                        formOpen = true
                     },
                 )
                 AppIconButton(
@@ -109,7 +112,7 @@ fun AccountsScreen(vm: AppViewModel) {
                         EmptyState(
                             icon = Icons.Filled.VpnKey,
                             title = if (vm.accounts.isEmpty()) "账号库还是空的" else "这个分类下没有条目",
-                            message = "点右上角 + 新增一条，例如 GitHub / 邮箱 / 服务器。",
+                            message = "点右上角 + 新增一条，例如 GitHub / 邮箱 / 社交平台。",
                         )
                     }
                 }
@@ -120,13 +123,23 @@ fun AccountsScreen(vm: AppViewModel) {
         }
     }
 
-    if (adding) {
-        AddAccountDialog(
+    if (formOpen) {
+        AccountFormDialog(
+            initial = editing,
             busy = vm.accountBusy,
-            onDismiss = { adding = false },
-            onSave = { name, username, password, category, url, notes ->
-                adding = false
-                vm.addAccount(name, username, password, category, url, notes)
+            onDismiss = {
+                formOpen = false
+                editing = null
+            },
+            onSave = { name, username, password, category, url, notes, tags, extras ->
+                val target = editing
+                formOpen = false
+                editing = null
+                if (target == null) {
+                    vm.addAccount(name, username, password, category, url, notes, tags, extras)
+                } else {
+                    vm.updateAccount(target.id, name, username, password, category, url, notes, tags, extras)
+                }
             },
         )
     }
@@ -137,6 +150,12 @@ fun AccountsScreen(vm: AppViewModel) {
             password = vm.revealedAccounts[entry.id],
             onReveal = { vm.revealAccount(entry.id) },
             onHide = { vm.hideAccount(entry.id) },
+            onEdit = {
+                detail = null
+                vm.accountError = null
+                editing = entry
+                formOpen = true
+            },
             onDelete = {
                 detail = null
                 pendingDelete = entry
@@ -225,6 +244,14 @@ private fun AccountCard(entry: AccountEntry, onOpen: () -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 5.dp),
         )
+        if (entry.tags.isNotEmpty()) {
+            Text(
+                entry.tags.joinToString(" ") { "#$it" },
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 5.dp),
+            )
+        }
         entry.url?.takeIf { it.isNotBlank() }?.let { url ->
             Text(
                 url,
@@ -242,6 +269,7 @@ private fun AccountDetailDialog(
     password: String?,
     onReveal: () -> Unit,
     onHide: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -270,12 +298,19 @@ private fun AccountDetailDialog(
                         }
                     }
                 }
+                if (entry.tags.isNotEmpty()) {
+                    DetailRow("标签", entry.tags.joinToString(" ") { "#$it" })
+                }
                 entry.url?.takeIf { it.isNotBlank() }?.let { DetailRow("网址", it) }
                 entry.notes?.takeIf { it.isNotBlank() }?.let { DetailRow("备注", it) }
+                entry.extras.forEach { (key, value) -> DetailRow(key, value) }
+                Row(modifier = Modifier.padding(top = 4.dp)) {
+                    QuietButton(text = "删除", icon = Icons.Filled.DeleteOutline, danger = true, onClick = onDelete)
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDelete) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            TextButton(onClick = onEdit) { Text("编辑") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("关闭") }
@@ -295,43 +330,64 @@ private fun DetailRow(label: String, value: String) {
     }
 }
 
+/**
+ * One form for both modes. [initial] is null when adding; otherwise the fields are pre-filled
+ * and the password stays blank, because an empty password means "keep the stored one".
+ */
 @Composable
-private fun AddAccountDialog(
+private fun AccountFormDialog(
+    initial: AccountEntry?,
     busy: Boolean,
     onDismiss: () -> Unit,
-    onSave: (String, String, String?, String?, String?, String?) -> Unit,
+    onSave: (String, String, String?, String, String, String, List<String>, Map<String, String>) -> Unit,
 ) {
-    var name by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
-    var notes by remember { mutableStateOf("") }
+    var name by remember(initial) { mutableStateOf(initial?.name ?: "") }
+    var username by remember(initial) { mutableStateOf(initial?.username ?: "") }
+    var password by remember(initial) { mutableStateOf("") }
+    var category by remember(initial) { mutableStateOf(initial?.category ?: "") }
+    var url by remember(initial) { mutableStateOf(initial?.url ?: "") }
+    var notes by remember(initial) { mutableStateOf(initial?.notes ?: "") }
+    var tags by remember(initial) { mutableStateOf(initial?.tags?.joinToString(", ") ?: "") }
+    var extras by remember(initial) {
+        mutableStateOf(initial?.extras?.entries?.joinToString("\n") { "${it.key}=${it.value}" } ?: "")
+    }
+
+    val parsedTags = tags.split(",", "，").map { it.trim() }.filter { it.isNotEmpty() }
+    val parsedExtras = extras.lines()
+        .mapNotNull { line ->
+            val at = line.indexOf('=')
+            if (at <= 0) null else line.substring(0, at).trim() to line.substring(at + 1).trim()
+        }
+        .filter { it.first.isNotEmpty() && it.second.isNotEmpty() }
+        .toMap()
 
     AppDialog(
         onDismissRequest = onDismiss,
         scrollable = true,
-        title = { Text("新增账号", style = MaterialTheme.typography.titleLarge) },
+        title = {
+            Text(if (initial == null) "新增账号" else "编辑账号", style = MaterialTheme.typography.titleLarge)
+        },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 AppTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = "名称（必填）",
-                    placeholder = "GitHub",
+                    placeholder = "GitHub / 小红书-品牌号",
                     singleLine = true,
                 )
                 AppTextField(
                     value = username,
                     onValueChange = { username = it },
                     label = "账号",
-                    placeholder = "me@example.com",
+                    placeholder = "me@example.com / 13800138000",
                     singleLine = true,
                 )
                 AppTextField(
                     value = password,
                     onValueChange = { password = it },
                     label = "密码",
+                    placeholder = if (initial == null) "" else "留空则不修改",
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                 )
@@ -340,6 +396,13 @@ private fun AddAccountDialog(
                     onValueChange = { category = it },
                     label = "分类",
                     placeholder = "留空归入「未分类」",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = tags,
+                    onValueChange = { tags = it },
+                    label = "标签（逗号分隔）",
+                    placeholder = "小红书, 美妆, A组",
                     singleLine = true,
                 )
                 AppTextField(
@@ -354,6 +417,13 @@ private fun AddAccountDialog(
                     label = "备注",
                     minLines = 2,
                 )
+                AppTextField(
+                    value = extras,
+                    onValueChange = { extras = it },
+                    label = "自定义字段（每行 键=值）",
+                    placeholder = "绑定邮箱=op@example.com\n负责人=小王",
+                    minLines = 3,
+                )
             }
         },
         confirmButton = {
@@ -364,9 +434,11 @@ private fun AddAccountDialog(
                         name.trim(),
                         username.trim(),
                         password.takeIf { it.isNotBlank() },
-                        category.trim().takeIf { it.isNotBlank() },
-                        url.trim().takeIf { it.isNotBlank() },
-                        notes.trim().takeIf { it.isNotBlank() },
+                        category.trim(),
+                        url.trim(),
+                        notes.trim(),
+                        parsedTags,
+                        parsedExtras,
                     )
                 },
             ) { Text(if (busy) "保存中…" else "保存") }

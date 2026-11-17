@@ -538,7 +538,7 @@ export class OpsService {
     return {
       ok: true,
       file: out,
-      message: `📦 已备份 ${files.length} 个状态文件（${kb} KB）。配对令牌未包含：新机器首次启动会自动重新生成。`,
+      message: `📦 已备份 ${files.length} 个状态文件（${kb} KB）。配对令牌未包含：新机器首次启动会自动重新生成。账号库密钥 \`data/accounts.key\` 同样不在包内，恢复后需单独复制，否则已存密码无法解密。`,
       steps,
     }
   }

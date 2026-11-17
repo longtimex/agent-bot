@@ -128,3 +128,77 @@ test("accounts removes an entry and reports whether it existed", () => {
     f.close()
   }
 })
+
+test("accounts update rewrites only the fields it is given", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "Edit", username: "u1", password: "old", category: "开发", notes: "保留" })
+    const updated = store.update("edit", { password: "new" })
+    assert.equal(updated.category, "开发")
+    assert.equal(updated.notes, "保留")
+    assert.equal(store.reveal("edit")?.password, "new")
+  } finally {
+    f.close()
+  }
+})
+
+test("accounts update clears a field when it is null", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "Clear", username: "u", password: "p", notes: "旧备注", url: "https://x" })
+    const updated = store.update("clear", { notes: null, url: null, password: null })
+    assert.equal(updated.notes, undefined)
+    assert.equal(updated.url, undefined)
+    assert.equal(store.reveal("clear")?.password, "")
+  } finally {
+    f.close()
+  }
+})
+
+test("accounts update refuses to rename onto an existing entry", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "One", username: "u" })
+    store.add({ name: "Two", username: "u" })
+    assert.throws(() => store.update("one", { name: "two" }), /已存在/)
+    // Renaming to its own name is a no-op, not a clash
+    assert.equal(store.update("one", { name: "One" }).name, "One")
+  } finally {
+    f.close()
+  }
+})
+
+test("accounts keeps tags and custom fields, and filters by tag", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({
+      name: "小红书-A",
+      username: "u1",
+      category: "社交运营",
+      tags: ["小红书", "美妆", "A组"],
+      extras: { 绑定邮箱: "op@example.com", 负责人: "小王" },
+    })
+    store.add({ name: "抖音-B", username: "u2", category: "社交运营", tags: ["抖音"] })
+
+    const reloaded = f.store()
+    const entry = reloaded.find("小红书-A")
+    assert.deepEqual(entry?.tags, ["小红书", "美妆", "A组"])
+    assert.deepEqual(entry?.extras, { 绑定邮箱: "op@example.com", 负责人: "小王" })
+
+    assert.equal(reloaded.list(undefined, "美妆").length, 1)
+    // Order follows the locale collation, so only membership is asserted
+    const tagNames = reloaded.tags().map((tag) => tag.name)
+    assert.equal(tagNames.length, 4)
+    for (const tag of ["小红书", "美妆", "A组", "抖音"]) assert.ok(tagNames.includes(tag), `missing tag ${tag}`)
+
+    reloaded.update("小红书-A", { tags: ["小红书"], extras: { 负责人: "小李" } })
+    assert.deepEqual(reloaded.find("小红书-A")?.tags, ["小红书"])
+    assert.deepEqual(reloaded.find("小红书-A")?.extras, { 负责人: "小李" })
+  } finally {
+    f.close()
+  }
+})

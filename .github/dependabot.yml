@@ -13,6 +13,11 @@ updates:
       npm-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # A major bump (typescript 5 -> 7, @types/node 22 -> 26) always breaks the build, and a
+    # red CI from an unmerged dependency PR hides real failures. Majors are scheduled by hand.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # Compose BOM and the Android toolchain move slower and a bump can change how the app
   # compiles, so this runs monthly and relies on the assembleDebug CI job to catch breaks.
@@ -21,8 +26,14 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

@@ -313,6 +313,8 @@ API_PORT=3080
 API_PUBLIC_URL=https://3080-<机器ID>.instabox.tech
 API_TOKEN=
 API_ENCRYPTION=1
+# 账号库拒绝在未加密的请求里传密码；确实要在明文通道上使用才打开这一项
+# ALLOW_PLAINTEXT_SECRETS=1
 ```
 
 `API_TOKEN` 留空时，首次启动会自动生成并保存到 `data/api-token.json`。现在启动 Bot：
@@ -550,7 +552,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/access add <ID>` / `/access del <ID>` | 增删当前渠道白名单：Telegram 填数字用户 ID，飞书填 `ou_` 开头的 open_id；写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
 | `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
 | `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留）。名称不能与内置命令或 App 保留命令重名，避免创建出永远无法触发的指令 |
-| `/account` | 加密账号库：`/account add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注` 保存（后 4 项可省略），`/account ls [分类]` 列出，`/account show 名称` 看详情，`/account pass 名称` 显示明文，`/account rm 名称 yes` 删除。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥单独放在 `data/accounts.key`（不进 `/ops backup` 备份包）；分类可任意自定义，未指定时归入「未分类」 |
+| `/account` | 加密账号库：`add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注 \| 标签` 保存，`edit` 修改（空段不改、`-` 清空）、`rename` 改名、`tag` 覆盖标签、`field 键=值` 增改自定义字段、`unfield` 删除字段、`ls [分类]`、`show`、`pass`（明文仅显示一次，60 秒后自动删除该消息）、`rm 名称 yes`。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥在 `data/accounts.key`（不进 `/ops backup`）；未加密通道下会拒绝携带密码的请求，除非设置 `ALLOW_PLAINTEXT_SECRETS=1` |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。

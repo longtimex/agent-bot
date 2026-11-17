@@ -71,6 +71,9 @@ export async function withApi(
   run: (h: Harness) => Promise<void>,
   encKey?: Buffer,
 ): Promise<void> {
+  // The vault refuses to carry a password over a plaintext hop, and this harness speaks HTTP
+  // without message encryption. The dedicated guard test removes the opt-in to check it.
+  process.env.ALLOW_PLAINTEXT_SECRETS = "1"
   const dir = mkdtempSync(join(tmpdir(), "agent-bot-api-"))
   const store = new SessionStore(join(dir, "sessions.json"), log)
   // The real store, keyed exactly as Telegram keys it, so per-session views are tested
@@ -4435,4 +4438,26 @@ test("api export returns json and markdown history documents", async () => {
       assert.equal(bad.status, 400)
     },
   )
+})
+
+test("accounts refuse to carry a password over a plaintext hop", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const saved = process.env.ALLOW_PLAINTEXT_SECRETS
+    delete process.env.ALLOW_PLAINTEXT_SECRETS
+    try {
+      const created = await fetch(`${h.base}/api/v1/accounts`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ name: "plain", username: "u", password: "secret" }),
+      })
+      assert.equal(created.status, 403)
+      assert.match(((await created.json()) as { error: string }).error, /加密通道|ALLOW_PLAINTEXT_SECRETS/)
+
+      // Reading the list carries no secret, so it still works without encryption
+      const listed = await fetch(`${h.base}/api/v1/accounts`, { headers: authHeaders() })
+      assert.equal(listed.status, 200)
+    } finally {
+      if (saved !== undefined) process.env.ALLOW_PLAINTEXT_SECRETS = saved
+    }
+  })
 })

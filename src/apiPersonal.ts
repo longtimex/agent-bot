@@ -8,7 +8,7 @@ import { normalizeWorkDirInput } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
-import type { AccountEntry, AccountStore } from "./accounts.js"
+import type { AccountEntry, AccountStore, AccountUpdate } from "./accounts.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -468,6 +468,8 @@ function accountView(entry: AccountEntry): Record<string, unknown> {
     hasPassword: Boolean(entry.secret),
     url: entry.url,
     notes: entry.notes,
+    tags: entry.tags,
+    extras: entry.extras,
     updatedAt: entry.updatedAt,
   }
 }
@@ -481,10 +483,20 @@ export async function routeAccounts(
 ): Promise<void> {
   const accounts = deps.accounts
   if (!accounts) throw new ApiError(409, "当前运行环境不支持账号库")
+  // A password must not cross a plaintext hop: without message encryption the App would post
+  // it in clear text over the LAN. An operator who accepts that sets ALLOW_PLAINTEXT_SECRETS=1.
+  const carriesSecret = ctx.method === "PATCH" || (ctx.method === "POST" && (!id || action === "reveal"))
+  if (carriesSecret && !ctx.encrypted && process.env.ALLOW_PLAINTEXT_SECRETS !== "1") {
+    throw new ApiError(
+      403,
+      "账号密码需要通过加密通道传输：请开启 API_ENCRYPTION=1 并在 App 中重新扫码配对；确实接受明文时设置 ALLOW_PLAINTEXT_SECRETS=1",
+    )
+  }
   if (ctx.method === "GET" && !id) {
     deps.json(ctx.res, 200, {
       accounts: accounts.list().map((entry) => accountView(entry)),
       categories: accounts.categories(),
+      tags: accounts.tags(),
     })
     return
   }
@@ -500,10 +512,34 @@ export async function routeAccounts(
         category: typeof body.category === "string" ? body.category : undefined,
         url: typeof body.url === "string" ? body.url : undefined,
         notes: typeof body.notes === "string" ? body.notes : undefined,
+        tags: Array.isArray(body.tags) ? body.tags.map((tag) => String(tag)) : undefined,
+        extras: body.extras && typeof body.extras === "object" ? (body.extras as Record<string, string>) : undefined,
       })
       deps.json(ctx.res, 201, { ok: true, message: `已保存「${entry.name}」。`, account: accountView(entry) })
     } catch (err) {
       throw new ApiError(400, err instanceof Error ? err.message : "无法保存账号")
+    }
+    return
+  }
+  if (ctx.method === "PATCH" && id) {
+    const body = await deps.readJsonBody(ctx.req)
+    const patch: AccountUpdate = {}
+    if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim()
+    if (typeof body.username === "string") patch.username = body.username
+    if (body.password === null) patch.password = null
+    else if (typeof body.password === "string") patch.password = body.password
+    for (const key of ["category", "url", "notes"] as const) {
+      if (!(key in body)) continue
+      const value = body[key]
+      patch[key] = value === null ? null : typeof value === "string" ? value : undefined
+    }
+    if (Array.isArray(body.tags)) patch.tags = body.tags.map((tag) => String(tag))
+    if (body.extras && typeof body.extras === "object") patch.extras = body.extras as Record<string, string>
+    try {
+      const entry = accounts.update(id, patch)
+      deps.json(ctx.res, 200, { ok: true, message: `已更新「${entry.name}」。`, account: accountView(entry) })
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : "无法更新账号")
     }
     return
   }

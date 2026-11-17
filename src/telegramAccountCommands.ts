@@ -1,10 +1,13 @@
 import { escapeMarkdown } from "./messages.js"
+import type { AccountUpdate } from "./accounts.js"
 
 const DEFAULT_CATEGORY_LABEL = "未分类"
 
 export interface AccountCommandDeps {
   accounts: AccountStoreLike
   sendText: (chatId: number, text: string) => Promise<void>
+  /** Sends a message and removes it a minute later; falls back to sendText when absent. */
+  sendSecret?: (chatId: number, text: string) => Promise<void>
 }
 
 interface AccountView {
@@ -15,6 +18,8 @@ interface AccountView {
   secret?: string
   url?: string
   notes?: string
+  tags?: string[]
+  extras?: Record<string, string>
 }
 
 /** The slice of AccountStore the commands need, so tests can pass a fake. */
@@ -24,6 +29,7 @@ interface AccountStoreLike {
   find(ref: string): AccountView | undefined
   reveal(ref: string): { entry: { name: string; category: string }; password: string } | undefined
   remove(ref: string): { name: string } | undefined
+  update(ref: string, patch: AccountUpdate): { id: string; name: string; category: string; extras?: Record<string, string> }
   add(input: {
     name: string
     username: string
@@ -42,6 +48,11 @@ const USAGE = [
   "• `/account ls [分类]` 列出条目",
   "• `/account show 名称` 查看详情（密码打码）",
   "• `/account pass 名称` 显示明文密码",
+  "• `/account edit 名称 | 账号 | 密码 | 分类 | 网址 | 备注 | 标签` 修改（留空段表示不改，写 `-` 表示清空）",
+  "• `/account rename 旧名 新名` 改名称",
+  "• `/account tag 名称 标签1,标签2` 覆盖标签",
+  "• `/account field 名称 键=值 键=值` 增改自定义字段",
+  "• `/account unfield 名称 键` 删除一个字段",
   "• `/account rm 名称 yes` 删除一条",
   "",
   "密码用 AES-256-GCM 加密保存，密钥在 `data/accounts.key`，不会进入备份包。",
@@ -67,6 +78,17 @@ export class TelegramAccountCommands {
         return this.#list(chatId, tail)
       case "show":
         return this.#show(chatId, tail)
+      case "edit":
+        return this.#edit(chatId, tail)
+      case "rename":
+        return this.#rename(chatId, tail)
+      case "tag":
+      case "tags":
+        return this.#tag(chatId, tail)
+      case "field":
+        return this.#field(chatId, tail)
+      case "unfield":
+        return this.#unfield(chatId, tail)
       case "pass":
       case "password":
         return this.#pass(chatId, tail)
@@ -182,10 +204,148 @@ export class TelegramAccountCommands {
       await this.#deps.sendText(chatId, `ℹ️ ${escapeMarkdown(revealed.entry.name)} 没有保存密码。`)
       return
     }
-    await this.#deps.sendText(
-      chatId,
-      `🔑 *${escapeMarkdown(revealed.entry.name)}*\n\n\`${revealed.password.replace(/`/g, "'")}\``,
-    )
+    const body = `🔑 *${escapeMarkdown(revealed.entry.name)}*\n\n\`${revealed.password.replace(/`/g, "'")}\`\n\n_60 秒后自动删除这条消息_`
+    if (this.#deps.sendSecret) await this.#deps.sendSecret(chatId, body)
+    else await this.#deps.sendText(chatId, body)
+  }
+
+
+  /** Pipe-separated like `add`, but an empty segment keeps the current value and `-` clears it. */
+  async #edit(chatId: number, tail: string): Promise<void> {
+    if (!tail.includes("|")) {
+      await this.#deps.sendText(
+        chatId,
+        "用法：`/account edit 名称 | 账号 | 密码 | 分类 | 网址 | 备注 | 标签`\n留空表示不修改，写 `-` 表示清空该字段。",
+      )
+      return
+    }
+    const parts = tail.split("|").map((part) => part.trim())
+    const ref = parts[0] ?? ""
+    if (!ref) {
+      await this.#deps.sendText(chatId, "请在第一段写上要修改的账号名称。")
+      return
+    }
+    const [, username, password, category, url, notes, tags] = parts
+    const patch: AccountUpdate = {}
+    const assign = (value: string | undefined, apply: (next: string | null) => void) => {
+      if (value === undefined || value === "") return
+      apply(value === "-" ? null : value)
+    }
+    assign(username, (value) => { patch.username = value ?? "" })
+    assign(password, (value) => { patch.password = value })
+    assign(category, (value) => { patch.category = value })
+    assign(url, (value) => { patch.url = value })
+    assign(notes, (value) => { patch.notes = value })
+    assign(tags, (value) => { patch.tags = value === null ? [] : value.split(/[,，\s]+/).filter(Boolean) })
+
+    if (Object.keys(patch).length === 0) {
+      await this.#deps.sendText(chatId, "没有任何字段需要修改：请至少填写一段，或用 `-` 清空某段。")
+      return
+    }
+    try {
+      const entry = this.#deps.accounts.update(ref, patch)
+      await this.#deps.sendText(chatId, `✅ 已更新 *${escapeMarkdown(entry.name)}*。`)
+    } catch (err) {
+      await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
+    }
+  }
+
+  async #rename(chatId: number, tail: string): Promise<void> {
+    const [from = "", to = ""] = tail.split(/\s+/)
+    if (!from || !to) {
+      await this.#deps.sendText(chatId, "用法：`/account rename 旧名 新名`")
+      return
+    }
+    try {
+      const entry = this.#deps.accounts.update(from, { name: to })
+      await this.#deps.sendText(chatId, `✅ 已改名为 *${escapeMarkdown(entry.name)}*。`)
+    } catch (err) {
+      await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
+    }
+  }
+
+  async #tag(chatId: number, tail: string): Promise<void> {
+    const at = tail.search(/\s/)
+    const ref = at < 0 ? tail : tail.slice(0, at)
+    const raw = at < 0 ? "" : tail.slice(at + 1)
+    if (!ref) {
+      await this.#deps.sendText(chatId, "用法：`/account tag 名称 标签1,标签2`（留空则清除全部标签）")
+      return
+    }
+    const tags = raw.split(/[,，\s]+/).map((tag) => tag.trim()).filter(Boolean)
+    try {
+      const entry = this.#deps.accounts.update(ref, { tags })
+      await this.#deps.sendText(
+        chatId,
+        tags.length
+          ? `✅ *${escapeMarkdown(entry.name)}* 的标签：${tags.map((tag) => `#${escapeMarkdown(tag)}`).join(" ")}`
+          : `✅ 已清除 *${escapeMarkdown(entry.name)}* 的标签。`,
+      )
+    } catch (err) {
+      await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
+    }
+  }
+
+  /** `键=值` pairs, merged into the existing extras rather than replacing them. */
+  async #field(chatId: number, tail: string): Promise<void> {
+    const at = tail.search(/\s/)
+    const ref = at < 0 ? tail : tail.slice(0, at)
+    const raw = at < 0 ? "" : tail.slice(at + 1).trim()
+    if (!ref || !raw) {
+      await this.#deps.sendText(chatId, "用法：`/account field 名称 绑定邮箱=op@example.com 负责人=小王`")
+      return
+    }
+    const entry = this.#deps.accounts.find(ref)
+    if (!entry) {
+      await this.#deps.sendText(chatId, `❌ 没有找到「${escapeMarkdown(ref)}」。`)
+      return
+    }
+    const additions: Record<string, string> = {}
+    for (const pair of raw.split(/\s+/)) {
+      const eq = pair.indexOf("=")
+      if (eq <= 0) continue
+      additions[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim()
+    }
+    if (Object.keys(additions).length === 0) {
+      await this.#deps.sendText(chatId, "没有识别到 `键=值`，请用等号连接。")
+      return
+    }
+    try {
+      const merged = { ...entry.extras, ...additions }
+      const updated = this.#deps.accounts.update(ref, { extras: merged })
+      const fields = Object.entries(updated.extras ?? {}).map(([key, value]) => `• ${escapeMarkdown(key)}：${escapeMarkdown(value)}`)
+      await this.#deps.sendText(
+        chatId,
+        `✅ *${escapeMarkdown(updated.name)}* 的自定义字段（${fields.length}）\n\n${fields.join("\n")}`,
+      )
+    } catch (err) {
+      await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
+    }
+  }
+
+  async #unfield(chatId: number, tail: string): Promise<void> {
+    const [ref = "", key = ""] = tail.split(/\s+/)
+    if (!ref || !key) {
+      await this.#deps.sendText(chatId, "用法：`/account unfield 名称 字段名`")
+      return
+    }
+    const entry = this.#deps.accounts.find(ref)
+    if (!entry) {
+      await this.#deps.sendText(chatId, `❌ 没有找到「${escapeMarkdown(ref)}」。`)
+      return
+    }
+    const extras = { ...entry.extras }
+    if (!(key in extras)) {
+      await this.#deps.sendText(chatId, `ℹ️ *${escapeMarkdown(entry.name)}* 没有字段「${escapeMarkdown(key)}」。`)
+      return
+    }
+    delete extras[key]
+    try {
+      this.#deps.accounts.update(ref, { extras })
+      await this.#deps.sendText(chatId, `🗑 已删除字段「${escapeMarkdown(key)}」。`)
+    } catch (err) {
+      await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
+    }
   }
 
   async #remove(chatId: number, tail: string): Promise<void> {

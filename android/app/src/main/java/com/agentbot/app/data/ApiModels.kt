@@ -285,6 +285,10 @@ data class AccountEntry(
     val hasPassword: Boolean = false,
     val url: String? = null,
     val notes: String? = null,
+    /** One entry can belong to several groups at once: 小红书 / 美妆 / A组. */
+    val tags: List<String> = emptyList(),
+    /** Per-entry custom fields, e.g. 绑定邮箱 / 负责人. */
+    val extras: Map<String, String> = emptyMap(),
     val updatedAt: Long = 0,
 )
 
@@ -295,6 +299,7 @@ data class AccountCategory(val name: String, val count: Int = 0)
 data class AccountList(
     val accounts: List<AccountEntry> = emptyList(),
     val categories: List<AccountCategory> = emptyList(),
+    val tags: List<AccountCategory> = emptyList(),
 )
 
 @Serializable

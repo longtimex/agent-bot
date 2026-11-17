@@ -620,6 +620,10 @@ class AppViewModel(
     var accountCategories by mutableStateOf<List<AccountCategory>>(emptyList())
         private set
 
+    /** Tag chips, derived the same way; an entry may carry several. */
+    var accountTags by mutableStateOf<List<AccountCategory>>(emptyList())
+        private set
+
     /** Null means every category. */
     var accountFilter by mutableStateOf<String?>(null)
 
@@ -2730,6 +2734,7 @@ class AppViewModel(
             val list = api.accounts(conn())
             accounts = list.accounts
             accountCategories = list.categories
+            accountTags = list.tags
             revealedAccounts = emptyMap()
         }
     }
@@ -2745,12 +2750,41 @@ class AppViewModel(
         category: String?,
         url: String?,
         notes: String?,
+        tags: List<String> = emptyList(),
+        extras: Map<String, String> = emptyMap(),
     ) {
         if (accountBusy) return
         accountBusy = true
         viewModelScope.launch {
             try {
-                toast = api.addAccount(conn(), name, username, password, category, url, notes)
+                toast = api.addAccount(conn(), name, username, password, category, url, notes, tags, extras)
+                accountError = null
+                refreshAccounts()
+            } catch (err: Exception) {
+                accountError = "保存失败：${err.message}"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    /** Rewrites an entry; a blank password means "keep the stored one". */
+    fun updateAccount(
+        id: String,
+        name: String,
+        username: String,
+        password: String?,
+        category: String,
+        url: String,
+        notes: String,
+        tags: List<String>,
+        extras: Map<String, String>,
+    ) {
+        if (accountBusy) return
+        accountBusy = true
+        viewModelScope.launch {
+            try {
+                toast = api.updateAccount(conn(), id, name, username, password, category, url, notes, tags, extras)
                 accountError = null
                 refreshAccounts()
             } catch (err: Exception) {
