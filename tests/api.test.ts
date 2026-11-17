@@ -4667,3 +4667,21 @@ test("api refuses a relay for an engine that does not read one from the environm
     assert.match(((await res.json()) as { error: string }).error, /不支持通过环境变量/)
   })
 })
+
+test("api marks which engines can take a relay and which cannot", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const listed = await fetch(`${h.base}/api/v1/agents`, { headers: authHeaders() })
+    assert.equal(listed.status, 200)
+    type Row = { id: string; relaySupported?: boolean }
+    const rows = ((await listed.json()) as { agents: Row[] }).agents
+    const byId = new Map(rows.map((row) => [row.id, row]))
+
+    // codex / qoder read OPENAI_*, claude reads ANTHROPIC_*, gemini reads GEMINI_*
+    for (const engine of ["codex", "qoder", "claude", "gemini"]) {
+      assert.equal(byId.get(engine)?.relaySupported, true, `${engine} must offer a relay`)
+    }
+    // copilot authenticates by account and the built-in engine lives in opencode.json
+    assert.equal(byId.get("copilot")?.relaySupported, false)
+    assert.equal(byId.get("opencode")?.relaySupported, false)
+  })
+})

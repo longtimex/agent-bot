@@ -302,7 +302,9 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
     var adding by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<String?>(null) }
     val engine = vm.agentModelEngine
-    val label = vm.agents.firstOrNull { it.id == engine }?.label ?: engine
+    val agent = vm.agents.firstOrNull { it.id == engine }
+    val label = agent?.label ?: engine
+    val relaySupported = agent?.relaySupported == true
 
     LaunchedEffect(engine) {
         vm.loadAgentCustomModels(engine)
@@ -344,7 +346,9 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { RelayCard(vm, label) }
+            // Only engines that read their endpoint from the environment can use a relay;
+            // showing the card elsewhere just leads to a rejected save
+            if (relaySupported) item { RelayCard(vm, label) }
             if (vm.agentCustomModels.isEmpty()) {
                 item {
                     AppCard {

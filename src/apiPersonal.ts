@@ -12,6 +12,7 @@ import type { AccountStore } from "./accounts.js"
 import { APP_CHAT_ID, type NoticeStore } from "./appNotices.js"
 import type { SettingsStore } from "./settings.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
+import { supportsRelay } from "./agentProviders.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -704,6 +705,8 @@ export function builtinAgentView(): Record<string, unknown> {
     install: undefined,
     sessionMode: "session",
     supportsModel: true,
+    // OpenCode takes its provider block in opencode.json, not an env var
+    relaySupported: false,
     models: undefined,
     experimental: undefined,
     // The built-in engine runs under the bot's own approval rules, never through a CLI flag
@@ -735,6 +738,8 @@ export function agentView(deps: PersonalRouteDeps, profile: AgentCliProfile): Re
     install: profile.install,
     sessionMode: profile.sessionMode,
     supportsModel: Boolean(profile.supportsModel),
+    // Only engines that read their endpoint from the environment can point at a relay
+    relaySupported: supportsRelay(profile.id),
     // Models are discovered per account at request time; a client asks /models?engine=…
     // instead of receiving a stale, hand-maintained list with every engine.
     models: undefined,
