@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Help
@@ -151,6 +152,7 @@ fun AppDrawer(
                 DrawerItem(Icons.Filled.Notifications, "提醒", current is Screen.Reminders) { onNavigate(Screen.Reminders) }
                 DrawerItem(Icons.Filled.Schedule, "定时任务", current is Screen.Schedules) { onNavigate(Screen.Schedules) }
                 DrawerItem(Icons.Filled.Bolt, "快捷指令", current is Screen.Aliases) { onNavigate(Screen.Aliases) }
+                DrawerItem(Icons.Filled.VpnKey, "账号库", current is Screen.Accounts) { onNavigate(Screen.Accounts) }
 
                 DrawerSection("智能体与工具")
                 DrawerItem(Icons.Filled.Extension, "引擎管理", current is Screen.Agents) { onNavigate(Screen.Agents) }

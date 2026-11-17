@@ -21,6 +21,7 @@ import type { ReminderService } from "./reminders.js"
 import type { ScheduleService } from "./scheduler.js"
 import {
   routeAccess as routeAccessApi,
+  routeAccounts as routeAccountsApi,
   routeAliases as routeAliasesApi,
   routeConfig as routeConfigApi,
   routeDir as routeDirApi,
@@ -45,6 +46,7 @@ import type { BotConfig } from "./config.js"
 import type { ChannelIdResolver } from "./channelRegistry.js"
 import type { Opencode } from "./opencode.js"
 import { type OpsResult, type OpsService } from "./ops.js"
+import type { AccountStore } from "./accounts.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
@@ -93,6 +95,7 @@ export interface ApiServerOptions {
   proxies?: ProxyService
   /** Per-chat shortcuts; the app shares the owner chat's list when one is paired. */
   aliases?: AliasStore
+  accounts?: AccountStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
   access?: {
     list: () => { users: string[]; allowAll: boolean }
@@ -476,6 +479,11 @@ export class ApiServer {
       return
     }
 
+    if (resource === "accounts") {
+      await routeAccountsApi(this.#personalDeps(), ctx, id, action)
+      return
+    }
+
     if (resource === "access") {
       await this.#routeAccess(ctx, id)
       return
@@ -843,6 +851,7 @@ export class ApiServer {
       timezone: () => this.#opts.timezone(),
       setTimezone: this.#opts.setTimezone,
       aliases: this.#opts.aliases,
+      accounts: this.#opts.accounts,
       ops: this.#opts.ops,
       proxies: this.#opts.proxies,
       history: this.#opts.history,

@@ -28,6 +28,7 @@ import { TaskHistoryStore } from "../src/history.js"
 import type { Logger } from "../src/logger.js"
 import { ModelAdmin } from "../src/modelAdmin.js"
 import { ProxyService } from "../src/proxy.js"
+import { AccountStore } from "../src/accounts.js"
 import { AliasStore } from "../src/aliases.js"
 import { Opencode } from "../src/opencode.js"
 import type { OpsService } from "../src/ops.js"
@@ -112,6 +113,7 @@ export async function withApi(
   const models = new ModelAdmin(join(dir, "models.json"), dir, "assistant", store)
   // Instant success so proxy management tests stay fast and offline
   const aliases = new AliasStore(join(dir, "aliases.json"), log)
+  const accounts = new AccountStore(join(dir, "accounts.json"), join(dir, "accounts.key"), log)
   const allowUsers = new Set(["42", "7"])
   const access = {
     list: () => ({ users: [...allowUsers], allowAll: false }),
@@ -487,6 +489,7 @@ export async function withApi(
       models,
       proxies,
       aliases,
+      accounts,
       access,
       timezone: () => currentTz,
       setTimezone: (zone) => {

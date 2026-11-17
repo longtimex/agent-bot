@@ -95,6 +95,7 @@ export class AccountStore {
 
   /** Newest first within a category; `category` empty means every entry. */
   list(category?: string): AccountEntry[] {
+    this.#refresh()
     const wanted = category?.trim()
     return [...this.#accounts.values()]
       .filter((entry) => !wanted || entry.category === wanted)
@@ -103,6 +104,7 @@ export class AccountStore {
 
   /** Category names with counts, so a panel can offer them without a fixed list. */
   categories(): Array<{ name: string; count: number }> {
+    this.#refresh()
     const counts = new Map<string, number>()
     for (const entry of this.#accounts.values()) {
       counts.set(entry.category, (counts.get(entry.category) ?? 0) + 1)
@@ -114,6 +116,7 @@ export class AccountStore {
 
   /** Resolves by name (case-insensitive) or by id. */
   find(ref: string): AccountEntry | undefined {
+    this.#refresh()
     const trimmed = ref.trim()
     if (ID_RE.test(trimmed)) {
       const byId = this.#accounts.get(trimmed)
@@ -125,6 +128,7 @@ export class AccountStore {
 
   /** Decrypts the password for a deliberate reveal; never part of a list response. */
   reveal(ref: string): { entry: AccountEntry; password: string } | undefined {
+    this.#refresh()
     const entry = this.find(ref)
     if (!entry) return undefined
     if (!entry.secret) return { entry, password: "" }
@@ -172,6 +176,16 @@ export class AccountStore {
     throw new Error(
       `账号库 ${this.#path} 无法解析，为避免覆盖已有条目已拒绝写入。请修复该文件或备份后删除再重试。`,
     )
+  }
+
+  /**
+   * Re-reads the file before a lookup. `/account` may be answered by the bridge while the
+   * App writes through the API, and both hold their own store instance.
+   */
+  #refresh(): void {
+    this.#accounts.clear()
+    this.#unreadable = false
+    this.#load()
   }
 
   #load(): void {

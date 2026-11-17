@@ -8,6 +8,7 @@ import { normalizeWorkDirInput } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
+import type { AccountEntry, AccountStore } from "./accounts.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -56,6 +57,7 @@ export interface PersonalRouteDeps {
   timezone(): string
   setTimezone?: (zone: string) => { ok: boolean; message: string }
   aliases?: AliasStore
+  accounts?: AccountStore
   ops?: OpsService
   proxies?: ProxyService
   history: TaskHistoryStore
@@ -454,6 +456,70 @@ export async function routeAliases(deps: PersonalRouteDeps, ctx: ApiRequestConte
     return
   }
   throw new ApiError(404, "未知的快捷指令 API 路径")
+}
+
+function accountView(entry: AccountEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    name: entry.name,
+    category: entry.category,
+    username: entry.username,
+    // The ciphertext never leaves the server; the App only needs to know one exists.
+    hasPassword: Boolean(entry.secret),
+    url: entry.url,
+    notes: entry.notes,
+    updatedAt: entry.updatedAt,
+  }
+}
+
+/** `/account` for the App: the same store the Telegram bridge answers from. */
+export async function routeAccounts(
+  deps: PersonalRouteDeps,
+  ctx: ApiRequestContext,
+  id: string | undefined,
+  action: string | undefined,
+): Promise<void> {
+  const accounts = deps.accounts
+  if (!accounts) throw new ApiError(409, "当前运行环境不支持账号库")
+  if (ctx.method === "GET" && !id) {
+    deps.json(ctx.res, 200, {
+      accounts: accounts.list().map((entry) => accountView(entry)),
+      categories: accounts.categories(),
+    })
+    return
+  }
+  if (ctx.method === "POST" && !id) {
+    const body = await deps.readJsonBody(ctx.req)
+    const name = typeof body.name === "string" ? body.name : ""
+    if (!name.trim()) throw new ApiError(400, "缺少 name 字段，例如：{\"name\":\"GitHub\"}")
+    try {
+      const entry = accounts.add({
+        name,
+        username: typeof body.username === "string" ? body.username : "",
+        password: typeof body.password === "string" ? body.password : undefined,
+        category: typeof body.category === "string" ? body.category : undefined,
+        url: typeof body.url === "string" ? body.url : undefined,
+        notes: typeof body.notes === "string" ? body.notes : undefined,
+      })
+      deps.json(ctx.res, 201, { ok: true, message: `已保存「${entry.name}」。`, account: accountView(entry) })
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : "无法保存账号")
+    }
+    return
+  }
+  if (ctx.method === "POST" && id && action === "reveal") {
+    const revealed = accounts.reveal(id)
+    if (!revealed) throw new ApiError(404, "账号不存在")
+    deps.json(ctx.res, 200, { ok: true, password: revealed.password })
+    return
+  }
+  if (ctx.method === "DELETE" && id) {
+    const removed = accounts.remove(id)
+    if (!removed) throw new ApiError(404, "账号不存在")
+    deps.json(ctx.res, 200, { ok: true, message: `已删除「${removed.name}」。` })
+    return
+  }
+  throw new ApiError(404, "未知的账号库 API 路径")
 }
 
 function configView(deps: PersonalRouteDeps, ops: OpsService): Record<string, unknown> {

@@ -650,6 +650,43 @@ class ApiClient {
         send(connection, "DELETE", "/aliases/$name")
     }
 
+    // ---- accounts ----
+
+    suspend fun accounts(connection: Connection): AccountList =
+        json.decodeFromJsonElement(AccountList.serializer(), getBody(connection, "/accounts"))
+
+    suspend fun addAccount(
+        connection: Connection,
+        name: String,
+        username: String,
+        password: String?,
+        category: String?,
+        url: String?,
+        notes: String?,
+    ): String {
+        val body = buildJsonObject {
+            put("name", name)
+            put("username", username)
+            password?.takeIf { it.isNotBlank() }?.let { put("password", it) }
+            category?.takeIf { it.isNotBlank() }?.let { put("category", it) }
+            url?.takeIf { it.isNotBlank() }?.let { put("url", it) }
+            notes?.takeIf { it.isNotBlank() }?.let { put("notes", it) }
+        }
+        val res = send(connection, "POST", "/accounts", body)
+        return res["message"]?.jsonPrimitive?.content ?: "已保存"
+    }
+
+    /** Returns the decrypted password; the caller shows it once and forgets it. */
+    suspend fun revealAccount(connection: Connection, id: String): String {
+        val res = send(connection, "POST", "/accounts/$id/reveal")
+        return json.decodeFromJsonElement(AccountReveal.serializer(), res).password
+    }
+
+    suspend fun deleteAccount(connection: Connection, id: String): String {
+        val res = send(connection, "DELETE", "/accounts/$id")
+        return res["message"]?.jsonPrimitive?.content ?: "已删除"
+    }
+
     // ---- proxies ----
 
     suspend fun proxies(connection: Connection): ProxyList =

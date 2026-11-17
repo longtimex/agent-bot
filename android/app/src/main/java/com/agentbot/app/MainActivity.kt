@@ -203,6 +203,7 @@ class MainActivity : ComponentActivity() {
                                     Screen.Ops -> OpsScreen(vm)
                                     Screen.Proxy -> ProxyScreen(vm)
                                     Screen.Aliases -> AliasesScreen(vm)
+                                    Screen.Accounts -> AccountsScreen(vm)
                                     Screen.Access -> AccessScreen(vm)
                                     Screen.Models -> ModelsScreen(vm)
                                     Screen.Cc -> CcScreen(vm)

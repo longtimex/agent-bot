@@ -354,6 +354,14 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
       })
       const scheduleId = String(view(scheduleBody ?? {}, "schedule").id)
       await call({ name: "addAlias → POST /aliases", method: "POST", path: "/aliases", body: { name: "probe", expansion: "timezone" } })
+      await call({
+        name: "addAccount → POST /accounts",
+        method: "POST",
+        path: "/accounts",
+        body: { name: "probe", username: "probe@example.com", password: "p", category: "测试" },
+        model: "AccountEntry",
+        at: "account",
+      })
 
       // ---- everything the screens read on open ----
       const statics: Probe[] = [
@@ -370,6 +378,9 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "models → GET /models", method: "GET", path: "/models", model: "ModelChoices", at: "models" },
         { name: "access → GET /access", method: "GET", path: "/access", model: "AccessInfo" },
         { name: "aliases → GET /aliases", method: "GET", path: "/aliases", model: "AliasEntry", at: "aliases[]" },
+        { name: "accounts → GET /accounts", method: "GET", path: "/accounts", model: "AccountEntry", at: "accounts[]" },
+        { name: "accountCategories → GET /accounts", method: "GET", path: "/accounts", model: "AccountCategory", at: "categories[]" },
+        { name: "revealAccount → POST /accounts/probe/reveal", method: "POST", path: "/accounts/probe/reveal", model: "AccountReveal" },
         { name: "proxies → GET /proxy", method: "GET", path: "/proxy", model: "ProxyList" },
         { name: "diagnostics → GET /ops/diag", method: "GET", path: "/ops/diag", model: "Diagnostics", at: "diagnostics" },
         { name: "releaseInfo release → GET /ops/release", method: "GET", path: "/ops/release", model: "ReleaseInfo", at: "release" },
@@ -440,6 +451,7 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "addAccess → POST /access", method: "POST", path: "/access", body: { id: "7" }, model: "AccessResult" },
         { name: "removeAccess → DELETE /access/7", method: "DELETE", path: "/access/7", model: "AccessResult" },
         { name: "deleteAlias → DELETE /aliases/probe", method: "DELETE", path: "/aliases/probe" },
+        { name: "deleteAccount → DELETE /accounts/probe", method: "DELETE", path: "/accounts/probe" },
         {
           name: "addProxy → POST /proxy",
           method: "POST",

@@ -148,6 +148,8 @@ export class TelegramBridge {
   readonly #reminders: ReminderService
   readonly #aliases: AliasStore
   readonly #accountCommands: TelegramAccountCommands
+  /** Shared with the API so an entry written from either side is immediately visible. */
+  readonly accountStore: AccountStore
   readonly #schedules: ScheduleService
   readonly #cc: CcSwitchService
   readonly #models: ModelAdmin
@@ -248,10 +250,8 @@ export class TelegramBridge {
     this.#history = new TaskHistoryStore(resolve(cfg.dataDir, "history.json"), log)
     this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
-    this.#accountCommands = new TelegramAccountCommands({
-      accounts: new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log),
-      sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) },
-    })
+    this.accountStore = new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log)
+    this.#accountCommands = new TelegramAccountCommands({ accounts: this.accountStore, sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) } })
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
       (chatId, text, reminder) => this.#deliverReminder(chatId, text, reminder),

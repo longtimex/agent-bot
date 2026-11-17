@@ -217,6 +217,7 @@ async function main(): Promise<void> {
           androidRelease: new AndroidReleaseService({ projectDir: process.cwd() }),
           proxies,
           aliases: tgBridge.aliasStore,
+          accounts: tgBridge.accountStore,
           ccswitch: tgBridge.ccSwitch,
           magpie,
           fetchMedia: (target) => tgBridge.fetchRemoteMedia(target),

@@ -14,6 +14,8 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.agentbot.app.data.AccountCategory
+import com.agentbot.app.data.AccountEntry
 import com.agentbot.app.data.AgentActionResult
 import com.agentbot.app.data.AccessResult
 import com.agentbot.app.data.AliasEntry
@@ -118,6 +120,7 @@ sealed interface Screen {
     data object Ops : Screen
     data object Proxy : Screen
     data object Aliases : Screen
+    data object Accounts : Screen
     data object Access : Screen
     data object Models : Screen
     data object Cc : Screen
@@ -610,6 +613,25 @@ class AppViewModel(
     /** The last alias rejection came from the draft itself, so its prompt shows it inline. */
     var aliasesDraftRejected by mutableStateOf(false)
 
+    var accounts by mutableStateOf<List<AccountEntry>>(emptyList())
+        private set
+
+    /** Category chips: the server derives them from the entries, so any name is valid. */
+    var accountCategories by mutableStateOf<List<AccountCategory>>(emptyList())
+        private set
+
+    /** Null means every category. */
+    var accountFilter by mutableStateOf<String?>(null)
+
+    var accountError by mutableStateOf<String?>(null)
+
+    var accountBusy by mutableStateOf(false)
+        private set
+
+    /** Decrypted passwords for the entries the user asked to reveal, keyed by id. */
+    var revealedAccounts by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
     var accessUsers by mutableStateOf<List<String>>(emptyList())
         private set
 
@@ -945,6 +967,7 @@ class AppViewModel(
             Screen.Settings -> refreshAndroidRelease()
             Screen.Proxy -> refreshProxies()
             Screen.Aliases -> refreshAliases()
+            Screen.Accounts -> refreshAccounts()
             Screen.Access -> refreshAccess()
             Screen.Models -> refreshCustomModels()
             Screen.Cc -> refreshCc()
@@ -2699,6 +2722,70 @@ class AppViewModel(
     private fun refreshAliasesQuietly() = quietly({ aliasesError = "无法加载快捷指令：$it" }) {
         aliases = api.aliases(conn())
         aliasesError = null
+    }
+
+    fun refreshAccounts() {
+        guarded("加载账号库", onError = { accountError = "无法加载账号库：${it.message}" }) {
+            accountError = null
+            val list = api.accounts(conn())
+            accounts = list.accounts
+            accountCategories = list.categories
+            revealedAccounts = emptyMap()
+        }
+    }
+
+    fun setAccountFilter(category: String?) {
+        accountFilter = category
+    }
+
+    fun addAccount(
+        name: String,
+        username: String,
+        password: String?,
+        category: String?,
+        url: String?,
+        notes: String?,
+    ) {
+        if (accountBusy) return
+        accountBusy = true
+        viewModelScope.launch {
+            try {
+                toast = api.addAccount(conn(), name, username, password, category, url, notes)
+                accountError = null
+                refreshAccounts()
+            } catch (err: Exception) {
+                accountError = "保存失败：${err.message}"
+            } finally {
+                accountBusy = false
+            }
+        }
+    }
+
+    /** Reveals one password; the map is cleared on the next refresh. */
+    fun revealAccount(id: String) {
+        viewModelScope.launch {
+            try {
+                revealedAccounts = revealedAccounts + (id to api.revealAccount(conn(), id))
+            } catch (err: Exception) {
+                accountError = "读取密码失败：${err.message}"
+            }
+        }
+    }
+
+    fun hideAccount(id: String) {
+        revealedAccounts = revealedAccounts - id
+    }
+
+    fun deleteAccount(id: String) {
+        viewModelScope.launch {
+            try {
+                toast = api.deleteAccount(conn(), id)
+                revealedAccounts = revealedAccounts - id
+                refreshAccounts()
+            } catch (err: Exception) {
+                accountError = "删除失败：${err.message}"
+            }
+        }
     }
 
     /** Silent refresh for the chat palette; a failed lookup must not paint an error banner. */

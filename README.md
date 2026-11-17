@@ -587,6 +587,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
 | `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：连接 Telegram/飞书时与所有者会话共享同一份列表，仅安卓端时保存在 App 会话；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
+| `GET/POST /accounts` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回，客户端不缓存 |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
 | `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
 | `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |

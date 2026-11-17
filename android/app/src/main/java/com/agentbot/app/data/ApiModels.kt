@@ -276,6 +276,31 @@ data class AliasEntry(
 )
 
 @Serializable
+data class AccountEntry(
+    val id: String,
+    val name: String,
+    val category: String = "未分类",
+    val username: String = "",
+    /** True when a password is stored; the ciphertext never leaves the server. */
+    val hasPassword: Boolean = false,
+    val url: String? = null,
+    val notes: String? = null,
+    val updatedAt: Long = 0,
+)
+
+@Serializable
+data class AccountCategory(val name: String, val count: Int = 0)
+
+@Serializable
+data class AccountList(
+    val accounts: List<AccountEntry> = emptyList(),
+    val categories: List<AccountCategory> = emptyList(),
+)
+
+@Serializable
+data class AccountReveal(val ok: Boolean = false, val password: String = "", val message: String? = null)
+
+@Serializable
 data class ProxyInfo(
     val id: Int,
     val name: String,
