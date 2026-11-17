@@ -93,7 +93,8 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                     PickerRow(
                         primary = model.label,
                         secondary = model.desc ?: model.detail,
-                        selected = model.label == vm.session?.model,
+                        // session.model holds the value, not the display label
+                        selected = model.value == vm.session?.model,
                         onClick = {
                             vm.setModel(model)
                         },
