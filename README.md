@@ -325,7 +325,7 @@ npm run bot -- status
 npm run bot -- doctor
 ```
 
-如果之前已经启动过 Bot，改成 `npm run bot -- restart`。也可以等拿到公网 URL 后运行 `npm run setup` 选择安卓 App，让向导生成 Token 并写入同样的四项配置；随后再把 `API_ENCRYPTION=1` 写入 `.env` 并重启。
+如果之前已经启动过 Bot，改成 `npm run bot -- restart`。也可以等拿到公网 URL 后运行 `npm run setup` 选择安卓 App：向导会生成 Token、写入配对地址，并自动启用 `API_ENCRYPTION=1`，确保账号库的密码可以正常保存和显示。
 
 **安全提醒**：`instabox-port publish` 默认是公开端口，任何拿到 URL 的人都能访问 API。Bot 自身仍会校验 Bearer Token，但请同时开启 `API_ENCRYPTION=1`，不要把地址和令牌贴到公开聊天。不要用 `--private`：它的 `_token` 查询参数只适合浏览器打开根页面，无法可靠附加到 App 的所有 `/api/v1` 请求上。
 

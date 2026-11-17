@@ -127,6 +127,69 @@ test("encrypted request bodies get encrypted responses end to end", async () => 
   }
 })
 
+test("the account vault stores and reveals a password through the encrypted channel", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-enc-accounts-"))
+  try {
+    const encKey = resolveEncKey({
+      ...loadConfig({ TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_ALLOW_USERS: "7", API_ENCRYPTION: "1" }),
+      dataDir: dir,
+    })!
+
+    await withApi(
+      async () => "回复",
+      async (h) => {
+        const saved = process.env.ALLOW_PLAINTEXT_SECRETS
+        delete process.env.ALLOW_PLAINTEXT_SECRETS
+        try {
+          const plaintext = await fetch(`${h.base}/api/v1/accounts`, {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify({ name: "plain", password: "must-not-cross" }),
+          })
+          assert.equal(plaintext.status, 403)
+
+          const created = await fetch(`${h.base}/api/v1/accounts`, {
+            method: "POST",
+            headers: { ...authHeaders(), "x-enc": "v1" },
+            body: encryptPayload(encKey, JSON.stringify({
+              name: "GitHub",
+              username: "octocat",
+              password: "s3cret",
+              category: "开发",
+              tags: ["工作"],
+            })),
+          })
+          assert.equal(created.status, 201)
+          assert.equal(created.headers.get("x-enc"), "v1")
+          const createWire = await created.text()
+          assert.doesNotMatch(createWire, /s3cret|GitHub|octocat/)
+          const createdBody = JSON.parse(decryptPayload(encKey, createWire)) as {
+            account: { id: string; name: string; hasPassword: boolean }
+          }
+          assert.equal(createdBody.account.name, "GitHub")
+          assert.equal(createdBody.account.hasPassword, true)
+
+          const revealed = await fetch(`${h.base}/api/v1/accounts/${createdBody.account.id}/reveal`, {
+            method: "POST",
+            headers: { ...authHeaders(), "x-enc": "v1" },
+          })
+          assert.equal(revealed.status, 200)
+          assert.equal(revealed.headers.get("x-enc"), "v1")
+          const revealWire = await revealed.text()
+          assert.doesNotMatch(revealWire, /s3cret/)
+          assert.equal((JSON.parse(decryptPayload(encKey, revealWire)) as { password: string }).password, "s3cret")
+        } finally {
+          if (saved !== undefined) process.env.ALLOW_PLAINTEXT_SECRETS = saved
+          else delete process.env.ALLOW_PLAINTEXT_SECRETS
+        }
+      },
+      encKey,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 /** Raw GET: `fetch` inflates gzip by itself, which would hide the byte order checked below. */
 function rawGet(
   url: string,

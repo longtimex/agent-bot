@@ -310,7 +310,9 @@ test("runClientSetup accepts Android alone and writes a usable pairing configura
     assert.match(env, /^API_PORT=3080$/m)
     assert.match(env, /^API_PUBLIC_URL=http:\/\/192\.168\.1\.10:3080$/m)
     assert.match(env, /^API_TOKEN=[0-9a-f]{48}$/m)
+    assert.match(env, /^API_ENCRYPTION=1$/m, "the wizard must enable the encrypted channel required by the account vault")
     assert.ok(lines.some((line) => line.includes("http://192.168.1.10:3080/api/v1")))
+    assert.ok(lines.some((line) => line.includes("API_ENCRYPTION=1")))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

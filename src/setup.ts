@@ -503,6 +503,7 @@ export async function runAndroidSetup(deps: SetupDeps): Promise<SetupResult> {
   deps.print(`  API_PORT=${apiPort}`)
   deps.print(`  API_PUBLIC_URL=${publicUrl}`)
   deps.print(`  API_TOKEN=${maskApiToken(token)}`)
+  deps.print("  API_ENCRYPTION=1（账号库密码需要加密通道）")
   if (!(await yesNo(deps, "确认保存？", true))) {
     deps.print("已取消，未做任何修改。")
     return { ok: false, reason: "cancelled" }
@@ -514,6 +515,9 @@ export async function runAndroidSetup(deps: SetupDeps): Promise<SetupResult> {
     API_PORT: String(apiPort),
     API_PUBLIC_URL: publicUrl,
     API_TOKEN: token,
+    // The vault deliberately refuses to send a password through a plaintext API request.
+    // Pairing encryption is therefore part of a usable Android setup, not an optional step.
+    API_ENCRYPTION: "1",
   }
   persistEnv(deps.envPath, updates, "HTTP API（安卓 App 首次连接向导）")
 
