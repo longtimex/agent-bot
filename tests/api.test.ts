@@ -1869,14 +1869,16 @@ test("api lists the built-in OpenCode engine beside the CLIs", async () => {
     const builtIn = rows.find((row) => row.id === "opencode")
     assert.ok(builtIn, "GET /agents must offer the engine that POST /agent accepts")
     assert.equal(builtIn.installed, true)
-    // It ships with the bot, so no client may be offered an install, update or removal
+    // Installed and updated by the setup script, but removable once nothing runs on it
     assert.equal(builtIn.installable, false)
     assert.equal(builtIn.updateable, false)
-    assert.equal(builtIn.uninstallable, false)
+    assert.equal(builtIn.uninstallable, true)
     assert.ok(new Set(rows.map((row) => row.id)).size === rows.length, "engine ids must stay unique")
 
+    // Installing it is the setup script's job, and the route says so instead of 404-ing
     const refused = await fetch(`${h.base}/api/v1/agents/opencode/install`, { method: "POST", headers: authHeaders() })
-    assert.equal(refused.status, 404)
+    assert.equal(refused.status, 400)
+    assert.match(((await refused.json()) as { error: string }).error, /install-cc-switch/)
 
     // The point of listing it: a session on a CLI engine can be handed back
     const switchTo = async (engine: string): Promise<string> => {
