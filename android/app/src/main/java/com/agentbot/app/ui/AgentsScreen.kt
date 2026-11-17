@@ -259,7 +259,7 @@ fun AgentsScreen(vm: AppViewModel) {
                                     text = if (vm.defaultEngine == agent.id) "取消默认" else "设为默认",
                                     enabled = !busy,
                                     onClick = {
-                                        vm.setDefaultEngine(if (vm.defaultEngine == agent.id) null else agent.id)
+                                        vm.chooseDefaultEngine(if (vm.defaultEngine == agent.id) null else agent.id)
                                     },
                                 )
                             }

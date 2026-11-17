@@ -146,7 +146,26 @@ export function balanceError(path, src) {
  * miss while moving components around. Kotlin aliases (`... as DrawerSurface`) are the
  * intended escape hatch and are reported by their alias, so they stay unique.
  */
-export function importCollision(path, source) {
+export 
+/**
+ * `var x by mutableStateOf(...)` already generates `setX()` in the JVM signature. A hand-written
+ * `fun setX(...)` in the same class therefore fails compilation with a platform declaration
+ * clash — which has happened twice, and only the Android build catches it.
+ */
+function stateSetterClash(source) {
+  const problems = []
+  const vars = [...source.matchAll(/^\s*var\s+(\w+)\s+by\s+mutableStateOf/gm)].map((m) => m[1])
+  for (const name of vars) {
+    const setter = `set${name.charAt(0).toUpperCase()}${name.slice(1)}`
+    const re = new RegExp(`^\\s*fun\\s+${setter}\\s*\\(`, "m")
+    if (re.test(source)) {
+      problems.push(`${setter}() clashes with the generated setter of var ${name} (rename the function)`)
+    }
+  }
+  return problems
+}
+
+function importCollision(path, source) {
   const seen = new Map()
   const problems = []
   for (const [index, line] of source.split("\n").entries()) {
@@ -189,6 +208,7 @@ function main(argv) {
     const error = balanceError(file, source)
     if (error) problems.push(error)
     for (const problem of importCollision(file, source)) problems.push(problem)
+    for (const problem of stateSetterClash(source)) problems.push(`${file}: ${problem}`)
     for (const problem of cancellationHygiene(file, source)) problems.push(problem)
     for (const problem of serverErrorMapping(file, source)) problems.push(problem)
     for (const problem of pairingKeyGuard(file, source)) problems.push(problem)

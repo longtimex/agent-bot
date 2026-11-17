@@ -1255,7 +1255,7 @@ class AppViewModel(
     }
 
     /** Passing null clears the explicit choice and restores "first installed". */
-    fun setDefaultEngine(engine: String?) {
+    fun chooseDefaultEngine(engine: String?) {
         guarded("设置默认引擎") {
             val view = api.setDefaultEngine(conn(), engine)
             defaultEngine = view.defaultEngine
