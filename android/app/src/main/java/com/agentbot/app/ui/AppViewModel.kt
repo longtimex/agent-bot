@@ -1631,7 +1631,8 @@ class AppViewModel(
                 // A new provider changes the list and the danger zone in one go
                 refreshCcAfterMutation()
             } catch (err: Exception) {
-                connectionError = "创建 Provider 失败：${err.message}"
+                // The console cannot see the chat banner, so the failure has to be a toast
+                toast = "创建 Provider 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1648,7 +1649,7 @@ class AppViewModel(
                 ccTestMessage = null
                 refreshCcAfterMutation()
             } catch (err: Exception) {
-                connectionError = "切换 Provider 失败：${err.message}"
+                toast = "切换 Provider 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1696,7 +1697,7 @@ class AppViewModel(
                 ccPanelTitle = title
                 ccPanelText = text
             } catch (err: Exception) {
-                connectionError = "加载 $kind 失败：${err.message}"
+                toast = "加载 $kind 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1712,7 +1713,7 @@ class AppViewModel(
                 ccPanelTitle = "🔍 ${view.label}"
                 ccPanelText = api.ccView(conn(), view.name, target)
             } catch (err: Exception) {
-                connectionError = "加载 ${view.label} 失败：${err.message}"
+                toast = "加载 ${view.label} 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1729,7 +1730,7 @@ class AppViewModel(
                 ccPanelTitle = "MCP 列表"
                 ccPanelText = api.ccMcp(conn())
             } catch (err: Exception) {
-                connectionError = "同步 MCP 失败：${err.message}"
+                toast = "同步 MCP 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1746,7 +1747,7 @@ class AppViewModel(
                 ccPanelTitle = "提示词"
                 ccPanelText = api.ccPrompts(conn())
             } catch (err: Exception) {
-                connectionError = "启用提示词失败：${err.message}"
+                toast = "启用提示词失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1763,7 +1764,7 @@ class AppViewModel(
                 ccPanelTitle = "提示词"
                 ccPanelText = api.ccPrompts(conn())
             } catch (err: Exception) {
-                connectionError = "停用提示词失败：${err.message}"
+                toast = "停用提示词失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1780,7 +1781,7 @@ class AppViewModel(
                 ccPanelTitle = "流式检查 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
-                connectionError = "流式检查失败：${err.message}"
+                toast = "流式检查失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1797,7 +1798,7 @@ class AppViewModel(
                 ccPanelTitle = "可用模型 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
-                connectionError = "拉取模型列表失败：${err.message}"
+                toast = "拉取模型列表失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1820,7 +1821,7 @@ class AppViewModel(
                 ccPanelTitle = "MCP 列表"
                 ccPanelText = api.ccMcp(conn())
             } catch (err: Exception) {
-                connectionError = "导入 MCP 失败：${err.message}"
+                toast = "导入 MCP 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1847,7 +1848,7 @@ class AppViewModel(
                 ccPanelTitle = "提示词"
                 ccPanelText = api.ccPrompts(conn())
             } catch (err: Exception) {
-                connectionError = "创建提示词失败：${err.message}"
+                toast = "创建提示词失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -1989,7 +1990,8 @@ class AppViewModel(
                 ccPanelText = result.text
                 if (name.startsWith("provider-")) refreshCcAfterMutation()
             } catch (err: Exception) {
-                connectionError = "${command.label} 失败：${err.message}"
+                // Same page rule as above: cc failures must not be filed under the chat
+                toast = "${command.label} 失败：${err.message}"
             } finally {
                 ccBusy = false
             }
