@@ -651,6 +651,22 @@ class ApiClient {
         send(connection, "DELETE", "/aliases/$name")
     }
 
+    /** Probes `{baseURL}/models` so a bad key or URL fails here, not mid-conversation. */
+    suspend fun testModel(
+        connection: Connection,
+        baseURL: String,
+        apiKey: String?,
+        model: String?,
+    ): ModelTestResult {
+        val body = buildJsonObject {
+            put("baseURL", baseURL)
+            apiKey?.takeIf { it.isNotBlank() }?.let { put("apiKey", it) }
+            model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
+        }
+        val res = send(connection, "POST", "/models/test", body)
+        return json.decodeFromJsonElement(ModelTestResult.serializer(), res)
+    }
+
     // ---- per-engine custom models ----
 
     suspend fun agentCustomModels(connection: Connection, engine: String): List<AgentCustomModel> =
@@ -943,6 +959,8 @@ class ApiClient {
         attachment: Boolean? = null,
         contextWindow: Int? = null,
         outputLimit: Int? = null,
+        baseURL: String? = null,
+        apiKey: String? = null,
     ): CustomModelResult {
         val body = buildJsonObject {
             put("key", key)
@@ -951,6 +969,12 @@ class ApiClient {
             label?.takeIf { it.isNotBlank() }?.let { put("label", it) }
             attachment?.let { put("attachment", it) }
             contextWindow?.let { put("contextWindow", it) }
+            baseURL?.takeIf { it.isNotBlank() }?.let { url ->
+                put("provider", buildJsonObject {
+                    put("baseURL", url)
+                    apiKey?.takeIf { key -> key.isNotBlank() }?.let { put("apiKey", it) }
+                })
+            }
             outputLimit?.let { put("outputLimit", it) }
         }
         val res = send(connection, "POST", "/models/custom", body)

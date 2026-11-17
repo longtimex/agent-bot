@@ -56,6 +56,7 @@ import com.agentbot.app.data.HistoryEntry
 import com.agentbot.app.data.Health
 import com.agentbot.app.data.ModelChoices
 import com.agentbot.app.data.ModelEntry
+import com.agentbot.app.data.ModelTestResult
 import com.agentbot.app.data.NotConfiguredException
 import com.agentbot.app.data.OpsResult
 import com.agentbot.app.data.Reminder
@@ -1203,6 +1204,33 @@ class AppViewModel(
         }
     }
 
+    /** Result of the last connectivity probe, shown inside the add-model dialog. */
+    var modelTestResult by mutableStateOf<ModelTestResult?>(null)
+
+    var modelTesting by mutableStateOf(false)
+        private set
+
+    fun resetModelTest() {
+        modelTestResult = null
+        modelTesting = false
+    }
+
+    /** Probes the endpoint before the model is written, so a bad key fails here. */
+    fun testModelConnection(baseURL: String, apiKey: String, model: String) {
+        if (modelTesting) return
+        modelTesting = true
+        modelTestResult = null
+        viewModelScope.launch {
+            try {
+                modelTestResult = api.testModel(conn(), baseURL, apiKey, model)
+            } catch (err: Exception) {
+                modelTestResult = ModelTestResult(ok = false, message = "测试失败：${err.message}")
+            } finally {
+                modelTesting = false
+            }
+        }
+    }
+
     // ---- per-engine custom models ----
 
     /** Which engine the model screen is editing; "opencode" keeps the original registry view. */
@@ -1287,6 +1315,37 @@ class AppViewModel(
     }
 
     /** Input format matches `/cc model add 简称 provider/modelID [显示名]`. */
+    /** Structured form: provider block is created when baseURL is given. */
+    fun addCustomModelFull(
+        key: String,
+        providerID: String,
+        modelID: String,
+        label: String,
+        baseURL: String,
+        apiKey: String,
+    ) {
+        guarded(
+            "添加模型",
+            onError = {
+                modelActionError = it.message
+                modelDraftRejected = true
+            },
+        ) {
+            api.addCustomModel(
+                conn(),
+                key.trim().ifBlank { modelID.substringAfterLast('/').lowercase() },
+                providerID.trim(),
+                modelID.trim(),
+                label.trim().ifBlank { null },
+                baseURL = baseURL.trim().ifBlank { null },
+                apiKey = apiKey.trim().ifBlank { null },
+            )
+            modelDraftRejected = false
+            refreshCustomModels(force = true)
+            toast = "已添加模型 $key"
+        }
+    }
+
     fun addCustomModel(input: String): Boolean {
         val tokens = input.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (tokens.size < 2) {

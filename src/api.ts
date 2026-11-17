@@ -55,7 +55,7 @@ import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
 import { OpsActionJobs, routeOps } from "./apiOpsRoutes.js"
 import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
-import { routeAgentModels, routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
+import { routeAgentModels, routeCustomModels, routeModelTest, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
@@ -584,6 +584,11 @@ export class ApiServer {
         sessionMessage: sessionMessage ?? null,
         session: this.#sessionView(),
       })
+      return
+    }
+
+    if (resource === "models" && id === "test") {
+      await routeModelTest(this.#modelRouteDeps(), ctx)
       return
     }
 

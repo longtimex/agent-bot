@@ -1,5 +1,6 @@
 import type { AgentCliRegistry } from "./agentCli.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
+import { asRecord } from "./util.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { customModelView } from "./apiPersonal.js"
 import type { ModelAdmin } from "./modelAdmin.js"
@@ -19,6 +20,71 @@ export interface ModelRouteDeps {
  * Discovery still wins: a hand-added entry only widens the list, it never hides what the CLI
  * reports for itself.
  */
+/**
+ * `POST /models/test` — does this endpoint answer, and does it know this model?
+ *
+ * It hits `GET {baseURL}/models`, the OpenAI-compatible discovery route. A provider that
+ * implements only chat completions answers 404 there; that is reported as "reachable, cannot
+ * list" rather than a failure, because the credentials may still be fine.
+ */
+export async function routeModelTest(deps: ModelRouteDeps, ctx: ApiRequestContext): Promise<void> {
+  if (ctx.method !== "POST") throw new ApiError(404, "未知的模型测试 API 路径")
+  const body = await deps.readJsonBody(ctx.req)
+  const baseURL = (typeof body.baseURL === "string" ? body.baseURL : "").trim().replace(/\/+$/, "")
+  const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : ""
+  const model = typeof body.model === "string" ? body.model.trim() : ""
+  if (!/^https?:\/\//i.test(baseURL)) throw new ApiError(400, "baseURL 需要以 http:// 或 https:// 开头")
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15_000)
+  try {
+    const res = await fetch(`${baseURL}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    if (res.status === 404 || res.status === 405) {
+      deps.json(ctx.res, 200, {
+        ok: true,
+        message: `${baseURL} 可以访问，但该服务没有 /models 接口，无法列出模型（不影响使用）`,
+        models: [],
+      })
+      return
+    }
+    if (!res.ok) {
+      deps.json(ctx.res, 200, { ok: false, message: `HTTP ${res.status}：${text.slice(0, 300)}`, models: [] })
+      return
+    }
+    let models: string[] = []
+    try {
+      const parsed: unknown = JSON.parse(text)
+      const data = asRecord(parsed)?.data
+      if (Array.isArray(data)) {
+        models = data
+          .map((item) => (typeof asRecord(item)?.id === "string" ? (asRecord(item)?.id as string) : ""))
+          .filter(Boolean)
+      }
+    } catch {
+      // A plain-text answer still proves the endpoint is up; model listing stays empty
+    }
+    const listed = models.slice(0, 50)
+    deps.json(ctx.res, 200, {
+      ok: true,
+      message: model
+        ? models.includes(model)
+          ? `连通，模型 ${model} 可用（共 ${models.length} 个）`
+          : `连通，但列表里没有 ${model}（共 ${models.length} 个，可检查名称大小写）`
+        : `连通，读到 ${models.length} 个模型`,
+      models: listed,
+    })
+  } catch (err) {
+    const reason = err instanceof Error ? (err.name === "AbortError" ? "超时（15 秒）" : err.message) : "未知错误"
+    deps.json(ctx.res, 200, { ok: false, message: `连接失败：${reason}`, models: [] })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function routeAgentModels(deps: ModelRouteDeps, ctx: ApiRequestContext): Promise<void> {
   const requested = ctx.url.searchParams.get("engine") ?? ""
   const engine = deps.registry.resolve(requested)
@@ -87,6 +153,18 @@ export async function routeCustomModels(deps: ModelRouteDeps,
         attachment: typeof body.attachment === "boolean" ? body.attachment : undefined,
         contextWindow: limitOf("contextWindow", body.contextWindow),
         outputLimit: limitOf("outputLimit", body.outputLimit),
+        // Optional: creates the provider block when opencode.json does not have it yet
+        provider: (() => {
+          const raw = asRecord(body.provider)
+          if (!raw) return undefined
+          const baseURL = typeof raw.baseURL === "string" ? raw.baseURL.trim() : ""
+          if (!baseURL) return undefined
+          return {
+            baseURL,
+            apiKey: typeof raw.apiKey === "string" && raw.apiKey ? raw.apiKey : undefined,
+            npm: typeof raw.npm === "string" && raw.npm ? raw.npm : undefined,
+          }
+        })(),
       }
       if (!input.key || !input.providerID || !input.modelID) {
         throw new ApiError(400, "缺少 key、providerID 或 modelID 字段")

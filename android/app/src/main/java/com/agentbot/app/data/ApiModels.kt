@@ -293,6 +293,13 @@ data class AccountEntry(
 )
 
 @Serializable
+data class ModelTestResult(
+    val ok: Boolean = false,
+    val message: String = "",
+    val models: List<String> = emptyList(),
+)
+
+@Serializable
 data class AgentCustomModel(val value: String, val label: String = "")
 
 @Serializable

@@ -1,5 +1,7 @@
 package com.agentbot.app.ui
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -164,17 +166,7 @@ fun ModelsScreen(vm: AppViewModel) {
     }
 
     if (adding) {
-        TextPromptDialog(
-            title = "添加自定义模型",
-            hint = "格式：简称 provider/modelID [显示名] [--attachment] [--context 200000] [--output 64000]。例如：mymodel custom/my-model-id 我的模型 --attachment。",
-            confirmLabel = "添加",
-            placeholder = "mymodel custom/my-model-id 我的模型 --attachment",
-            error = vm.modelActionError.takeIf { vm.modelDraftRejected },
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                if (vm.addCustomModel(input)) adding = false
-            },
-        )
+        CustomModelDialog(vm) { adding = false }
     }
 
     assigning?.let { agent ->
@@ -419,4 +411,97 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
             },
         )
     }
+}
+
+/**
+ * The full provider form: an id pair, plus the endpoint and key when the provider does not exist
+ * yet, plus a probe so a wrong baseURL fails here instead of inside a conversation.
+ */
+@Composable
+private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+    var providerID by remember { mutableStateOf("") }
+    var modelID by remember { mutableStateOf("") }
+    var key by remember { mutableStateOf("") }
+    var label by remember { mutableStateOf("") }
+    var baseURL by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { vm.resetModelTest() }
+    val testing = vm.modelTesting
+    val result = vm.modelTestResult
+
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加自定义模型", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "填 Provider 与模型 ID。要新建 Provider，再填 baseURL 与 API Key（Key 会明文写入 opencode.json）。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                AppTextField(
+                    value = providerID,
+                    onValueChange = { providerID = it },
+                    placeholder = "Provider ID（如 openrouter）",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = modelID,
+                    onValueChange = {
+                        modelID = it
+                        if (key.isBlank()) key = it.substringAfterLast('/').lowercase()
+                    },
+                    placeholder = "模型 ID（如 gpt-4o）",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = key,
+                    onValueChange = { key = it },
+                    placeholder = "简称（默认取模型 ID 末段）",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    placeholder = "显示名（可选）",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = baseURL,
+                    onValueChange = { baseURL = it },
+                    placeholder = "baseURL（留空 = Provider 已存在）",
+                    singleLine = true,
+                )
+                AppTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    placeholder = "API Key（可选）",
+                    singleLine = true,
+                )
+                result?.let {
+                    Text(
+                        it.message,
+                        color = if (it.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(
+                    onClick = { vm.testModelConnection(baseURL, apiKey, modelID) },
+                    enabled = baseURL.isNotBlank() && !testing,
+                ) { Text(if (testing) "测试中…" else "测试连通") }
+                TextButton(
+                    onClick = { vm.addCustomModelFull(key, providerID, modelID, label, baseURL, apiKey) },
+                    enabled = providerID.isNotBlank() && modelID.isNotBlank() && !testing,
+                ) { Text("添加") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }

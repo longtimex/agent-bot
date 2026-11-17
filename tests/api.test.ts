@@ -4587,3 +4587,44 @@ test("api asks for confirmation before removing the built-in opencode package", 
     assert.match(body.message, /npm uninstall -g opencode-ai/)
   })
 })
+
+test("api probes a provider endpoint and reports whether the model is there", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/models") {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ data: [{ id: "gpt-4o" }, { id: "gpt-4o-mini" }] }))
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()))
+  const port = (server.address() as AddressInfo).port
+  try {
+    await withApi(async () => "ok", async (h) => {
+      const res = await fetch(`${h.base}/api/v1/models/test`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ baseURL: `http://127.0.0.1:${port}`, model: "gpt-4o" }),
+      })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { ok: boolean; message: string; models: string[] }
+      assert.equal(body.ok, true)
+      assert.match(body.message, /gpt-4o 可用/)
+      assert.deepEqual(body.models, ["gpt-4o", "gpt-4o-mini"])
+    })
+  } finally {
+    server.close()
+  }
+})
+
+test("api rejects a model probe without an http baseURL", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const res = await fetch(`${h.base}/api/v1/models/test`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ baseURL: "ftp://example.com" }),
+    })
+    assert.equal(res.status, 400)
+  })
+})

@@ -24,6 +24,15 @@ export interface ModelRegistryFile {
   models: Record<string, ModelInfo>
 }
 
+/** The provider block a model needs before it can run; omitted when it already exists. */
+export interface ProviderInput {
+  baseURL: string
+  apiKey?: string
+  /** AI SDK package; an OpenAI-compatible endpoint is the common case. */
+  npm?: string
+  name?: string
+}
+
 export interface AddModelInput {
   key: string
   providerID: string
@@ -33,6 +42,8 @@ export interface AddModelInput {
   attachment?: boolean
   contextWindow?: number
   outputLimit?: number
+  /** Creates the provider in opencode.json when it is not there yet. */
+  provider?: ProviderInput
 }
 
 export interface AddModelResult {
@@ -366,8 +377,19 @@ export class ModelAdmin {
   #upsertProviderModel(entry: ModelInfo, input: AddModelInput): boolean {
     const config = this.#readProjectConfig()
     if (!config) return false
-    if (!isRecord(config.provider)) return false
-    const provider = config.provider[entry.providerID]
+    if (!isRecord(config.provider)) config.provider = {}
+    const providers = config.provider as Record<string, unknown>
+    if (!isRecord(providers[entry.providerID])) {
+      // Without baseURL there is nothing to point at, so leave the project file alone
+      const spec = input.provider
+      if (!spec?.baseURL) return false
+      providers[entry.providerID] = {
+        npm: spec.npm?.trim() || "@ai-sdk/openai-compatible",
+        name: spec.name?.trim() || entry.providerID,
+        options: { baseURL: spec.baseURL.trim(), ...(spec.apiKey ? { apiKey: spec.apiKey } : {}) },
+      }
+    }
+    const provider = providers[entry.providerID]
     if (!isRecord(provider)) return false
     if (!isRecord(provider.models)) provider.models = {}
     const models = provider.models as Record<string, unknown>

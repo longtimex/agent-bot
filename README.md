@@ -591,6 +591,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
 | `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：连接 Telegram/飞书时与所有者会话共享同一份列表，仅安卓端时保存在 App 会话；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
+| `GET/POST /models/custom` | OpenCode 自定义模型：`POST` 可带 `provider:{baseURL,apiKey?}`，provider 不存在时写入 `opencode.json`（缺 baseURL 则只记录模型）|
 | `GET/POST /accounts` · `PATCH /accounts/:id` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回，客户端不缓存 |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
 | `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
@@ -626,6 +627,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
 | `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天；没有聊天但开启了 API 时改写入 App 信箱 `data/app-notices.json` 并返回 `200`）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
 | `GET/POST /settings` | 新会话的默认引擎：`{defaultEngine}`（`null` 表示恢复「第一个已安装」）；响应带 `effective`，即未指定时会真正使用的引擎 |
+| `POST /models/test` | 探测 `{baseURL}/models`：`{baseURL,apiKey?,model?}` → `{ok,message,models[]}`；服务只有 chat/completions 时报告「可访问但无法列模型」 |
 | `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label}`；CLI 自己发现的同名模型优先 |
 | `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果与用量报告（`kind` 分别为 `reminder`/`schedule`/`report`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |
 | `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
