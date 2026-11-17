@@ -627,7 +627,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
 | `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天；没有聊天但开启了 API 时改写入 App 信箱 `data/app-notices.json` 并返回 `200`）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
 | `GET/POST /settings` | 新会话的默认引擎：`{defaultEngine}`（`null` 表示恢复「第一个已安装」）；响应带 `effective`，即未指定时会真正使用的引擎 |
-| `GET/POST/DELETE /models/provider?engine=` | CLI 引擎的第三方中转站：`{baseURL,apiKey?}` 存进 `data/agent-providers.json`，Bot 启动该引擎时按引擎注入环境变量（codex/qoder → `OPENAI_BASE_URL`/`OPENAI_API_KEY`，claude → `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`，gemini → `GOOGLE_GEMINI_BASE_URL`/`GEMINI_API_KEY`）；`DELETE` 恢复官方端点 |
+| `GET/POST/DELETE /models/provider?engine=` | CLI 引擎的第三方中转站：`{baseURL,apiKey?}` 存进 `data/agent-providers.json`，Bot 启动该引擎时按引擎注入环境变量（codex/qoder → `OPENAI_BASE_URL`/`OPENAI_API_KEY`，claude → `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`，gemini → `GOOGLE_GEMINI_BASE_URL`/`GEMINI_API_KEY`）；`DELETE` 恢复官方端点；apiKey 用 `data/accounts.key` 加密后存 `secret` 字段，备份里没有明文密钥 |
 | `POST /models/test` | 探测 `{baseURL}/models`：`{baseURL,apiKey?,model?}` → `{ok,message,models[]}`；服务只有 chat/completions 时报告「可访问但无法列模型」 |
 | `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label}`；CLI 自己发现的同名模型优先 |
 | `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果与用量报告（`kind` 分别为 `reminder`/`schedule`/`report`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |

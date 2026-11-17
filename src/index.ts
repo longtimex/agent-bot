@@ -136,7 +136,12 @@ async function main(): Promise<void> {
   const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
   const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
   const customModels = new AgentCustomModelStore(resolve(cfg.dataDir, "agent-custom-models.json"), log)
-  const agentProviders = new AgentProviderStore(resolve(cfg.dataDir, "agent-providers.json"), log)
+  const agentProviders = new AgentProviderStore(
+    resolve(cfg.dataDir, "agent-providers.json"),
+    // Shares the account key: the relay credential is encrypted exactly like a password
+    resolve(cfg.dataDir, "accounts.key"),
+    log,
+  )
   // Resolved per call so changing the default in the App takes effect without a restart
   const store = new SessionStore(
     resolve(cfg.dataDir, "sessions.json"),

@@ -6,6 +6,9 @@ import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { customModelView } from "./apiPersonal.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 
+/** Metadata services answer unauthenticated requests with instance credentials. */
+const BLOCKED_PROBE_HOSTS = new Set(["169.254.169.254", "metadata.google.internal", "100.100.100.200"])
+
 export interface ModelRouteDeps {
   models: ModelAdmin
   /** CLI engines and their hand-added models: a CLI takes the name as a plain --model. */
@@ -36,6 +39,18 @@ export async function routeModelTest(deps: ModelRouteDeps, ctx: ApiRequestContex
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : ""
   const model = typeof body.model === "string" ? body.model.trim() : ""
   if (!/^https?:\/\//i.test(baseURL)) throw new ApiError(400, "baseURL 需要以 http:// 或 https:// 开头")
+  // The probe makes the server fetch a user-supplied URL. Private ranges stay allowed on
+  // purpose (a local relay is the normal case), but cloud metadata endpoints never are.
+  const host = (() => {
+    try {
+      return new URL(baseURL).hostname.toLowerCase()
+    } catch {
+      return ""
+    }
+  })()
+  if (BLOCKED_PROBE_HOSTS.has(host)) {
+    throw new ApiError(400, "该地址是云主机元数据端点，拒绝探测；请填写模型服务的实际地址")
+  }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15_000)

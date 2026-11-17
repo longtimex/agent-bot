@@ -1,3 +1,8 @@
+import { randomBytes } from "node:crypto"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { dirname } from "node:path"
+import { decryptPayload, encryptPayload } from "./apiCrypto.js"
+import { withFileLock } from "./fileLock.js"
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { asRecord } from "./util.js"
 import type { Logger } from "./logger.js"
@@ -28,10 +33,13 @@ export function supportsRelay(engine: string): boolean {
 
 export class AgentProviderStore {
   readonly #path: string
+  readonly #keyPath: string
   readonly #log: Logger
 
-  constructor(path: string, log: Logger) {
+  /** [keyPath] is the account key: one data directory, one local secret. */
+  constructor(path: string, keyPath: string, log: Logger) {
     this.#path = path
+    this.#keyPath = keyPath
     this.#log = log
   }
 
@@ -42,7 +50,13 @@ export class AgentProviderStore {
   /** Passing undefined removes the relay, so the engine goes back to its own default. */
   set(engine: string, config: AgentProviderConfig | undefined): void {
     const all = this.#load()
-    if (config?.baseURL) all[engine] = { baseURL: config.baseURL, ...(config.apiKey ? { apiKey: config.apiKey } : {}) }
+    // The key is encrypted so a backup or a copied data directory carries no usable credential
+    if (config?.baseURL) {
+      all[engine] = {
+        baseURL: config.baseURL,
+        ...(config.apiKey ? { secret: encryptPayload(this.#keyBuffer(), config.apiKey) } : {}),
+      }
+    }
     else delete all[engine]
     writePrivateAtomic(
       this.#path,
@@ -60,6 +74,27 @@ export class AgentProviderStore {
     return env
   }
 
+  /** Same file and format the account vault uses: one data directory, one local secret. */
+  #keyBuffer(): Buffer {
+    if (existsSync(this.#keyPath)) {
+      const raw = readFileSync(this.#keyPath, "utf8").trim()
+      if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
+      throw new Error(`账号密钥 ${this.#keyPath} 格式无效，请从备份恢复该文件。`)
+    }
+    return withFileLock(this.#keyPath, () => {
+      // Another store may have created it while this one waited for the lock
+      if (existsSync(this.#keyPath)) {
+        const raw = readFileSync(this.#keyPath, "utf8").trim()
+        if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
+      }
+      mkdirSync(dirname(this.#keyPath), { recursive: true })
+      const key = randomBytes(32)
+      writeFileSync(this.#keyPath, `${key.toString("hex")}\n`, { mode: 0o600 })
+      this.#log.info(`agent key created at ${this.#keyPath}`)
+      return key
+    })
+  }
+
   #load(): Record<string, AgentProviderConfig> {
     const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
     const engines = asRecord(raw?.engines)
@@ -69,10 +104,19 @@ export class AgentProviderStore {
       const record = asRecord(value)
       const baseURL = typeof record?.baseURL === "string" ? record.baseURL.trim() : ""
       if (!baseURL) continue
-      result[engine] = {
-        baseURL,
-        ...(typeof record?.apiKey === "string" && record.apiKey ? { apiKey: record.apiKey } : {}),
+      let apiKey: string | undefined
+      if (typeof record?.secret === "string" && record.secret) {
+        try {
+          apiKey = decryptPayload(this.#keyBuffer(), record.secret)
+        } catch {
+          // A key rotated elsewhere leaves this entry unreadable; keep the URL, drop the key
+          this.#log.warn(`relay key for ${engine} could not be decrypted`)
+        }
+      } else if (typeof record?.apiKey === "string" && record.apiKey) {
+        // Written before the key was encrypted; still honoured, rewritten on the next save
+        apiKey = record.apiKey
       }
+      result[engine] = { baseURL, ...(apiKey ? { apiKey } : {}) }
     }
     return result
   }

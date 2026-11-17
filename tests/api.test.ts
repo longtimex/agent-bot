@@ -125,7 +125,7 @@ export async function withApi(
   const notices = new NoticeStore(join(dir, "app-notices.json"), log)
   const settings = new SettingsStore(join(dir, "settings.json"), log)
   const customModels = new AgentCustomModelStore(join(dir, "agent-custom-models.json"), log)
-  const providers = new AgentProviderStore(join(dir, "agent-providers.json"), log)
+  const providers = new AgentProviderStore(join(dir, "agent-providers.json"), join(dir, "accounts.key"), log)
   // One entry so the contract test can check the shape instead of an empty array
   notices.push({ kind: "system", text: "探针通知", at: 1_700_000_000_000 })
   const allowUsers = new Set(["42", "7"])
@@ -4683,5 +4683,17 @@ test("api marks which engines can take a relay and which cannot", async () => {
     // copilot authenticates by account and the built-in engine lives in opencode.json
     assert.equal(byId.get("copilot")?.relaySupported, false)
     assert.equal(byId.get("opencode")?.relaySupported, false)
+  })
+})
+
+test("api refuses to probe a cloud metadata address", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const res = await fetch(`${h.base}/api/v1/models/test`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ baseURL: "http://169.254.169.254/latest/meta-data/" }),
+    })
+    assert.equal(res.status, 400)
+    assert.match(((await res.json()) as { error: string }).error, /元数据端点/)
   })
 })

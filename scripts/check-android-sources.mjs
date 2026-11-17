@@ -182,6 +182,9 @@ function importCollision(path, source) {
   return problems
 }
 
+/** Roughly the point where a Compose/ViewModel file stops being reviewable in one pass. */
+const ANDROID_SIZE_WARN = 800
+
 function main(argv) {
   const rootIndex = argv.indexOf(ROOT_FLAG)
   const root = rootIndex >= 0 ? argv[rootIndex + 1] : "android/app/src/main/java"
@@ -202,6 +205,14 @@ function main(argv) {
   if (!skipManifest) {
     for (const problem of swallowedByGitignore(root, files)) problems.push(problem)
     for (const problem of signingMaterialIgnored(root)) problems.push(problem)
+  }
+  // Kotlin has no size budget while TypeScript does, which is how AppViewModel reached 4k lines.
+  // This warns instead of failing: splitting is a judgement call, not a build gate.
+  for (const file of files) {
+    const lines = readFileSync(file, "utf8").split("\n").length
+    if (lines > ANDROID_SIZE_WARN) {
+      console.warn(`warning: ${file} is ${lines} lines (over ${ANDROID_SIZE_WARN}); consider splitting`)
+    }
   }
   for (const file of files) {
     const source = readFileSync(file, "utf8")
