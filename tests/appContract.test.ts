@@ -395,6 +395,14 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
           model: "SettingsView",
         },
         {
+          name: "testModel → POST /models/test",
+          method: "POST",
+          path: "/models/test",
+          // A closed port answers quickly and still returns the decoded shape
+          body: { baseURL: "http://127.0.0.1:1" },
+          model: "ModelTestResult",
+        },
+        {
           name: "agentCustomModels → GET /models/agent",
           method: "GET",
           path: "/models/agent?engine=claude",

@@ -488,6 +488,10 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
+                // A rejected add keeps the dialog open, so the reason belongs right here
+                vm.modelActionError?.takeIf { vm.modelDraftRejected }?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
             }
         },
         confirmButton = {

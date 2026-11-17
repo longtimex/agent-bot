@@ -679,15 +679,14 @@ test("model actions report their outcome on the model page", () => {
   assert.match(screen, /PageErrorNotice\(\s*message = vm\.modelActionError/, "the model page needs a visible action error")
   assert.match(
     screen,
-    /error = vm\.modelActionError\.takeIf \{ vm\.modelDraftRejected \}/,
+    /vm\.modelActionError\?\.takeIf \{ vm\.modelDraftRejected \}\?\.let \{/,
     "the add dialog must show a validation reason where it cannot be covered",
   )
-  assert.match(
-    screen,
-    /onConfirm = \{ input ->\s*if \(vm\.addCustomModel\(input\)\) adding = false/,
-    "only a valid add may close the dialog",
-  )
-  assert.match(screen, /onDismiss = \{ adding = false \}/, "the user can still cancel an invalid draft")
+  const fullAdd = /fun addCustomModelFull\([\s\S]*?\n    \}/.exec(viewModel)?.[0]
+  assert.ok(fullAdd, "the structured form needs its own action so its feedback can be checked")
+  assert.match(fullAdd, /modelActionError = it\.message/, "a rejected add must report on this page")
+  assert.ok(!fullAdd.includes("connectionError"), "an add failure must not go to the chat-only banner")
+  assert.match(screen, /onDismissRequest = onDismiss/, "the user can still cancel an invalid draft")
 })
 
 test("config and access writes explain failures on their own page", () => {
