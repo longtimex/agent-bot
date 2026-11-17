@@ -284,7 +284,8 @@ export class TelegramBridge {
       time: cfg.usageReport?.time ?? "21:00",
       log,
       send: async (text) => {
-        const owner = this.ownerChatId
+        // An App-only deployment has no chat; the report joins the same mailbox
+        const owner = this.ownerChatId ?? (this.#cfg.api.enabled ? APP_CHAT_ID : undefined)
         if (owner === undefined) throw new Error("白名单为空，没有可推送的聊天")
         await this.#sendTextMessage(owner, text)
       },
@@ -631,7 +632,9 @@ export class TelegramBridge {
     // Feishu has no owner chat until its first whitelisted private message
     // creates the identity mapping. Re-check on every transport event rather
     // than letting a startup without an owner disable the report forever.
-    if (!this.#usageReportStarted && this.ownerChatId !== undefined) {
+    // The App mailbox counts as a target: the report is worth keeping even without a chat
+    const reportTarget = this.ownerChatId ?? (this.#cfg.api.enabled ? APP_CHAT_ID : undefined)
+    if (!this.#usageReportStarted && reportTarget !== undefined) {
       this.#usageReportStarted = true
       this.#usageReport.start()
     }
