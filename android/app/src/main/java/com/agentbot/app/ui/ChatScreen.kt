@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -1260,6 +1261,14 @@ private fun MediaCard(vm: AppViewModel, taskId: String, media: TaskMedia) {
             if (loading) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             } else {
+                IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "保存到相册",
+                        tint = TextTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
                 IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Filled.OpenInNew,
