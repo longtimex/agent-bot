@@ -33,6 +33,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -309,6 +314,7 @@ fun CcScreen(vm: AppViewModel) {
 
     if (creatingProvider) {
         ProviderCreateDialog(
+            vm = vm,
             meta = vm.ccProviderMeta,
             onDismiss = { creatingProvider = false },
             onCreate = { draft ->
@@ -463,6 +469,7 @@ fun CcScreen(vm: AppViewModel) {
  */
 @Composable
 private fun ProviderCreateDialog(
+    vm: AppViewModel?,
     meta: CcProviderMeta?,
     onDismiss: () -> Unit,
     onCreate: (CcProviderDraft) -> Unit,
@@ -554,6 +561,11 @@ private fun ProviderCreateDialog(
             }
         },
         confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
+            TextButton(
+                onClick = { vm?.testJsonProvider(config) },
+                enabled = config.isNotBlank() && !vm?.modelTesting.let { it == true },
+            ) { Text(if (vm?.modelTesting == true) "测试中…" else "测试连通") }
             TextButton(onClick = {
                 onCreate(
                     CcProviderDraft(
@@ -568,6 +580,7 @@ private fun ProviderCreateDialog(
                     ),
                 )
             }, enabled = name.isNotBlank() && (fieldMode || config.isNotBlank())) { Text("创建") }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )

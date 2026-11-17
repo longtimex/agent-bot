@@ -16,8 +16,8 @@ android {
         applicationId = "com.agentbot.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1003005
-        versionName = "1.3.5"
+        versionCode = 1003006
+        versionName = "1.3.6"
     }
 
     // Release signing is supplied by CI (or a local keystore.properties file).

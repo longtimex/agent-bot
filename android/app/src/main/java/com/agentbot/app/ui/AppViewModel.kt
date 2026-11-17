@@ -1216,6 +1216,29 @@ class AppViewModel(
         modelTesting = false
     }
 
+    /**
+     * Probes the endpoint inside a settings JSON, so a hand-written provider block fails here
+     * instead of after it has been applied. Takes the first provider the block declares.
+     */
+    fun testJsonProvider(config: String) {
+        try {
+            val root = kotlinx.serialization.json.Json.parseToJsonElement(config).jsonObject
+            val blocks = (root["provider"] as? kotlinx.serialization.json.JsonObject)?.values ?: listOf(root)
+            for (block in blocks) {
+                val options = block.jsonObject["options"] as? kotlinx.serialization.json.JsonObject ?: continue
+                val baseURL = options["baseURL"]?.jsonPrimitive?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                    ?: continue
+                val apiKey = options["apiKey"]?.jsonPrimitive?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.content
+                val model = (block.jsonObject["models"] as? kotlinx.serialization.json.JsonObject)?.keys?.firstOrNull()
+                testModelConnection(baseURL, apiKey ?: "", model ?: "")
+                return
+            }
+            toast = "JSON 里没有找到 provider.options.baseURL，无法测试"
+        } catch (err: Exception) {
+            toast = "JSON 解析失败：${err.message}"
+        }
+    }
+
     /** Probes the endpoint before the model is written, so a bad key fails here. */
     fun testModelConnection(baseURL: String, apiKey: String, model: String) {
         if (modelTesting) return
