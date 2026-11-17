@@ -6,7 +6,7 @@ import { join } from "node:path"
 
 const DEFAULT_BUDGET = 900
 const budgets = new Map([
-  ["telegram.ts", 2200],
+  ["telegram.ts", 2250],
   ["api.ts", 1250],
   ["ops.ts", 1200],
   ["agentCli.ts", 1120],

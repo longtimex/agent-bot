@@ -9,6 +9,7 @@ import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
 import { parseBotCommand } from "./telegramCommand.js"
 import { AccountStore } from "./accounts.js"
+import { APP_CHAT_ID, NoticeStore } from "./appNotices.js"
 import { TelegramAccountCommands } from "./telegramAccountCommands.js"
 import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
 import { MagpieService } from "./magpie.js"
@@ -150,6 +151,8 @@ export class TelegramBridge {
   readonly #accountCommands: TelegramAccountCommands
   /** Shared with the API so an entry written from either side is immediately visible. */
   readonly accountStore: AccountStore
+  /** Reminders and scheduled results for an App-only deployment; see APP_CHAT_ID. */
+  readonly noticeStore: NoticeStore
   readonly #schedules: ScheduleService
   readonly #cc: CcSwitchService
   readonly #models: ModelAdmin
@@ -251,6 +254,7 @@ export class TelegramBridge {
     this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.accountStore = new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log)
+    this.noticeStore = new NoticeStore(resolve(cfg.dataDir, "app-notices.json"), log)
     this.#accountCommands = new TelegramAccountCommands({
       accounts: this.accountStore, sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) },
       sendSecret: async (chatId, text) => { const sent = await this.#bot.api.sendMessage(chatId, this.#maskToken(text), { parse_mode: "Markdown" }); setTimeout(() => void this.#bot.api.deleteMessage(chatId, sent.message_id).catch(() => undefined), 60_000) },
@@ -2165,6 +2169,11 @@ export class TelegramBridge {
   }
 
   async #sendTextMessage(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<boolean> {
+    // No chat to push to (App-only deployment): keep the text for the next time the App opens
+    if (chatId === APP_CHAT_ID) {
+      this.noticeStore.push({ kind: "system", text: this.#maskToken(text) })
+      return true
+    }
     const markup = keyboard && keyboard.inline_keyboard.length > 0 ? keyboard : undefined
     const safe = this.#maskToken(text)
     try {

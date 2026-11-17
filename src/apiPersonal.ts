@@ -9,6 +9,7 @@ import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
 import type { AccountEntry, AccountStore, AccountUpdate } from "./accounts.js"
+import { APP_CHAT_ID, type AppNotice, type NoticeStore } from "./appNotices.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -58,6 +59,7 @@ export interface PersonalRouteDeps {
   setTimezone?: (zone: string) => { ok: boolean; message: string }
   aliases?: AliasStore
   accounts?: AccountStore
+  notices?: NoticeStore
   ops?: OpsService
   proxies?: ProxyService
   history: TaskHistoryStore
@@ -70,15 +72,18 @@ export interface PersonalRouteDeps {
   }
 }
 
+/**
+ * Where a reminder or a scheduled result should go. A bound chat wins; otherwise an App-only
+ * deployment gets the mailbox pseudo-id, and the bridge stores the text instead of sending it.
+ */
 export function requireOwnerChat(deps: PersonalRouteDeps, feature: string): number {
   const owner = deps.ownerChatId
-  if (!owner) {
-    throw new ApiError(
-      409,
-      `${feature}需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或配置对应渠道的白名单。`,
-    )
-  }
-  return owner
+  if (owner) return owner
+  if (deps.cfg.api.enabled) return APP_CHAT_ID
+  throw new ApiError(
+    409,
+    `${feature}需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或开启 API_ENABLED 供 App 收取。`,
+  )
 }
 
 /** Access checks use the user id while notifications use the chat id. */
@@ -472,6 +477,19 @@ function accountView(entry: AccountEntry): Record<string, unknown> {
     extras: entry.extras,
     updatedAt: entry.updatedAt,
   }
+}
+
+/**
+ * Notices raised while no chat was bound. The App asks with the timestamp of the last one it
+ * inserted, so a poll never repeats a reminder it has already shown.
+ */
+export async function routeNotices(deps: PersonalRouteDeps, ctx: ApiRequestContext): Promise<void> {
+  if (ctx.method !== "GET") throw new ApiError(404, "未知的通知 API 路径")
+  const raw = ctx.url.searchParams.get("since")
+  const parsed = raw ? Number(raw) : Number.NaN
+  const since = Number.isFinite(parsed) ? parsed : undefined
+  const notices: AppNotice[] = deps.notices?.list(since) ?? []
+  deps.json(ctx.res, 200, { notices })
 }
 
 /** `/account` for the App: the same store the Telegram bridge answers from. */

@@ -622,7 +622,8 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
 | `GET /usage` | 用量统计与近 7 天趋势 |
 | `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
-| `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录。没有 Telegram/飞书 owner 聊天时读写返回 `409`，原因见 `GET /info` 的 `automation.reason` |
+| `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天；没有聊天但开启了 API 时改写入 App 信箱 `data/app-notices.json` 并返回 `200`）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
+| `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒与定时任务结果，App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条 |
 | `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
 | `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |
 
@@ -919,7 +920,7 @@ npm run clients    # 只管理控制端，适合安装完成后添加其他控�
 
 向导输出中，Telegram Bot Token 与飞书 App Secret 只显示掩码；安卓配对所需的新 `API_TOKEN` 会完整显示一次，便于在 App 中填写。输入行仍由终端回显，请留意共享屏幕。`.env` 采用原子写入并保持 `0600` 权限，不会进入日志或聊天消息。非交互环境（systemd、CI、无 TTY）不会阻塞，而是打印手动配置步骤并退出。
 
-> 仅安卓 App 控制端也能启动并使用聊天、附件、引擎/模型、目录、历史、运维与快捷指令。快捷指令在连接 Telegram 或飞书时与所有者会话共享，仅安卓端时保存在本 App 会话中。提醒、定时任务和每日用量报告需要一个聊天推送目标，因此仅部署安卓端时这些接口会返回 `409`；如需推送功能，请同时配置 Telegram 或飞书。
+> 仅安卓 App 也能启动并使用聊天、附件、引擎/模型、目录、历史、运维、快捷指令、提醒与定时任务。快捷指令在连接 Telegram 或飞书时与所有者会话共享，仅安卓端时保存在本 App 会话中。没有绑定聊天时，提醒与定时任务的结果写入 App 信箱（`data/app-notices.json`），App 打开时通过 `GET /notices` 取回并插入会话——**这是在 App 里补看，不是锁屏推送**；需要到点就在手机上弹通知，仍需配置 Telegram 或飞书（App 没有常驻进程，Android 会杀后台并延迟闹钟）。
 
 启动时会自动扫描 `PATH` 并打印 `agent CLI detection: n/14 installed (...)`；首次在聊天发送 `/start` 或 `/agents` 即可查看检测结果并安装新 CLI。
 

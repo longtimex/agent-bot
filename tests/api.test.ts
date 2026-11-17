@@ -29,6 +29,7 @@ import type { Logger } from "../src/logger.js"
 import { ModelAdmin } from "../src/modelAdmin.js"
 import { ProxyService } from "../src/proxy.js"
 import { AccountStore } from "../src/accounts.js"
+import { NoticeStore } from "../src/appNotices.js"
 import { AliasStore } from "../src/aliases.js"
 import { Opencode } from "../src/opencode.js"
 import type { OpsService } from "../src/ops.js"
@@ -57,6 +58,7 @@ interface Harness {
   cleanup: () => Promise<void>
   ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }>
   installs: string[]
+  notices: NoticeStore
   ccCalls: string[]
   magpieCalls: string[]
   releaseActions: string[]
@@ -117,6 +119,9 @@ export async function withApi(
   // Instant success so proxy management tests stay fast and offline
   const aliases = new AliasStore(join(dir, "aliases.json"), log)
   const accounts = new AccountStore(join(dir, "accounts.json"), join(dir, "accounts.key"), log)
+  const notices = new NoticeStore(join(dir, "app-notices.json"), log)
+  // One entry so the contract test can check the shape instead of an empty array
+  notices.push({ kind: "system", text: "探针通知", at: 1_700_000_000_000 })
   const allowUsers = new Set(["42", "7"])
   const access = {
     list: () => ({ users: [...allowUsers], allowAll: false }),
@@ -493,6 +498,7 @@ export async function withApi(
       proxies,
       aliases,
       accounts,
+      notices,
       access,
       timezone: () => currentTz,
       setTimezone: (zone) => {
@@ -536,6 +542,7 @@ export async function withApi(
       cleanup: () => api.stop(),
       ocCalls,
       installs,
+      notices,
       ccCalls,
       magpieCalls,
       releaseActions,
@@ -3665,7 +3672,7 @@ test("api exposes session and pairing info without leaking the token", async () 
   })
 })
 
-test("api info explains that automation needs a chat delivery target", async () => {
+test("api info keeps automation usable on an App-only deployment", async () => {
   await withApi(async () => "ok", async (h) => {
     h.setOwner(undefined)
     const info = (await (await fetch(`${h.base}/api/v1/info`, { headers: authHeaders() })).json()) as {
@@ -3673,19 +3680,43 @@ test("api info explains that automation needs a chat delivery target", async () 
       automation: { available: boolean; reason: string | null }
     }
     assert.equal(info.chatId, null)
-    assert.equal(info.automation.available, false)
-    assert.match(info.automation.reason ?? "", /Telegram 或飞书/)
+    // No chat is bound, but the App mailbox still receives reminders
+    assert.equal(info.automation.available, true)
+    assert.equal(info.automation.reason, null)
 
-    // The route must still say why, so clients that never read /info get the same answer.
     for (const resource of ["reminders", "schedules"]) {
       const res = await fetch(`${h.base}/api/v1/${resource}`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ text: resource === "reminders" ? "30m 喝水" : "30m 检查服务器" }),
       })
-      assert.equal(res.status, 409, `POST /${resource} must not accept an undeliverable automation`)
-      assert.match(String(((await res.json()) as { error?: string }).error), /推送目标/)
+      assert.ok(
+        [200, 201].includes(res.status),
+        `POST /${resource} must accept the App mailbox as a target, got ${res.status}`,
+      )
     }
+  })
+})
+
+test("a reminder with no chat lands in the App mailbox instead of being dropped", async () => {
+  await withApi(async () => "ok", async (h) => {
+    h.setOwner(undefined)
+    const created = await fetch(`${h.base}/api/v1/reminders`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ text: "1m 喝水" }),
+    })
+    assert.ok([200, 201].includes(created.status))
+
+    // The bridge stores what it would have pushed; /notices is how the App collects it
+    h.notices.push({ kind: "reminder", text: "🔔 提醒：喝水" })
+    const listed = (await (await fetch(`${h.base}/api/v1/notices?since=1700000000000`, { headers: authHeaders() })).json()) as {
+      notices: Array<{ text: string; kind: string }>
+    }
+    assert.ok(
+      listed.notices.some((notice) => notice.text.includes("喝水")),
+      "the delivered reminder must be readable through /notices",
+    )
   })
 })
 

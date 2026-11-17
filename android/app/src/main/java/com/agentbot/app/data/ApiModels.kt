@@ -293,6 +293,18 @@ data class AccountEntry(
 )
 
 @Serializable
+data class AppNotice(
+    val id: String,
+    /** "reminder" / "schedule" / "system"; the text already carries the icon. */
+    val kind: String = "system",
+    val text: String = "",
+    val at: Long = 0,
+)
+
+@Serializable
+data class NoticeList(val notices: List<AppNotice> = emptyList())
+
+@Serializable
 data class AccountCategory(val name: String, val count: Int = 0)
 
 @Serializable

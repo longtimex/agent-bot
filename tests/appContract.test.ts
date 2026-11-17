@@ -385,6 +385,7 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "models → GET /models", method: "GET", path: "/models", model: "ModelChoices", at: "models" },
         { name: "access → GET /access", method: "GET", path: "/access", model: "AccessInfo" },
         { name: "aliases → GET /aliases", method: "GET", path: "/aliases", model: "AliasEntry", at: "aliases[]" },
+        { name: "notices → GET /notices", method: "GET", path: "/notices", model: "AppNotice", at: "notices[]" },
         { name: "accounts → GET /accounts", method: "GET", path: "/accounts", model: "AccountEntry", at: "accounts[]" },
         { name: "accountCategories → GET /accounts", method: "GET", path: "/accounts", model: "AccountCategory", at: "categories[]" },
         { name: "revealAccount → POST /accounts/probe/reveal", method: "POST", path: "/accounts/probe/reveal", model: "AccountReveal" },

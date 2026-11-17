@@ -15,6 +15,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.AccountCategory
+import com.agentbot.app.data.AppNotice
 import com.agentbot.app.data.AccountEntry
 import com.agentbot.app.data.AgentActionResult
 import com.agentbot.app.data.AccessResult
@@ -956,6 +957,8 @@ class AppViewModel(
         screen = to
         connectionError = null
         when (to) {
+            // Reminders raised while the App was closed are waiting in the server mailbox
+            Screen.Chat -> pollNotices()
             Screen.History -> refreshHistory()
             Screen.Reminders -> refreshReminders()
             Screen.Schedules -> refreshSchedules()
@@ -2727,6 +2730,44 @@ class AppViewModel(
     private fun refreshAliasesQuietly() = quietly({ aliasesError = "无法加载快捷指令：$it" }) {
         aliases = api.aliases(conn())
         aliasesError = null
+    }
+
+    /** Newest notice already inserted; persisted so a restart does not repeat the list. */
+    private var noticesCursor: Long
+        get() = appContext.getSharedPreferences("agentbot", android.content.Context.MODE_PRIVATE)
+            .getLong("notices.cursor", 0L)
+        set(value) {
+            appContext.getSharedPreferences("agentbot", android.content.Context.MODE_PRIVATE)
+                .edit().putLong("notices.cursor", value).apply()
+        }
+
+    private var noticesPolledAt = 0L
+
+    /**
+     * Pulls the notices a chat-less deployment left for us. Throttled because [navigate] runs on
+     * every screen change, and one open mailbox check per minute is plenty.
+     */
+    fun pollNotices() {
+        val now = System.currentTimeMillis()
+        if (now - noticesPolledAt < 60_000) return
+        noticesPolledAt = now
+        viewModelScope.launch {
+            try {
+                val cursor = noticesCursor
+                val list = api.notices(conn(), cursor.takeIf { it > 0 })
+                if (list.isEmpty()) return@launch
+                // A first run with a long history shows only the tail, so the chat does not
+                // open with a wall of old reminders.
+                val fresh: List<AppNotice> = if (cursor == 0L) list.takeLast(3) else list
+                messages = messages + fresh.map {
+                    ChatMessage(ChatMessage.Role.ASSISTANT, it.text, at = it.at)
+                }
+                persistMessages()
+                noticesCursor = list.maxOf { it.at }
+            } catch (_: Exception) {
+                // A failed poll must not interrupt reading the conversation
+            }
+        }
     }
 
     fun refreshAccounts() {

@@ -22,6 +22,7 @@ import type { ScheduleService } from "./scheduler.js"
 import {
   routeAccess as routeAccessApi,
   routeAccounts as routeAccountsApi,
+  routeNotices as routeNoticesApi,
   routeAliases as routeAliasesApi,
   routeConfig as routeConfigApi,
   routeDir as routeDirApi,
@@ -47,6 +48,7 @@ import type { ChannelIdResolver } from "./channelRegistry.js"
 import type { Opencode } from "./opencode.js"
 import { type OpsResult, type OpsService } from "./ops.js"
 import type { AccountStore } from "./accounts.js"
+import type { NoticeStore } from "./appNotices.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
@@ -96,6 +98,7 @@ export interface ApiServerOptions {
   /** Per-chat shortcuts; the app shares the owner chat's list when one is paired. */
   aliases?: AliasStore
   accounts?: AccountStore
+  notices?: NoticeStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
   access?: {
     list: () => { users: string[]; allowAll: boolean }
@@ -423,14 +426,13 @@ export class ApiServer {
         workDir: this.#opts.agents.workDir(this.appKey),
         chatId: ownerChatId ?? null,
         userId: this.ownerUserId ?? this.ownerChatId ?? null,
-        // Reminders and schedules deliver through a chat channel, not the App. Tell the
-        // client up front, so it can explain that instead of offering a create button that
-        // can only fail with 409 on an App-only deployment.
+        // A bound chat is the preferred target; an App-only deployment keeps the notice in
+        // the App mailbox (APP_CHAT_ID) and hands it over the next time the App opens.
         automation: {
-          available: Boolean(ownerChatId),
-          reason: ownerChatId
+          available: Boolean(ownerChatId) || this.#opts.cfg.api.enabled,
+          reason: Boolean(ownerChatId) || this.#opts.cfg.api.enabled
             ? null
-            : "提醒和定时任务需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或配置对应渠道的白名单。",
+            : "提醒和定时任务需要一个推送目标：请先在 Telegram 或飞书私聊 Bot 发送 /start，或开启 API_ENABLED 供 App 收取。",
         },
         api: {
           enabled: this.#opts.cfg.api.enabled,
@@ -476,6 +478,11 @@ export class ApiServer {
 
     if (resource === "aliases") {
       await this.#routeAliases(ctx, id)
+      return
+    }
+
+    if (resource === "notices") {
+      await routeNoticesApi(this.#personalDeps(), ctx)
       return
     }
 
@@ -852,6 +859,7 @@ export class ApiServer {
       setTimezone: this.#opts.setTimezone,
       aliases: this.#opts.aliases,
       accounts: this.#opts.accounts,
+      notices: this.#opts.notices,
       ops: this.#opts.ops,
       proxies: this.#opts.proxies,
       history: this.#opts.history,

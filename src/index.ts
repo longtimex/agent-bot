@@ -218,6 +218,7 @@ async function main(): Promise<void> {
           proxies,
           aliases: tgBridge.aliasStore,
           accounts: tgBridge.accountStore,
+          notices: tgBridge.noticeStore,
           ccswitch: tgBridge.ccSwitch,
           magpie,
           fetchMedia: (target) => tgBridge.fetchRemoteMedia(target),

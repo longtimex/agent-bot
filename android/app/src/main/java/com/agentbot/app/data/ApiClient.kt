@@ -650,6 +650,14 @@ class ApiClient {
         send(connection, "DELETE", "/aliases/$name")
     }
 
+    // ---- notices ----
+
+    /** Notices raised while no chat was bound; [since] is the newest one already inserted. */
+    suspend fun notices(connection: Connection, since: Long?): List<AppNotice> {
+        val query = since?.let { "?since=$it" } ?: ""
+        return json.decodeFromJsonElement(NoticeList.serializer(), getBody(connection, "/notices$query")).notices
+    }
+
     // ---- accounts ----
 
     suspend fun accounts(connection: Connection): AccountList =
