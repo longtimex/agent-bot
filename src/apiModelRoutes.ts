@@ -1,5 +1,6 @@
 import type { AgentCliRegistry } from "./agentCli.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
+import { supportsRelay, type AgentProviderStore } from "./agentProviders.js"
 import { asRecord } from "./util.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { customModelView } from "./apiPersonal.js"
@@ -10,6 +11,7 @@ export interface ModelRouteDeps {
   /** CLI engines and their hand-added models: a CLI takes the name as a plain --model. */
   registry: AgentCliRegistry
   customModels: AgentCustomModelStore
+  providers: AgentProviderStore
   json: (res: ApiRequestContext["res"], status: number, body: unknown) => void
   readJsonBody: (req: ApiRequestContext["req"]) => Promise<Record<string, unknown>>
 }
@@ -83,6 +85,42 @@ export async function routeModelTest(deps: ModelRouteDeps, ctx: ApiRequestContex
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * `GET/POST/DELETE /models/provider?engine=` — the relay a CLI engine should talk to.
+ *
+ * Only engines that read a base URL from the environment are offered this; anything else is
+ * configured inside the CLI itself and editing it from here would be guesswork.
+ */
+export async function routeAgentProvider(deps: ModelRouteDeps, ctx: ApiRequestContext): Promise<void> {
+  const requested = ctx.url.searchParams.get("engine") ?? ""
+  const engine = deps.registry.resolve(requested)
+  if (!engine) throw new ApiError(400, `未知的 Agent 引擎：${requested || "(空)"}`)
+  if (!supportsRelay(engine)) {
+    throw new ApiError(400, `${engine} 不支持通过环境变量配置中转站，请在 CLI 自己的配置里设置`)
+  }
+  if (ctx.method === "GET") {
+    deps.json(ctx.res, 200, { engine, provider: deps.providers.get(engine) ?? null })
+    return
+  }
+  if (ctx.method === "POST") {
+    const body = await deps.readJsonBody(ctx.req)
+    const baseURL = typeof body.baseURL === "string" ? body.baseURL.trim() : ""
+    if (!/^https?:\/\//i.test(baseURL)) throw new ApiError(400, "baseURL 需要以 http:// 或 https:// 开头")
+    deps.providers.set(engine, {
+      baseURL,
+      apiKey: typeof body.apiKey === "string" && body.apiKey ? body.apiKey : undefined,
+    })
+    deps.json(ctx.res, 200, { ok: true, engine, provider: deps.providers.get(engine) ?? null })
+    return
+  }
+  if (ctx.method === "DELETE") {
+    deps.providers.set(engine, undefined)
+    deps.json(ctx.res, 200, { ok: true, engine, provider: null })
+    return
+  }
+  throw new ApiError(404, "未知的中转站 API 路径")
 }
 
 export async function routeAgentModels(deps: ModelRouteDeps, ctx: ApiRequestContext): Promise<void> {

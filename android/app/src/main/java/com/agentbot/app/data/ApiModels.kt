@@ -293,6 +293,15 @@ data class AccountEntry(
 )
 
 @Serializable
+data class AgentProviderConfig(val baseURL: String = "", val apiKey: String? = null)
+
+@Serializable
+data class AgentProviderView(
+    val engine: String = "",
+    val provider: AgentProviderConfig? = null,
+)
+
+@Serializable
 data class ModelTestResult(
     val ok: Boolean = false,
     val message: String = "",

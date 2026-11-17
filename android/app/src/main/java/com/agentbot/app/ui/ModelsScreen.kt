@@ -304,7 +304,10 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
     val engine = vm.agentModelEngine
     val label = vm.agents.firstOrNull { it.id == engine }?.label ?: engine
 
-    LaunchedEffect(engine) { vm.loadAgentCustomModels(engine) }
+    LaunchedEffect(engine) {
+        vm.loadAgentCustomModels(engine)
+        vm.loadAgentProvider(engine)
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
@@ -341,6 +344,7 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            item { RelayCard(vm, label) }
             if (vm.agentCustomModels.isEmpty()) {
                 item {
                     AppCard {
@@ -508,4 +512,77 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/**
+ * The relay this engine should talk to. Written as environment variables for that engine's
+ * spawn only, so the CLI's own config file stays untouched and every other use of it is intact.
+ */
+@Composable
+private fun RelayCard(vm: AppViewModel, engineLabel: String) {
+    val saved = vm.agentProvider
+    var baseURL by remember(saved) { mutableStateOf(saved?.baseURL ?: "") }
+    var apiKey by remember(saved) { mutableStateOf(saved?.apiKey ?: "") }
+    val testing = vm.modelTesting
+    val result = vm.modelTestResult
+
+    AppCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "第三方中转站",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f),
+            )
+            if (saved != null) {
+                StatusPill(text = "已启用", tone = StatusTone.Success)
+            }
+        }
+        Text(
+            "把 baseURL 指向中转站，Bot 启动 $engineLabel 时通过环境变量注入，不改动 CLI 自己的配置文件。",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 5.dp),
+        )
+        AppTextField(
+            value = baseURL,
+            onValueChange = { baseURL = it },
+            placeholder = "baseURL（如 https://api.example.com/v1）",
+            singleLine = true,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        AppTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            placeholder = "API Key（可选）",
+            singleLine = true,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        result?.let {
+            Text(
+                it.message,
+                color = if (it.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        Row(modifier = Modifier.padding(top = 4.dp)) {
+            QuietButton(
+                text = "测试连通",
+                enabled = baseURL.isNotBlank() && !testing,
+                onClick = { vm.testModelConnection(baseURL, apiKey, "") },
+            )
+            QuietButton(
+                text = "保存",
+                enabled = baseURL.isNotBlank() && !testing,
+                onClick = { vm.saveAgentProvider(baseURL, apiKey) },
+            )
+            if (saved != null) {
+                QuietButton(
+                    text = "清除",
+                    danger = true,
+                    onClick = { vm.clearAgentProvider() },
+                )
+            }
+        }
+    }
 }

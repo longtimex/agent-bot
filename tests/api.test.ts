@@ -32,6 +32,7 @@ import { AccountStore } from "../src/accounts.js"
 import { NoticeStore } from "../src/appNotices.js"
 import { SettingsStore } from "../src/settings.js"
 import { AgentCustomModelStore } from "../src/agentCustomModels.js"
+import { AgentProviderStore } from "../src/agentProviders.js"
 import { AliasStore } from "../src/aliases.js"
 import { Opencode } from "../src/opencode.js"
 import type { OpsService } from "../src/ops.js"
@@ -124,6 +125,7 @@ export async function withApi(
   const notices = new NoticeStore(join(dir, "app-notices.json"), log)
   const settings = new SettingsStore(join(dir, "settings.json"), log)
   const customModels = new AgentCustomModelStore(join(dir, "agent-custom-models.json"), log)
+  const providers = new AgentProviderStore(join(dir, "agent-providers.json"), log)
   // One entry so the contract test can check the shape instead of an empty array
   notices.push({ kind: "system", text: "探针通知", at: 1_700_000_000_000 })
   const allowUsers = new Set(["42", "7"])
@@ -514,6 +516,7 @@ export async function withApi(
       notices,
       settings,
       customModels,
+      providers,
       access,
       timezone: () => currentTz,
       setTimezone: (zone) => {
@@ -4626,5 +4629,41 @@ test("api rejects a model probe without an http baseURL", async () => {
       body: JSON.stringify({ baseURL: "ftp://example.com" }),
     })
     assert.equal(res.status, 400)
+  })
+})
+
+test("api stores a relay for a CLI engine and clears it again", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const set = await fetch(`${h.base}/api/v1/models/provider?engine=codex`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ baseURL: "https://relay.example.com/v1", apiKey: "sk-relay" }),
+    })
+    assert.equal(set.status, 200)
+    const saved = (await set.json()) as { provider: { baseURL: string; apiKey?: string } | null }
+    assert.equal(saved.provider?.baseURL, "https://relay.example.com/v1")
+    assert.equal(saved.provider?.apiKey, "sk-relay")
+
+    const read = await fetch(`${h.base}/api/v1/models/provider?engine=codex`, { headers: authHeaders() })
+    assert.equal(((await read.json()) as { provider: { baseURL: string } | null }).provider?.baseURL, "https://relay.example.com/v1")
+
+    const cleared = await fetch(`${h.base}/api/v1/models/provider?engine=codex`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    })
+    assert.equal(cleared.status, 200)
+    assert.equal(((await cleared.json()) as { provider: unknown }).provider, null)
+  })
+})
+
+test("api refuses a relay for an engine that does not read one from the environment", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const res = await fetch(`${h.base}/api/v1/models/provider?engine=copilot`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ baseURL: "https://relay.example.com/v1" }),
+    })
+    assert.equal(res.status, 400)
+    assert.match(((await res.json()) as { error: string }).error, /不支持通过环境变量/)
   })
 })

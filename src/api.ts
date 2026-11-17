@@ -50,12 +50,13 @@ import type { AccountStore } from "./accounts.js"
 import type { NoticeStore } from "./appNotices.js"
 import type { SettingsStore } from "./settings.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
+import type { AgentProviderStore } from "./agentProviders.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
 import { OpsActionJobs, routeOps } from "./apiOpsRoutes.js"
 import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
-import { routeAgentModels, routeCustomModels, routeModelTest, type ModelRouteDeps } from "./apiModelRoutes.js"
+import { routeAgentModels, routeAgentProvider, routeCustomModels, routeModelTest, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
@@ -102,6 +103,7 @@ export interface ApiServerOptions {
   notices?: NoticeStore
   settings?: SettingsStore
   customModels: AgentCustomModelStore
+  providers: AgentProviderStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
   access?: {
     list: () => { users: string[]; allowAll: boolean }
@@ -587,6 +589,11 @@ export class ApiServer {
       return
     }
 
+    if (resource === "models" && id === "provider") {
+      await routeAgentProvider(this.#modelRouteDeps(), ctx)
+      return
+    }
+
     if (resource === "models" && id === "test") {
       await routeModelTest(this.#modelRouteDeps(), ctx)
       return
@@ -836,6 +843,7 @@ export class ApiServer {
       models: this.#opts.models,
       registry: this.#opts.agents.registry,
       customModels: this.#opts.customModels,
+      providers: this.#opts.providers,
       json: (res, status, body) => this.#json(res, status, body),
       readJsonBody: (req) => this.#readJsonBody(req),
     }

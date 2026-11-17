@@ -782,6 +782,7 @@ export class AgentCliService {
   readonly #timeoutMs: number
   readonly #maxTimeoutMs: number
   readonly #proxyEnv?: () => Record<string, string>
+  readonly #providerEnv?: (engine: string) => Record<string, string>
   readonly #active = new Set<ChildProcess>()
 
   constructor(
@@ -792,6 +793,8 @@ export class AgentCliService {
     maxTimeoutMs = timeoutMs,
     proxyEnv?: () => Record<string, string>,
     registry?: AgentCliRegistry,
+    /** Per-engine relay variables, applied only to that engine's spawn. */
+    providerEnv?: (engine: string) => Record<string, string>,
   ) {
     this.defaultWorkDir = workDir
     this.#store = store
@@ -799,6 +802,7 @@ export class AgentCliService {
     this.#timeoutMs = timeoutMs
     this.#maxTimeoutMs = maxTimeoutMs > 0 ? Math.max(maxTimeoutMs, timeoutMs) : 0
     this.#proxyEnv = proxyEnv
+    this.#providerEnv = providerEnv
     this.registry = registry ?? new AgentCliRegistry({ log })
   }
 
@@ -889,7 +893,13 @@ export class AgentCliService {
     return new Promise((resolve, reject) => {
       const child = spawn(binPath, args, {
         cwd: workDir,
-        env: childEnv({ ...process.env, ...profile.env, ...this.#proxyEnv?.() }),
+        env: childEnv({
+          ...process.env,
+          ...profile.env,
+          ...this.#proxyEnv?.(),
+          // A relay configured for this engine wins over the ambient values
+          ...this.#providerEnv?.(profile.id),
+        }),
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
       })

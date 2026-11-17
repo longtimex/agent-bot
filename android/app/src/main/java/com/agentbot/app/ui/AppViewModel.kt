@@ -19,6 +19,7 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.AccountCategory
 import com.agentbot.app.data.AgentCustomModel
+import com.agentbot.app.data.AgentProviderConfig
 import com.agentbot.app.data.AppNotice
 import com.agentbot.app.data.AccountEntry
 import com.agentbot.app.data.AgentActionResult
@@ -1236,6 +1237,39 @@ class AppViewModel(
     /** Which engine the model screen is editing; "opencode" keeps the original registry view. */
     var agentModelEngine by mutableStateOf("opencode")
         private set
+
+    /** Relay configured for [agentModelEngine], nil when the engine talks to its vendor. */
+    var agentProvider by mutableStateOf<AgentProviderConfig?>(null)
+        private set
+
+    fun loadAgentProvider(engine: String = agentModelEngine) {
+        if (engine == "opencode") {
+            agentProvider = null
+            return
+        }
+        guarded("加载中转站", onError = { agentModelError = "无法加载中转站配置：${it.message}" }) {
+            agentProvider = api.agentProvider(conn(), engine)
+        }
+    }
+
+    fun saveAgentProvider(baseURL: String, apiKey: String) {
+        val engine = agentModelEngine
+        if (engine == "opencode") return
+        guarded("保存中转站", onError = { toast = "保存失败：${it.message}" }) {
+            agentProvider = api.setAgentProvider(conn(), engine, baseURL.trim(), apiKey.trim())
+            toast = "中转站已保存：${baseURL.trim()}"
+        }
+    }
+
+    fun clearAgentProvider() {
+        val engine = agentModelEngine
+        if (engine == "opencode") return
+        guarded("清除中转站", onError = { toast = "清除失败：${it.message}" }) {
+            api.clearAgentProvider(conn(), engine)
+            agentProvider = null
+            toast = "已恢复使用官方端点"
+        }
+    }
 
     /** Hand-added ids for [agentModelEngine]; empty for OpenCode, which uses its own registry. */
     var agentCustomModels by mutableStateOf<List<AgentCustomModel>>(emptyList())

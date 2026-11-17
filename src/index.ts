@@ -19,6 +19,7 @@ import { ProxyService } from "./proxy.js"
 import { canRunSetup, setupFromCli } from "./setup.js"
 import { SettingsStore } from "./settings.js"
 import { AgentCustomModelStore } from "./agentCustomModels.js"
+import { AgentProviderStore } from "./agentProviders.js"
 import { resolveDefaultEngine } from "./engineDefault.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
@@ -135,6 +136,7 @@ async function main(): Promise<void> {
   const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
   const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
   const customModels = new AgentCustomModelStore(resolve(cfg.dataDir, "agent-custom-models.json"), log)
+  const agentProviders = new AgentProviderStore(resolve(cfg.dataDir, "agent-providers.json"), log)
   // Resolved per call so changing the default in the App takes effect without a restart
   const store = new SessionStore(
     resolve(cfg.dataDir, "sessions.json"),
@@ -149,6 +151,7 @@ async function main(): Promise<void> {
     cfg.taskMaxTimeoutMs,
     () => proxies.env(),
     agentRegistry,
+    (engine) => agentProviders.envFor(engine),
   )
   const allProfiles = agentRegistry.list()
   const detectedAgents = allProfiles.filter((profile) => agentRegistry.binPath(profile))
@@ -229,6 +232,7 @@ async function main(): Promise<void> {
           aliases: tgBridge.aliasStore,
           settings,
           customModels,
+          providers: agentProviders,
           accounts: tgBridge.accountStore,
           notices: tgBridge.noticeStore,
           ccswitch: tgBridge.ccSwitch,

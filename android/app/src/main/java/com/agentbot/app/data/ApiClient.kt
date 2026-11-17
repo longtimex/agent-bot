@@ -667,6 +667,32 @@ class ApiClient {
         return json.decodeFromJsonElement(ModelTestResult.serializer(), res)
     }
 
+    // ---- per-engine relay ----
+
+    suspend fun agentProvider(connection: Connection, engine: String): AgentProviderConfig? =
+        json.decodeFromJsonElement(
+            AgentProviderView.serializer(),
+            getBody(connection, "/models/provider?engine=$engine"),
+        ).provider
+
+    suspend fun setAgentProvider(
+        connection: Connection,
+        engine: String,
+        baseURL: String,
+        apiKey: String,
+    ): AgentProviderConfig? {
+        val body = buildJsonObject {
+            put("baseURL", baseURL)
+            apiKey.takeIf { it.isNotBlank() }?.let { put("apiKey", it) }
+        }
+        val res = send(connection, "POST", "/models/provider?engine=$engine", body)
+        return json.decodeFromJsonElement(AgentProviderView.serializer(), res).provider
+    }
+
+    suspend fun clearAgentProvider(connection: Connection, engine: String): Unit {
+        send(connection, "DELETE", "/models/provider?engine=$engine")
+    }
+
     // ---- per-engine custom models ----
 
     suspend fun agentCustomModels(connection: Connection, engine: String): List<AgentCustomModel> =

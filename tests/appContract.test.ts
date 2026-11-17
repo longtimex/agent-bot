@@ -395,6 +395,16 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
           model: "SettingsView",
         },
         {
+          // GET answers null when nothing is configured, which the shape check cannot decode;
+          // this probe writes first so both the read and the write are covered by one path
+          name: "setAgentProvider → POST /models/provider",
+          method: "POST",
+          path: "/models/provider?engine=codex",
+          body: { baseURL: "https://relay.example.com/v1", apiKey: "sk-relay" },
+          model: "AgentProviderConfig",
+          at: "provider",
+        },
+        {
           name: "testModel → POST /models/test",
           method: "POST",
           path: "/models/test",
