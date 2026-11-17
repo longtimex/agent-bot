@@ -3112,7 +3112,9 @@ class AppViewModel(
         viewModelScope.launch {
             agentBusy = engine
             try {
-                val result = api.agentAction(conn(), engine, action)
+                // The dialog already showed the command, so a removal the bot did not perform
+                // can go ahead without a second round trip.
+                val result = api.agentAction(conn(), engine, action, confirm = action == "uninstall")
                 agentResult = result
                 toast = result.message ?: "操作完成"
                 agents = api.agents(conn())

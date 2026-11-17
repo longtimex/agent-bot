@@ -605,8 +605,16 @@ class ApiClient {
     }
 
     /** Install/update/uninstall an Agent CLI; may run for several minutes. */
-    suspend fun agentAction(connection: Connection, engine: String, action: String): AgentActionResult {
-        val text = executeEncryptedFallback(connection, "POST", "/agents/$engine/$action", client = longHttp)
+    suspend fun agentAction(
+        connection: Connection,
+        engine: String,
+        action: String,
+        confirm: Boolean = false,
+    ): AgentActionResult {
+        // The server only requires confirm=1 when the CLI was not installed by the bot, but
+        // the caller has already shown the command in a dialog either way.
+        val query = if (confirm) "?confirm=1" else ""
+        val text = executeEncryptedFallback(connection, "POST", "/agents/$engine/$action$query", client = longHttp)
         return json.decodeFromJsonElement(AgentActionResult.serializer(), json.parseToJsonElement(text).jsonObject)
     }
 

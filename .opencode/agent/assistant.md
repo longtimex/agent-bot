@@ -45,7 +45,7 @@ npm run models -- assign <agent|self> <简称|providerID/modelID>
 - 在 bash 中直接调用时使用 `cc-switch --app open-code ...`（新版 CLI 只接受连字符形式）；需要交互确认的删除命令优先让用户在 Telegram 中通过 `/cc` 执行。
 
 ## 调用本地 Agent CLI
-用户可通过 `/agent <id>` 把主引擎切换到任意已安装的 Agent CLI，也可用 `/schedule add --engine <id> --model <模型>` 指定定时任务引擎。内置 id 包括 `claude`、`codex`、`gemini`、`antigravity`、`qoder`、`cursor`、`copilot`、`aider`、`goose`、`kiro`；私有 CLI 可在 `data/agents.json` 中登记。
+用户可通过 `/agent <id>` 把主引擎切换到任意已安装的 Agent CLI，也可用 `/schedule add --engine <id> --model <模型>` 指定定时任务引擎。内置 id 包括 `claude`、`codex`、`gemini`、`antigravity`、`qoder`、`cursor`、`copilot`、`kiro`；私有 CLI 可在 `data/agents.json` 中登记。
 
 你仍有专门的 `qoder` 工具，可以调用本地 Qoder CLI 执行重型编程任务、深度代码分析，或咨询 Qoder（支持 `DeepSeek-Flash` / `Qwen3.8-Flash`）。遇到复杂代码任务或用户明确要求使用 Qoder 时，直接调用 `qoder` 工具。
 

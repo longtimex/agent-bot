@@ -140,7 +140,7 @@ export class TelegramAgentCommands {
       if (!this.#deps.installer.uninstallCommand(engine)) {
         await this.#deps.sendText(
           job.chatId,
-          `ℹ️ ${escapeMarkdown(profile.label)} 不是由 Bot 安装的，无法自动卸载。\n只能卸载通过 \`/agents install\` 安装的 CLI；系统预装版本请手动管理。`,
+          `ℹ️ ${escapeMarkdown(profile.label)} 不是通过 npm/pip 安装的，无法自动卸载。\n请按其官方说明手动删除。`,
         )
         return
       }
@@ -234,7 +234,9 @@ export class TelegramAgentCommands {
         ? `仅支持内置的 npm/pip 安装方式；安装完成后可用 \`/agent ${engine}\` 切换。`
         : action === "update"
           ? "会覆盖 Bot 托管的版本；更新期间该 CLI 的正在运行任务可能受影响。"
-          : "只会移除由 Bot 安装的版本。"
+          : this.#deps.installer.isManaged(engine)
+            ? "只会移除由 Bot 安装的版本。"
+            : "⚠️ 这不是 Bot 安装的版本，卸载会从 npm/pip 全局移除同名包。"
     const now = Date.now()
     for (const [token, pending] of this.#agentPending) {
       if (now - pending.createdAt > AGENT_CONFIRM_TTL_MS) this.#agentPending.delete(token)
@@ -263,7 +265,7 @@ export class TelegramAgentCommands {
       action === "install"
         ? await this.#deps.installer.install(engine)
         : action === "uninstall"
-          ? await this.#deps.installer.uninstall(engine)
+          ? await this.#deps.installer.uninstall(engine, true)
           : await this.#deps.installer.update(engine)
     this.#deps.log.info(`agent ${action} [${key}] ${engine}: ${result.ok ? "ok" : "failed"}`)
 

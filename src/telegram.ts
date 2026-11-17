@@ -8,6 +8,8 @@ import { CcSwitchService, redactSecrets } from "./ccswitch.js"
 import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
 import { parseBotCommand } from "./telegramCommand.js"
+import { AccountStore } from "./accounts.js"
+import { TelegramAccountCommands } from "./telegramAccountCommands.js"
 import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
 import { MagpieService } from "./magpie.js"
 import { TaskHistoryStore } from "./history.js"
@@ -145,6 +147,7 @@ export class TelegramBridge {
   readonly #magpieCommands: MagpieCommands
   readonly #reminders: ReminderService
   readonly #aliases: AliasStore
+  readonly #accountCommands: TelegramAccountCommands
   readonly #schedules: ScheduleService
   readonly #cc: CcSwitchService
   readonly #models: ModelAdmin
@@ -245,6 +248,10 @@ export class TelegramBridge {
     this.#history = new TaskHistoryStore(resolve(cfg.dataDir, "history.json"), log)
     this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
+    this.#accountCommands = new TelegramAccountCommands({
+      accounts: new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log),
+      sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) },
+    })
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
       (chatId, text, reminder) => this.#deliverReminder(chatId, text, reminder),
@@ -877,6 +884,10 @@ export class TelegramBridge {
       }
       if (command === "/alias") {
         await this.#handleAliasCommand(chatId, arg)
+        return
+      }
+      if (command === "/account") {
+        await this.#accountCommands.handle(chatId, arg)
         return
       }
       if (!QUEUED_COMMANDS.has(command) && !(await this.#ensureCapacity(chatId, key))) return

@@ -61,6 +61,10 @@ export interface AgentActionResult {
   ok: boolean
   message: string
   output?: string
+  /** Set when a hand-installed CLI needs an explicit confirmation before it is removed. */
+  needsConfirm?: boolean
+  /** The command that confirmation would run, shown so nobody confirms blind. */
+  command?: string
 }
 
 export interface AgentInstallerOptions {
@@ -132,15 +136,29 @@ export class AgentCliInstaller {
     return this.#commandFor(record.method, record.package, record.extraArgs)
   }
 
-  uninstallCommand(engine: string): string | undefined {
+  /**
+   * What would remove this CLI. A Bot-managed install carries the flags that succeeded at
+   * install time; a hand-installed one falls back to the profile's install spec, which is the
+   * package its documented install command pulls in.
+   */
+  #removalSpec(
+    engine: string,
+  ): { method: AgentInstallMethod; package: string; extraArgs?: string[]; managed: boolean } | undefined {
     const record = this.#recordFor(engine)
-    if (!record) return undefined
-    if (record.method !== "npm") {
-      const flag = record.extraArgs?.includes("--break-system-packages") ? " --break-system-packages" : ""
-      return `${this.#pythonName()} -m pip uninstall -y${flag} ${record.package}`
+    if (record) return { method: record.method, package: record.package, extraArgs: record.extraArgs, managed: true }
+    const spec = this.#registry.get(engine)?.installSpec
+    return spec ? { method: spec.method, package: spec.package, managed: false } : undefined
+  }
+
+  uninstallCommand(engine: string): string | undefined {
+    const spec = this.#removalSpec(engine)
+    if (!spec) return undefined
+    if (spec.method !== "npm") {
+      const flag = spec.extraArgs?.includes("--break-system-packages") ? " --break-system-packages" : ""
+      return `${this.#pythonName()} -m pip uninstall -y${flag} ${spec.package}`
     }
-    const prefix = record.extraArgs?.find((arg) => arg.startsWith("--prefix="))
-    return `npm uninstall -g${prefix ? ` ${prefix}` : ""} ${record.package}`
+    const prefix = spec.extraArgs?.find((arg) => arg.startsWith("--prefix="))
+    return `npm uninstall -g${prefix ? ` ${prefix}` : ""} ${spec.package}`
   }
 
   #commandFor(method: AgentInstallMethod, pkg: string, extraArgs?: string[]): string {
@@ -319,29 +337,39 @@ export class AgentCliInstaller {
     }
   }
 
-  async uninstall(engine: string): Promise<AgentActionResult> {
-    const record = this.#recordFor(engine)
-    if (!record) {
+  async uninstall(engine: string, confirm = false): Promise<AgentActionResult> {
+    const spec = this.#removalSpec(engine)
+    if (!spec) {
       return {
         ok: false,
-        message: "只能卸载由 Bot 通过 `/agent install` 安装的 CLI；系统预装或其他方式安装的版本请手动管理。",
+        message: "这个 CLI 不是通过 npm/pip 安装的，Bot 无法自动卸载；请按其官方说明手动删除。",
+      }
+    }
+    if (!spec.managed && !confirm) {
+      // Removing something the bot never installed deserves a second look: show exactly what
+      // the package manager would delete before running it.
+      return {
+        ok: false,
+        needsConfirm: true,
+        command: this.uninstallCommand(engine),
+        message: `${engine} 不是由 Bot 安装的，确认卸载将执行：\`${this.uninstallCommand(engine)}\``,
       }
     }
     if (this.#busy) return { ok: false, message: "已有安装或卸载任务正在进行，请稍后再试。" }
 
-    const runner = this.#runnerFor(record.method, record.package, true, record.extraArgs)
+    const runner = this.#runnerFor(spec.method, spec.package, true, spec.extraArgs)
     if (!runner) {
       return {
         ok: false,
         message:
-          record.method === "npm"
+          spec.method === "npm"
             ? "未找到 npm，无法卸载。"
             : "未找到 python3 / python，无法卸载。",
       }
     }
 
     this.#busy = true
-    this.#log.info(`uninstalling agent CLI ${engine} via ${record.method}: ${runner.display} ${runner.args.join(" ")}`)
+    this.#log.info(`uninstalling agent CLI ${engine} via ${spec.method}: ${runner.display} ${runner.args.join(" ")}`)
     try {
       const result = await this.#run(runner.path, runner.args, this.#env())
       const output = this.#formatOutput(result)
@@ -350,8 +378,10 @@ export class AgentCliInstaller {
         return { ok: false, message: `卸载 ${engine} ${reason}。`, output }
       }
 
-      delete this.#managed[engine]
-      this.#save()
+      if (spec.managed) {
+        delete this.#managed[engine]
+        this.#save()
+      }
       this.#registry.reload(true)
       const profile = this.#registry.get(engine)
       const still = profile ? this.#registry.binPath(profile) : undefined
@@ -359,7 +389,7 @@ export class AgentCliInstaller {
         ok: true,
         message: still
           ? `已执行卸载，但仍在 \`${still}\` 检测到可执行文件，可能是其他方式安装的版本。`
-          : `已卸载 ${profile?.label ?? engine}。`,
+          : `已卸载 ${profile?.label ?? engine}${spec.managed ? "" : "（不是 Bot 安装的版本，已按包管理器移除）"}。`,
         output,
       }
     } finally {

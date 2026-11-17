@@ -550,6 +550,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/access add <ID>` / `/access del <ID>` | 增删当前渠道白名单：Telegram 填数字用户 ID，飞书填 `ou_` 开头的 open_id；写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
 | `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
 | `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留）。名称不能与内置命令或 App 保留命令重名，避免创建出永远无法触发的指令 |
+| `/account` | 加密账号库：`/account add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注` 保存（后 4 项可省略），`/account ls [分类]` 列出，`/account show 名称` 看详情，`/account pass 名称` 显示明文，`/account rm 名称 yes` 删除。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥单独放在 `data/accounts.key`（不进 `/ops backup` 备份包）；分类可任意自定义，未指定时归入「未分类」 |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。
@@ -639,8 +640,6 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | `gemini` | Gemini CLI | `gemini` | 捕获续接 | `gemini --list-models --output-format json` |
 | `cursor` | Cursor Agent | `cursor-agent` | 捕获续接 | 无列表命令，模型 ID 透传 |
 | `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 无列表命令，模型 ID 透传 |
-| `aider` | Aider | `aider` | 单次 | 无列表命令，模型 ID 透传 |
-| `goose` | Goose | `goose` | 单次 | 不支持切换 |
 | `antigravity` | Antigravity CLI | `agy` | 单次 | 无列表命令，模型 ID 透传 |
 | `kiro` | Kiro CLI | `kiro-cli` | 单次 | 不支持切换（实验性） |
 <!-- END AGENT TABLE -->
@@ -666,7 +665,6 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | `codex` | `npm install -g @openai/codex` |
 | `gemini` | `npm install -g @google/gemini-cli` |
 | `copilot` | `npm install -g @github/copilot` |
-| `aider` | `python3 -m pip install --user aider-chat` |
 <!-- END AGENT INSTALL TABLE -->
 
 - Qoder、Antigravity、Cursor、Goose、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。

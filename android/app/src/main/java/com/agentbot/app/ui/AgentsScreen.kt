@@ -303,7 +303,9 @@ fun AgentsScreen(vm: AppViewModel) {
                         when (request.action) {
                             "install" -> "仅支持内置的 npm/pip 安装方式，完成后即可切换使用。"
                             "update" -> "会覆盖 Bot 托管的版本。"
-                            else -> "只会移除由 Bot 安装的版本。"
+                            else ->
+                                if (request.agent.managed) "只会移除由 Bot 安装的版本。"
+                                else "⚠️ 这不是 Bot 安装的版本，卸载会从 npm/pip 全局移除同名包。"
                         },
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelMedium,

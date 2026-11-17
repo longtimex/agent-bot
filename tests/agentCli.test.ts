@@ -40,7 +40,7 @@ function profileById(registry: AgentCliRegistry, id: string): AgentCliProfile {
 test("registry ships the mainstream Linux agent CLIs and resolves aliases", () => {
   const registry = new AgentCliRegistry({ log })
   const ids = registry.list().map((profile) => profile.id)
-  for (const id of ["qoder", "claude", "codex", "gemini", "cursor", "copilot", "aider", "goose", "antigravity", "kiro"]) {
+  for (const id of ["qoder", "claude", "codex", "gemini", "cursor", "copilot", "antigravity", "kiro"]) {
     assert.ok(ids.includes(id), `missing builtin profile ${id}`)
   }
 
@@ -65,7 +65,6 @@ test("registry ships the mainstream Linux agent CLIs and resolves aliases", () =
     method: "npm",
     package: "@anthropic-ai/claude-code",
   })
-  assert.deepEqual(profileById(registry, "aider").installSpec, { method: "pip", package: "aider-chat" })
   assert.equal(profileById(registry, "qoder").installSpec, undefined)
 })
 
@@ -85,7 +84,7 @@ test("built-in profiles carry no hard-coded model catalogue", () => {
   })
   // Claude has no non-interactive list command, so it must accept a model id the user knows.
   assert.equal(registry.resolveModel("claude", "some-other-model"), "some-other-model")
-  assert.equal(registry.resolveModel("goose", "anything"), undefined)
+  assert.equal(registry.resolveModel("kiro", "anything"), undefined)
 })
 
 test("model ids cannot smuggle extra CLI flags into argv", () => {
@@ -127,7 +126,7 @@ test("safe mode drops the flags that hand every tool call to the CLI", () => {
 
   assert.equal(bypassesPermissionChecks(claude), true)
   assert.equal(bypassesPermissionChecks(gemini), true)
-  assert.equal(bypassesPermissionChecks(profileById(registry, "goose")), false)
+  assert.equal(bypassesPermissionChecks(profileById(registry, "kiro")), false)
   assert.equal(bypassesPermissionChecks(profileById(registry, "antigravity")), true)
 })
 

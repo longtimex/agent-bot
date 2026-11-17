@@ -60,6 +60,7 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/reminders\` - 查看待触发的提醒
 • \`/cancel 编号\` - 取消指定提醒
 • \`/alias\` - 自定义快捷指令面板；\`/alias add 名称 指令内容\` 创建后，发送 \`/名称\` 即触发（名称不能与内置命令重名）
+• \`/account\` - 加密账号库：\`/account add 名称 | 账号 | 密码 | 分类\` 保存，\`/account ls [分类]\` 查看，\`/account pass 名称\` 显示密码
 • \`/timezone\` - 查看/切换时区（提醒、定时任务、每日统计立即生效）
 • \`/timezone Asia/Shanghai\` - 直接指定 IANA 时区
 • \`/proxy\` - 管理网络代理（HTTP/HTTPS/SOCKS），支持测试、启用与删除

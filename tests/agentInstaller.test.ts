@@ -112,7 +112,6 @@ test("installer catalog exposes npm/pip specs and manual profiles", () => {
     assert.ok(ids.includes("demo"))
     assert.ok(ids.includes("pydemo"))
     assert.ok(ids.includes("claude"))
-    assert.ok(ids.includes("aider"))
     assert.ok(!ids.includes("manual"))
     assert.equal(installer.installCommand(f.registry.get("demo")!), "npm install -g @scope/demo")
     assert.equal(installer.installCommand(f.registry.get("pydemo")!), "python3 -m pip install --user demo-py")

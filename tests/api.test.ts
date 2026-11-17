@@ -1793,12 +1793,12 @@ test("api ops exposes diagnostics and log tails", async () => {
 
 test("api agent install, update and uninstall honour guards", async () => {
   await withApi(async () => "ok", async (h) => {
-    const installed = await fetch(`${h.base}/api/v1/agents/aider/install`, { method: "POST", headers: authHeaders() })
+    const installed = await fetch(`${h.base}/api/v1/agents/gemini/install`, { method: "POST", headers: authHeaders() })
     assert.equal(installed.status, 200)
     const installedBody = (await installed.json()) as { ok: boolean; agent: { managed: boolean } }
     assert.equal(installedBody.ok, true)
     assert.equal(installedBody.agent.managed, true)
-    assert.deepEqual(h.installs, ["aider"])
+    assert.deepEqual(h.installs, ["gemini"])
 
     // Installing over a binary already on PATH is refused. Whether claude exists
     // depends on the machine running the suite, so ask the same lookup the API uses
@@ -1810,19 +1810,19 @@ test("api agent install, update and uninstall honour guards", async () => {
     const unknown = await fetch(`${h.base}/api/v1/agents/nope/install`, { method: "POST", headers: authHeaders() })
     assert.equal(unknown.status, 404)
 
-    const badAction = await fetch(`${h.base}/api/v1/agents/aider/bogus`, { method: "POST", headers: authHeaders() })
+    const badAction = await fetch(`${h.base}/api/v1/agents/gemini/bogus`, { method: "POST", headers: authHeaders() })
     assert.equal(badAction.status, 404)
 
     const notManaged = await fetch(`${h.base}/api/v1/agents/kiro/update`, { method: "POST", headers: authHeaders() })
     assert.equal(notManaged.status, 409)
 
     // Uninstalling the engine the app session is using is refused
-    h.store.setEngine("api:app", "aider")
-    const inUse = await fetch(`${h.base}/api/v1/agents/aider/uninstall`, { method: "POST", headers: authHeaders() })
+    h.store.setEngine("api:app", "gemini")
+    const inUse = await fetch(`${h.base}/api/v1/agents/gemini/uninstall`, { method: "POST", headers: authHeaders() })
     assert.equal(inUse.status, 409)
 
     h.store.setEngine("api:app", "opencode")
-    const removed = await fetch(`${h.base}/api/v1/agents/aider/uninstall`, { method: "POST", headers: authHeaders() })
+    const removed = await fetch(`${h.base}/api/v1/agents/gemini/uninstall`, { method: "POST", headers: authHeaders() })
     assert.equal(removed.status, 200)
     assert.equal(((await removed.json()) as { ok: boolean }).ok, true)
 
