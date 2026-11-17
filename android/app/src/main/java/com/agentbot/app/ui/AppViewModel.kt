@@ -1341,7 +1341,7 @@ class AppViewModel(
                 apiKey = apiKey.trim().ifBlank { null },
             )
             modelDraftRejected = false
-            refreshCustomModels(force = true)
+            refreshCustomModels()
             toast = "已添加模型 $key"
         }
     }
