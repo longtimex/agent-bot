@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { randomBytes } from "node:crypto"
+import { createHash } from "node:crypto"
 import { decryptPayload, encryptPayload } from "./apiCrypto.js"
 import { withFileLock } from "./fileLock.js"
 import { asRecord } from "./util.js"
@@ -106,6 +107,23 @@ function sanitizeExtras(raw: unknown): Record<string, string> {
   return out
 }
 
+/** Counts one category or a list of tags per entry; newest-first order is the caller's. */
+function countBy(
+  entries: AccountEntry[],
+  pick: (entry: AccountEntry) => string | string[],
+): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>()
+  for (const entry of entries) {
+    const picked = pick(entry)
+    for (const value of Array.isArray(picked) ? picked : [picked]) {
+      counts.set(value, (counts.get(value) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+}
+
 export class AccountStore {
   readonly #path: string
   readonly #keyPath: string
@@ -197,6 +215,43 @@ export class AccountStore {
       .filter((entry) => !wanted || entry.category === wanted)
       .filter((entry) => !wantedTag || entry.tags.some((item) => item.toLowerCase() === wantedTag))
       .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  /**
+   * Everything a list response needs from one disk read: the refresh in list()/categories()/
+   * tags() would otherwise parse the same file three times per request.
+   */
+  snapshot(): {
+    entries: AccountEntry[]
+    categories: Array<{ name: string; count: number }>
+    tags: Array<{ name: string; count: number }>
+  } {
+    this.#refresh()
+    const entries = [...this.#accounts.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+    return {
+      entries,
+      categories: countBy(entries, (entry) => entry.category),
+      tags: countBy(entries, (entry) => entry.tags),
+    }
+  }
+
+  /**
+   * Groups entries that share a password. The digest never leaves this method and no password
+   * is returned, so the report is safe to print in a chat.
+   */
+  sharedPasswords(): Array<{ names: string[] }> {
+    this.#refresh()
+    const groups = new Map<string, string[]>()
+    const key = this.#keyBuffer()
+    for (const entry of this.#accounts.values()) {
+      if (!entry.secret) continue
+      const digest = createHash("sha256").update(decryptPayload(key, entry.secret)).digest("hex")
+      groups.set(digest, [...(groups.get(digest) ?? []), entry.name])
+    }
+    return [...groups.values()]
+      .filter((names) => names.length > 1)
+      .map((names) => ({ names: names.sort() }))
+      .sort((a, b) => b.names.length - a.names.length)
   }
 
   /** Tag names with counts, so a panel can offer them beside the categories. */

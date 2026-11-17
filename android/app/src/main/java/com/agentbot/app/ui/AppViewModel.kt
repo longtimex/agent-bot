@@ -2753,6 +2753,7 @@ class AppViewModel(
         }
 
     private var noticesPolledAt = 0L
+    private var noticesFailures = 0
 
     /**
      * Pulls the notices a chat-less deployment left for us. Throttled because [navigate] runs on
@@ -2775,6 +2776,7 @@ class AppViewModel(
                     list
                 }
                 val skipped = list.size - shown.size
+                noticesFailures = 0
                 messages = messages + buildList {
                     if (skipped > 0) {
                         add(
@@ -2789,8 +2791,14 @@ class AppViewModel(
                 }
                 persistMessages()
                 noticesCursor = list.maxOf { it.at }
-            } catch (_: Exception) {
-                // A failed poll must not interrupt reading the conversation
+            } catch (err: Exception) {
+                // Stay quiet on a blip, but say something once it is clearly not a blip:
+                // otherwise "the reminder never arrived" has no visible cause.
+                noticesFailures++
+                if (noticesFailures >= 3) {
+                    noticesFailures = 0
+                    toast = "无法获取提醒：${err.message}"
+                }
             }
         }
     }
@@ -2875,6 +2883,11 @@ class AppViewModel(
 
     fun hideAccount(id: String) {
         revealedAccounts = revealedAccounts - id
+    }
+
+    /** Drops every decrypted password; called when the vault screen goes away. */
+    fun forgetRevealedAccounts() {
+        revealedAccounts = emptyMap()
     }
 
     fun deleteAccount(id: String) {

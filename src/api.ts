@@ -21,8 +21,6 @@ import type { ReminderService } from "./reminders.js"
 import type { ScheduleService } from "./scheduler.js"
 import {
   routeAccess as routeAccessApi,
-  routeAccounts as routeAccountsApi,
-  routeNotices as routeNoticesApi,
   routeAliases as routeAliasesApi,
   routeConfig as routeConfigApi,
   routeDir as routeDirApi,
@@ -37,6 +35,7 @@ import {
   modelsView,
   type PersonalRouteDeps,
 } from "./apiPersonal.js"
+import { routeAccounts as routeAccountsApi, routeNotices as routeNoticesApi } from "./apiAccounts.js"
 import type { SessionStore } from "./store.js"
 import type { UsageStore } from "./usage.js"
 import type { TaskHistoryStore } from "./history.js"
