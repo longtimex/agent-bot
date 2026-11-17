@@ -163,13 +163,15 @@ test("installer installs pip CLIs through python3", async () => {
   }
 })
 
-test("installer only uninstalls bot-managed CLIs", async () => {
+test("installer asks for confirmation before removing a hand-installed CLI", async () => {
   const f = fixture()
   try {
     const installer = f.installer()
     const unmanaged = await installer.uninstall("claude")
     assert.equal(unmanaged.ok, false)
-    assert.match(unmanaged.message, /只能卸载由 Bot/)
+    assert.equal(unmanaged.needsConfirm, true)
+    assert.match(unmanaged.message, /不是由 Bot 安装的/)
+    assert.match(unmanaged.message, /npm uninstall -g/)
 
     await installer.install("demo")
     const removed = await installer.uninstall("demo")
@@ -293,7 +295,8 @@ test("installer ignores inherited prototype keys", async () => {
 
     const removed = await installer.uninstall("toString")
     assert.equal(removed.ok, false)
-    assert.match(removed.message, /只能卸载由 Bot/)
+    // An inherited key has no profile, so there is no package to remove either
+    assert.match(removed.message, /不是通过 npm\/pip 安装的/)
     assert.equal(f.calls.length, 0)
   } finally {
     rmSync(f.dir, { recursive: true, force: true })

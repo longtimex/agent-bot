@@ -265,6 +265,7 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "access", description: "管理当前渠道访问白名单（立即生效）" },
   { command: "api", description: "安卓 App 配对信息（HTTP API 地址与令牌）" },
   { command: "alias", description: "自定义快捷指令（/alias add 名称 指令内容）" },
+  { command: "account", description: "加密账号库（/account add 名称 | 账号 | 密码 | 分类）" },
   { command: "timezone", description: "查看或切换时区（立即生效）" },
   { command: "id", description: "查看会话与配置信息" },
 ]

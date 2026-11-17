@@ -33,6 +33,7 @@ import com.agentbot.app.data.SettingsRepository
 import com.agentbot.app.data.TaskNotifier
 import com.agentbot.app.ui.AccessScreen
 import com.agentbot.app.ui.AgentsScreen
+import com.agentbot.app.ui.AccountsScreen
 import com.agentbot.app.ui.AliasesScreen
 import com.agentbot.app.ui.AppDrawer
 import com.agentbot.app.ui.AppViewModel

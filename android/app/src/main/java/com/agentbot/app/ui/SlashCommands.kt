@@ -19,7 +19,7 @@ internal val ONE_OFF_WORDS = setOf("engine", "engine!", "model!")
 internal val SLASH_COMMANDS = setOf(
     "start", "menu", "help", "new", "stop", "retry", "queue", "history", "export",
     "status", "usage", "report", "id", "api", "agent", "agents", "model", "dir", "timezone",
-    "remind", "reminders", "cancel", "schedule", "env", "access", "alias", "proxy",
+    "remind", "reminders", "cancel", "schedule", "env", "access", "alias", "account", "proxy",
     "cc", "magpie", "ops", "logs", "diag", "update", "restart", "service",
 )
 
@@ -244,6 +244,12 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
                     if (words.size >= 2) vm.removeAccess(words[1].removePrefix("@")) else vm.navigate(Screen.Access)
                 else -> vm.navigate(Screen.Access)
             }
+        }
+
+        "account" -> {
+            // The vault lives on its own screen; arguments are ignored because every action
+            // it offers is a tap away there.
+            vm.navigate(Screen.Accounts)
         }
 
         "alias" -> {
