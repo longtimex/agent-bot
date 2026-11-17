@@ -440,6 +440,15 @@ export async function withApi(
       managed.delete(engine)
       return { ok: true, message: `removed ${engine}` }
     },
+    // The built-in engine has no profile, so its removal follows its own path
+    uninstallOpencode: async (confirm: boolean) =>
+      confirm
+        ? { ok: true, message: "removed opencode" }
+        : {
+            ok: false,
+            needsConfirm: true,
+            message: "OpenCode 是内置引擎。确认卸载将执行 `npm uninstall -g opencode-ai`",
+          },
   } as unknown as AgentCliInstaller
   const magpieCalls: string[] = []
   const magpie = {
@@ -4530,5 +4539,49 @@ test("editing an account note does not need an encrypted channel, a password doe
     } finally {
       if (saved !== undefined) process.env.ALLOW_PLAINTEXT_SECRETS = saved
     }
+  })
+})
+
+test("api refuses to uninstall opencode while it is the running engine", async () => {
+  await withApi(async () => "ok", async (h) => {
+    h.setOwner(undefined)
+    // The default engine resolves to whatever is installed; pin it so the guard is what fires
+    const pinned = await fetch(`${h.base}/api/v1/agent`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ engine: "opencode" }),
+    })
+    assert.ok([200, 201].includes(pinned.status))
+    const blocked = await fetch(`${h.base}/api/v1/agents/opencode/uninstall`, {
+      method: "POST",
+      headers: authHeaders(),
+    })
+    const raw = await blocked.text()
+    assert.equal(blocked.status, 409, `body=${raw}`)
+    assert.match(raw, /先切换/)
+  })
+})
+
+test("api asks for confirmation before removing the built-in opencode package", async () => {
+  await withApi(async () => "ok", async (h) => {
+    h.setOwner(undefined)
+    // Switch away first: removal is only allowed once nothing runs on it
+    const switched = await fetch(`${h.base}/api/v1/agent`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ engine: "claude" }),
+    })
+    assert.ok([200, 201].includes(switched.status))
+
+    const first = await fetch(`${h.base}/api/v1/agents/opencode/uninstall`, {
+      method: "POST",
+      headers: authHeaders(),
+    })
+    assert.equal(first.status, 200)
+    const body = (await first.json()) as { ok: boolean; needsConfirm: boolean; message: string }
+    assert.equal(body.ok, false)
+    assert.equal(body.needsConfirm, true)
+    // The message must name the exact command, because that is what confirm=1 will run
+    assert.match(body.message, /npm uninstall -g opencode-ai/)
   })
 })

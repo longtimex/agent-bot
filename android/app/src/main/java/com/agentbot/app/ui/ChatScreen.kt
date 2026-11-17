@@ -1112,8 +1112,12 @@ private fun VideoMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
                     Text(media.name.ifEmpty { media.label }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("视频 · ${media.sizeLabel} · 点击播放", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 }
-                IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Filled.Download, contentDescription = "保存到相册", tint = TextTertiary, modifier = Modifier.size(17.dp))
+                if ("$taskId/${media.index}" in vm.mediaExporting) {
+                    CircularProgressIndicator(modifier = Modifier.padding(horizontal = 6.dp).size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Filled.Download, contentDescription = "保存到相册", tint = TextTertiary, modifier = Modifier.size(17.dp))
+                    }
                 }
                 IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Filled.OpenInNew, contentDescription = "用其他应用打开", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp))
@@ -1265,13 +1269,17 @@ private fun MediaCard(vm: AppViewModel, taskId: String, media: TaskMedia) {
             if (loading) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             } else {
-                IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Filled.Download,
-                        contentDescription = "保存到相册",
-                        tint = TextTertiary,
-                        modifier = Modifier.size(18.dp),
-                    )
+                if ("$taskId/${media.index}" in vm.mediaExporting) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "保存到相册",
+                            tint = TextTertiary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
                 IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
                     Icon(

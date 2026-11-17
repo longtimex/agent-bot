@@ -31,6 +31,33 @@ export class ApiAgentActions {
     const confirmed = ["1", "true"].includes(ctx.url.searchParams.get("confirm") ?? "")
     const engine = this.#deps.agents.registry.resolveEngine(rawId)
     const profile = engine && engine !== "opencode" ? this.#deps.agents.registry.get(engine) : undefined
+    // The built-in engine has no profile, but its npm package can still be removed
+    if (engine === "opencode") {
+      if (action !== "uninstall") {
+        throw new ApiError(400, "OpenCode 由安装脚本负责：bash scripts/install-cc-switch.sh")
+      }
+      if (this.#deps.store.getEngine(this.#deps.appKey) === "opencode") {
+        throw new ApiError(409, "当前正在使用 OpenCode，请先切换到其他引擎再卸载")
+      }
+      const installerOk = this.#deps.installer
+      if (!installerOk) throw new ApiError(409, "当前运行环境不支持安装管理")
+      if (this.#running) throw new ApiError(409, "已有安装/卸载任务在执行，请稍后再试")
+      this.#running = true
+      try {
+        const result = await installerOk.uninstallOpencode(confirmed)
+        this.#deps.log.info(`api agent uninstall opencode: ${result.ok ? "ok" : "failed"}`)
+        // Same shape the CLI path returns: a needsConfirm answer is a 200 with ok:false
+        this.#deps.json(ctx.res, 200, {
+          ok: result.ok,
+          message: redactSecrets(result.message),
+          output: result.output ? redactSecrets(result.output).slice(-20_000) : undefined,
+          needsConfirm: result.needsConfirm ?? false,
+        })
+      } finally {
+        this.#running = false
+      }
+      return
+    }
     if (!engine || !profile) throw new ApiError(404, `未识别的 Agent CLI：${rawId}`)
     const installer = this.#deps.installer
     if (!installer) throw new ApiError(409, "当前运行环境不支持安装管理")

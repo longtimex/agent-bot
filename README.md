@@ -509,7 +509,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/agents` | 检测本机 CLI，查看可安装/可更新/可卸载项 |
 | `/agents install <id>` | 通过 npm/pip 安装内置 Agent CLI（需确认） |
 | `/agents update <id>` | 更新由 Bot 安装的 CLI（需确认） |
-| `/agents uninstall <id>` | 卸载任意已安装的 CLI；非 Bot 安装的会先显示 `npm uninstall` / `pip uninstall` 命令并要求确认 |
+| `/agents uninstall <id>` | 卸载任意已安装的 CLI（含内置的 OpenCode）；非 Bot 安装的会先显示 `npm uninstall` / `pip uninstall` 命令并要求确认，当前正在使用的引擎会被拒绝 |
 | `/model` | 查看或切换当前引擎的模型，支持按引擎分组的按钮；`/model default`（或面板上的「↩️ 清除模型选择」）取消本会话选择，之后由对应引擎自身的配置决定模型，并重置上下文 |
 | `/model <模型ID>` | 为当前 Agent CLI 指定模型（如 `/model sonnet`；OpenCode 仍走 `/model` 面板） |
 | `/dir` | 查看本会话 CLI 引擎的工作目录（默认是 Bot 自身所在目录），面板上有「恢复默认目录」按钮 |

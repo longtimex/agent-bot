@@ -712,10 +712,11 @@ export function builtinAgentView(): Record<string, unknown> {
     managed: false,
     installable: false,
     updateable: false,
-    uninstallable: false,
+    // Removable, but always behind a confirmation: it is the engine the bot itself runs on
+    uninstallable: true,
     installCommand: undefined,
     updateCommand: undefined,
-    uninstallCommand: undefined,
+    uninstallCommand: "npm uninstall -g opencode-ai",
   }
 }
 

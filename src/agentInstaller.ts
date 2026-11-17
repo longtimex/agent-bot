@@ -397,6 +397,43 @@ export class AgentCliInstaller {
     }
   }
 
+  /**
+   * OpenCode is the built-in engine, so it has no CLI profile and never reaches [uninstall],
+   * but its binary still comes from npm and an operator who switched to a CLI engine may want
+   * it gone. Removal is always confirmed, and the caller checks nobody is running on it.
+   */
+  async uninstallOpencode(confirm = false): Promise<AgentActionResult> {
+    const command = "npm uninstall -g opencode-ai"
+    if (!confirm) {
+      return {
+        ok: false,
+        message: `OpenCode 是内置引擎。确认卸载将执行 \`${command}\`，之后该引擎不可用（可随时用 \`npm install -g opencode-ai\` 装回）。`,
+        needsConfirm: true,
+      }
+    }
+    if (this.#busy) return { ok: false, message: "已有安装或卸载任务正在进行，请稍后再试。" }
+    const runner = this.#runnerFor("npm", "opencode-ai", true, [])
+    if (!runner) return { ok: false, message: "未找到 npm，无法卸载。" }
+
+    this.#busy = true
+    this.#log.info(`uninstalling opencode via ${runner.display} ${runner.args.join(" ")}`)
+    try {
+      const result = await this.#run(runner.path, runner.args, this.#env())
+      const output = this.#formatOutput(result)
+      if (result.code !== 0) {
+        const reason = result.timedOut ? "卸载超时" : `卸载命令退出码 ${result.code ?? "null"}`
+        return { ok: false, message: `卸载 OpenCode ${reason}。`, output }
+      }
+      return {
+        ok: true,
+        message: "已卸载 OpenCode。装回：npm install -g opencode-ai，然后 bash scripts/install-cc-switch.sh。",
+        output,
+      }
+    } finally {
+      this.#busy = false
+    }
+  }
+
   #runnerFor(
     method: AgentInstallMethod,
     pkg: string,

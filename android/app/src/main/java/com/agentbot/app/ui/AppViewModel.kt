@@ -1256,7 +1256,8 @@ class AppViewModel(
 
     /** Passing null clears the explicit choice and restores "first installed". */
     fun chooseDefaultEngine(engine: String?) {
-        guarded("设置默认引擎") {
+        // A rejected choice has to surface too: the button would otherwise look inert
+        guarded("设置默认引擎", onError = { toast = it.message }) {
             val view = api.setDefaultEngine(conn(), engine)
             defaultEngine = view.defaultEngine
             effectiveDefaultEngine = view.effective
@@ -3937,6 +3938,10 @@ class AppViewModel(
             toast = "系统版本过低，请先打开文件再另存"
             return
         }
+        val key = "$taskId/${media.index}"
+        // A download can take seconds; the card shows a spinner for this entry until it lands
+        if (key in mediaExporting) return
+        mediaExporting = mediaExporting + key
         viewModelScope.launch {
             try {
                 val file = mediaFile(taskId, media)
@@ -3963,16 +3968,22 @@ class AppViewModel(
                     } ?: error("无法写入媒体文件")
                     // IS_PENDING=0 publishes it; until then the gallery ignores the entry
                     resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-                    toast = "已保存到相册"
+                    toast = "已保存到相册：${media.name.ifBlank { media.label }}"
                 } catch (err: Exception) {
                     resolver.delete(uri, null, null)
                     throw err
                 }
             } catch (err: Exception) {
                 toast = "保存失败：${err.message}"
+            } finally {
+                mediaExporting = mediaExporting - key
             }
         }
     }
+
+    /** Entries whose download is in flight, so the card can show progress instead of silence. */
+    var mediaExporting by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     private fun mediaMimeType(media: TaskMedia): String = when (media.kind) {
         "video" -> "video/mp4"
