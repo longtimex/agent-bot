@@ -634,6 +634,9 @@ class AppViewModel(
 
     var accountError by mutableStateOf<String?>(null)
 
+    /** Only a failed list load fills the page; a save/delete failure shows in the notice bar. */
+    var accountLoadError by mutableStateOf<String?>(null)
+
     var accountBusy by mutableStateOf(false)
         private set
 
@@ -2790,8 +2793,8 @@ class AppViewModel(
     }
 
     fun refreshAccounts() {
-        guarded("加载账号库", onError = { accountError = "无法加载账号库：${it.message}" }) {
-            accountError = null
+        guarded("加载账号库", onError = { accountLoadError = "无法加载账号库：${it.message}" }) {
+            accountLoadError = null
             val list = api.accounts(conn())
             accounts = list.accounts
             accountCategories = list.categories

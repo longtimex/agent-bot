@@ -474,7 +474,7 @@ export async function routeAliases(deps: PersonalRouteDeps, ctx: ApiRequestConte
 function secretChannelError(): ApiError {
   return new ApiError(
     403,
-    "账号密码需要通过加密通道传输：请开启 API_ENCRYPTION=1 并在 App 中重新扫码配对；确实接受明文时设置 ALLOW_PLAINTEXT_SECRETS=1",
+    "保存密码需要加密通道：开启 API_ENCRYPTION=1 后在 Bot 里发 /api 重新扫码，或将 API_PUBLIC_URL 设为 https 地址；也可设 ALLOW_PLAINTEXT_SECRETS=1 接受明文",
   )
 }
 
@@ -519,8 +519,11 @@ export async function routeAccounts(
   // A password must not cross a plaintext hop. The check sits on the requests that actually
   // carry one, so editing a note over plain HTTP still works on an unencrypted deployment.
   const plaintext = process.env.ALLOW_PLAINTEXT_SECRETS === "1"
+  // An https public URL means the operator terminates TLS in front of us: the hop is
+  // encrypted even though the request body carries no message-level envelope.
+  const httpsDeployment = deps.cfg.api.publicUrl?.startsWith("https://") === true
   const guardSecret = (): void => {
-    if (!ctx.encrypted && !plaintext) throw secretChannelError()
+    if (!ctx.encrypted && !httpsDeployment && !plaintext) throw secretChannelError()
   }
   if (ctx.method === "GET" && !id) {
     deps.json(ctx.res, 200, {

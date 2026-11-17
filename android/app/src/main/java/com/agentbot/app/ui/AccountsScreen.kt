@@ -82,7 +82,7 @@ fun AccountsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
-        val loadError = vm.accountError?.takeIf { vm.accounts.isEmpty() && vm.accountCategories.isEmpty() }
+        val loadError = vm.accountLoadError?.takeIf { vm.accounts.isEmpty() && vm.accountCategories.isEmpty() }
         if (loadError != null) {
             PageLoadError(
                 title = "暂时无法加载账号库",
@@ -93,8 +93,12 @@ fun AccountsScreen(vm: AppViewModel) {
         } else {
             // Only action failures reach here; a load failure took the branch above.
             PageErrorNotice(
-                message = vm.accountError,
-                onDismiss = { vm.accountError = null },
+                // A refresh that failed while data is on screen belongs here, not in the page
+                message = vm.accountError ?: vm.accountLoadError,
+                onDismiss = {
+                    vm.accountError = null
+                    vm.accountLoadError = null
+                },
             )
             if (vm.accountCategories.isNotEmpty()) {
                 CategoryChips(vm)
