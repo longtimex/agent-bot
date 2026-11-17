@@ -259,7 +259,6 @@ class AppViewModel(
     /** What an unset key actually runs on, used to mark one card in the list. */
     var effectiveDefaultEngine by mutableStateOf<String?>(null)
         private set
-        private set
 
     var modelChoices by mutableStateOf(ModelChoices())
         private set

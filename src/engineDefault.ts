@@ -14,7 +14,10 @@ export function resolveDefaultEngine(
   configured?: string,
 ): string {
   for (const candidate of [saved, configured]) {
-    const id = candidate ? registry.resolve(candidate) : undefined
+    if (!candidate) continue
+    // opencode is the built-in engine and has no CLI profile, so registry.resolve misses it
+    if (candidate.trim().toLowerCase() === "opencode") return "opencode"
+    const id = registry.resolve(candidate)
     if (id) return id
   }
   for (const profile of registry.list()) {

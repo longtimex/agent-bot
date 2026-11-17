@@ -30,6 +30,8 @@ import { ModelAdmin } from "../src/modelAdmin.js"
 import { ProxyService } from "../src/proxy.js"
 import { AccountStore } from "../src/accounts.js"
 import { NoticeStore } from "../src/appNotices.js"
+import { SettingsStore } from "../src/settings.js"
+import { AgentCustomModelStore } from "../src/agentCustomModels.js"
 import { AliasStore } from "../src/aliases.js"
 import { Opencode } from "../src/opencode.js"
 import type { OpsService } from "../src/ops.js"
@@ -120,6 +122,8 @@ export async function withApi(
   const aliases = new AliasStore(join(dir, "aliases.json"), log)
   const accounts = new AccountStore(join(dir, "accounts.json"), join(dir, "accounts.key"), log)
   const notices = new NoticeStore(join(dir, "app-notices.json"), log)
+  const settings = new SettingsStore(join(dir, "settings.json"), log)
+  const customModels = new AgentCustomModelStore(join(dir, "agent-custom-models.json"), log)
   // One entry so the contract test can check the shape instead of an empty array
   notices.push({ kind: "system", text: "探针通知", at: 1_700_000_000_000 })
   const allowUsers = new Set(["42", "7"])
@@ -499,6 +503,8 @@ export async function withApi(
       aliases,
       accounts,
       notices,
+      settings,
+      customModels,
       access,
       timezone: () => currentTz,
       setTimezone: (zone) => {

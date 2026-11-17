@@ -151,8 +151,10 @@ export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestCont
     if (body.defaultEngine === null) {
       settings.setDefaultEngine(undefined)
     } else if (typeof body.defaultEngine === "string" && body.defaultEngine.trim()) {
-      const resolved = deps.registry.resolve(body.defaultEngine)
-      if (!resolved) throw new ApiError(400, `未知的 Agent 引擎：${body.defaultEngine}`)
+      const requested = body.defaultEngine.trim()
+      // opencode is built in and has no CLI profile, so it never resolves through the registry
+      const resolved = requested.toLowerCase() === "opencode" ? "opencode" : deps.registry.resolve(requested)
+      if (!resolved) throw new ApiError(400, `未知的 Agent 引擎：${requested}`)
       settings.setDefaultEngine(resolved)
     } else {
       throw new ApiError(400, "缺少 defaultEngine 字段，例如：{\"defaultEngine\":\"codex\"}")
