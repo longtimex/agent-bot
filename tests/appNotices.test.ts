@@ -78,3 +78,19 @@ test("a damaged mailbox is ignored instead of blocking delivery", () => {
     f.close()
   }
 })
+
+test("notices keep their kind so the client can tell a reminder from a report", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.push({ kind: "reminder", text: "喝水", at: 1000 })
+    store.push({ kind: "schedule", text: "日报已生成", at: 2000 })
+    store.push({ kind: "report", text: "今日用量", at: 3000 })
+    assert.deepEqual(
+      store.list().map((notice) => notice.kind),
+      ["reminder", "schedule", "report"],
+    )
+  } finally {
+    f.close()
+  }
+})

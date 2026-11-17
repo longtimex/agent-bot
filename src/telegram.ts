@@ -9,7 +9,7 @@ import { AliasStore } from "./aliases.js"
 import { CcCommands, type CcHost } from "./ccCommands.js"
 import { parseBotCommand } from "./telegramCommand.js"
 import { AccountStore } from "./accounts.js"
-import { APP_CHAT_ID, NoticeStore } from "./appNotices.js"
+import { APP_CHAT_ID, NoticeStore, type AppNotice } from "./appNotices.js"
 import { TelegramAccountCommands } from "./telegramAccountCommands.js"
 import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
 import { MagpieService } from "./magpie.js"
@@ -173,7 +173,7 @@ export class TelegramBridge {
   readonly #channel?: ChannelIdResolver
   readonly #feishuResourceClient?: FeishuApiLike
   readonly #reminderDelivery = new ReminderDelivery({
-    sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+    sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard, "reminder"),
     snooze: (chatId, userId, text, minutes) => this.#reminders.snooze(chatId, userId, text, minutes),
   })
   #startedAt = Date.now()
@@ -287,7 +287,7 @@ export class TelegramBridge {
         // An App-only deployment has no chat; the report joins the same mailbox
         const owner = this.ownerChatId ?? (this.#cfg.api.enabled ? APP_CHAT_ID : undefined)
         if (owner === undefined) throw new Error("白名单为空，没有可推送的聊天")
-        await this.#sendTextMessage(owner, text)
+        await this.#sendTextMessage(owner, text, undefined, "report")
       },
     })
     const ccHost: CcHost = {
@@ -2137,6 +2137,8 @@ export class TelegramBridge {
       `🗓 *定时任务 #${task.id} 已触发*${repeat}\n` +
         `• 引擎：${escapeMarkdown(scheduleTargetLabel(task, this.#agents.registry))}\n` +
         `• 提示词：${escapeMarkdown(clip(task.prompt, 120) ?? "")}\n\n正在执行…`,
+      undefined,
+      "schedule",
     )
 
     const outcome = await new Promise<UsageOutcome>((resolve) => {
@@ -2171,10 +2173,15 @@ export class TelegramBridge {
     return token && text.includes(token) ? text.split(token).join("***") : text
   }
 
-  async #sendTextMessage(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<boolean> {
+  async #sendTextMessage(
+    chatId: number,
+    text: string,
+    keyboard?: InlineKeyboard,
+    kind: AppNotice["kind"] = "system",
+  ): Promise<boolean> {
     // No chat to push to (App-only deployment): keep the text for the next time the App opens
     if (chatId === APP_CHAT_ID) {
-      this.noticeStore.push({ kind: "system", text: this.#maskToken(text) })
+      this.noticeStore.push({ kind, text: this.#maskToken(text) })
       return true
     }
     const markup = keyboard && keyboard.inline_keyboard.length > 0 ? keyboard : undefined

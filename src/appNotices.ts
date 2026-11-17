@@ -16,7 +16,7 @@ import type { Logger } from "./logger.js"
  */
 export interface AppNotice {
   id: string
-  kind: "reminder" | "schedule" | "system"
+  kind: "reminder" | "schedule" | "report" | "system"
   text: string
   /** When the notice was raised, in epoch milliseconds. */
   at: number
@@ -107,7 +107,7 @@ export class NoticeStore {
       const record = asRecord(item)
       if (!record) continue
       const kind = record.kind
-      if (kind !== "reminder" && kind !== "schedule" && kind !== "system") continue
+      if (kind !== "reminder" && kind !== "schedule" && kind !== "report" && kind !== "system") continue
       if (typeof record.text !== "string" || typeof record.at !== "number") continue
       notices.push({
         id: typeof record.id === "string" ? record.id : randomBytes(6).toString("hex"),

@@ -110,6 +110,9 @@ data class ChatMessage(
     enum class Role { USER, ASSISTANT }
 }
 
+/** Oldest notices shown on the very first poll; the rest are summarised in one bubble. */
+private const val FIRST_NOTICE_LIMIT = 20
+
 sealed interface Screen {
     data object Chat : Screen
     data object History : Screen
@@ -2758,11 +2761,25 @@ class AppViewModel(
                 val cursor = noticesCursor
                 val list = api.notices(conn(), cursor.takeIf { it > 0 })
                 if (list.isEmpty()) return@launch
-                // A first run with a long history shows only the tail, so the chat does not
-                // open with a wall of old reminders.
-                val fresh: List<AppNotice> = if (cursor == 0L) list.takeLast(3) else list
-                messages = messages + fresh.map {
-                    ChatMessage(ChatMessage.Role.ASSISTANT, it.text, at = it.at)
+                // A first run shows the newest few and accounts for the rest, so nothing is
+                // dropped silently and the chat does not open with a wall of old bubbles.
+                val shown = if (cursor == 0L && list.size > FIRST_NOTICE_LIMIT) {
+                    list.takeLast(FIRST_NOTICE_LIMIT)
+                } else {
+                    list
+                }
+                val skipped = list.size - shown.size
+                messages = messages + buildList {
+                    if (skipped > 0) {
+                        add(
+                            ChatMessage(
+                                ChatMessage.Role.ASSISTANT,
+                                "📬 另有 $skipped 条更早的提醒未展开",
+                                at = shown.first().at - 1,
+                            ),
+                        )
+                    }
+                    shown.forEach { add(ChatMessage(ChatMessage.Role.ASSISTANT, it.text, at = it.at)) }
                 }
                 persistMessages()
                 noticesCursor = list.maxOf { it.at }
