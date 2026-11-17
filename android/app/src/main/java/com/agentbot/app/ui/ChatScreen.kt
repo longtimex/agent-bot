@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -1111,6 +1112,9 @@ private fun VideoMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
                     Text(media.name.ifEmpty { media.label }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("视频 · ${media.sizeLabel} · 点击播放", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 }
+                IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Filled.Download, contentDescription = "保存到相册", tint = TextTertiary, modifier = Modifier.size(17.dp))
+                }
                 IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Filled.OpenInNew, contentDescription = "用其他应用打开", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp))
                 }
@@ -1154,6 +1158,7 @@ private fun ImageMedia(vm: AppViewModel, taskId: String, media: TaskMedia) {
             ImageViewerDialog(
                 bitmap = image,
                 title = media.name.ifEmpty { media.label },
+                onSave = { vm.exportMedia(taskId, media) },
                 onOpenExternal = {
                     viewing = false
                     vm.openMedia(taskId, media)
@@ -1260,6 +1265,14 @@ private fun MediaCard(vm: AppViewModel, taskId: String, media: TaskMedia) {
             if (loading) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             } else {
+                IconButton(onClick = { vm.exportMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "保存到相册",
+                        tint = TextTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
                 IconButton(onClick = { vm.openMedia(taskId, media) }, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Filled.OpenInNew,

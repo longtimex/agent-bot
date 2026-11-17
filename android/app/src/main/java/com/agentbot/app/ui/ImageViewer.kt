@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +41,7 @@ import androidx.compose.ui.window.DialogProperties
 fun ImageViewerDialog(
     bitmap: ImageBitmap,
     title: String,
+    onSave: () -> Unit,
     onOpenExternal: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -81,6 +83,9 @@ fun ImageViewerDialog(
                     },
             )
             Row(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
+                IconButton(onClick = onSave) {
+                    Icon(Icons.Filled.Download, contentDescription = "保存到相册", tint = Color.White)
+                }
                 IconButton(onClick = onOpenExternal) {
                     Icon(Icons.Filled.OpenInNew, contentDescription = "用其他应用打开", tint = Color.White)
                 }

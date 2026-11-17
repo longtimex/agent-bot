@@ -24,6 +24,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +51,12 @@ fun AccountsScreen(vm: AppViewModel) {
     var editing by remember { mutableStateOf<AccountEntry?>(null) }
     var detail by remember { mutableStateOf<AccountEntry?>(null) }
     var pendingDelete by remember { mutableStateOf<AccountEntry?>(null) }
+    var query by remember { mutableStateOf("") }
+
+    // Leaving the screen must not leave a decrypted password in memory
+    DisposableEffect(Unit) {
+        onDispose { vm.forgetRevealedAccounts() }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
         ScreenHeader(
@@ -82,7 +89,7 @@ fun AccountsScreen(vm: AppViewModel) {
             modifier = Modifier.padding(start = AppSpacing.screen, end = AppSpacing.screen, top = 6.dp),
         )
 
-        val loadError = vm.accountError?.takeIf { vm.accounts.isEmpty() && vm.accountCategories.isEmpty() }
+        val loadError = vm.accountLoadError?.takeIf { vm.accounts.isEmpty() && vm.accountCategories.isEmpty() }
         if (loadError != null) {
             PageLoadError(
                 title = "暂时无法加载账号库",
@@ -93,15 +100,31 @@ fun AccountsScreen(vm: AppViewModel) {
         } else {
             // Only action failures reach here; a load failure took the branch above.
             PageErrorNotice(
-                message = vm.accountError,
-                onDismiss = { vm.accountError = null },
+                // A refresh that failed while data is on screen belongs here, not in the page
+                message = vm.accountError ?: vm.accountLoadError,
+                onDismiss = {
+                    vm.accountError = null
+                    vm.accountLoadError = null
+                },
             )
             if (vm.accountCategories.isNotEmpty()) {
                 CategoryChips(vm)
             }
-            val visible = vm.accountFilter?.let { category ->
-                vm.accounts.filter { it.category == category }
-            } ?: vm.accounts
+            AppTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "搜索名称、账号或标签",
+                singleLine = true,
+                modifier = Modifier.padding(horizontal = AppSpacing.screen, vertical = 8.dp),
+            )
+            val keyword = query.trim()
+            val visible = vm.accounts.filter { entry ->
+                val inCategory = vm.accountFilter == null || entry.category == vm.accountFilter
+                val matches = keyword.isEmpty() ||
+                    (listOf(entry.name, entry.username, entry.category) + entry.tags)
+                        .any { it.contains(keyword, ignoreCase = true) }
+                inCategory && matches
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = AppSpacing.screen, vertical = 12.dp),
@@ -160,7 +183,10 @@ fun AccountsScreen(vm: AppViewModel) {
                 detail = null
                 pendingDelete = entry
             },
-            onDismiss = { detail = null },
+            onDismiss = {
+                vm.hideAccount(entry.id)
+                detail = null
+            },
         )
     }
 

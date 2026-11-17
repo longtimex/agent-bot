@@ -3,15 +3,18 @@ package com.agentbot.app.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.provider.MediaStore
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Environment
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.AccountCategory
@@ -633,6 +636,9 @@ class AppViewModel(
         private set
 
     var accountError by mutableStateOf<String?>(null)
+
+    /** Only a failed list load fills the page; a save/delete failure shows in the notice bar. */
+    var accountLoadError by mutableStateOf<String?>(null)
 
     var accountBusy by mutableStateOf(false)
         private set
@@ -2747,6 +2753,7 @@ class AppViewModel(
         }
 
     private var noticesPolledAt = 0L
+    private var noticesFailures = 0
 
     /**
      * Pulls the notices a chat-less deployment left for us. Throttled because [navigate] runs on
@@ -2769,6 +2776,7 @@ class AppViewModel(
                     list
                 }
                 val skipped = list.size - shown.size
+                noticesFailures = 0
                 messages = messages + buildList {
                     if (skipped > 0) {
                         add(
@@ -2783,15 +2791,21 @@ class AppViewModel(
                 }
                 persistMessages()
                 noticesCursor = list.maxOf { it.at }
-            } catch (_: Exception) {
-                // A failed poll must not interrupt reading the conversation
+            } catch (err: Exception) {
+                // Stay quiet on a blip, but say something once it is clearly not a blip:
+                // otherwise "the reminder never arrived" has no visible cause.
+                noticesFailures++
+                if (noticesFailures >= 3) {
+                    noticesFailures = 0
+                    toast = "无法获取提醒：${err.message}"
+                }
             }
         }
     }
 
     fun refreshAccounts() {
-        guarded("加载账号库", onError = { accountError = "无法加载账号库：${it.message}" }) {
-            accountError = null
+        guarded("加载账号库", onError = { accountLoadError = "无法加载账号库：${it.message}" }) {
+            accountLoadError = null
             val list = api.accounts(conn())
             accounts = list.accounts
             accountCategories = list.categories
@@ -2869,6 +2883,11 @@ class AppViewModel(
 
     fun hideAccount(id: String) {
         revealedAccounts = revealedAccounts - id
+    }
+
+    /** Drops every decrypted password; called when the vault screen goes away. */
+    fun forgetRevealedAccounts() {
+        revealedAccounts = emptyMap()
     }
 
     fun deleteAccount(id: String) {
@@ -3832,6 +3851,66 @@ class AppViewModel(
     }
 
     /** Downloads reply media for the in-app player without handing it to an external app. */
+    /**
+     * Copies a reply media item into the shared gallery. From Android 10 on MediaStore needs no
+     * permission for files the app itself creates; older releases fall back to opening it.
+     */
+    fun exportMedia(taskId: String, media: TaskMedia) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            toast = "系统版本过低，请先打开文件再另存"
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val file = mediaFile(taskId, media)
+                val mime = mediaMimeType(media)
+                val (collection, folder) = when {
+                    mime.startsWith("video/") ->
+                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_MOVIES
+                    mime.startsWith("image/") ->
+                        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_PICTURES
+                    else ->
+                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_DOWNLOADS
+                }
+                val resolver = appContext.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, media.name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$folder/AgentBot")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(collection, values) ?: error("无法创建媒体条目")
+                try {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { it.copyTo(out) }
+                    } ?: error("无法写入媒体文件")
+                    // IS_PENDING=0 publishes it; until then the gallery ignores the entry
+                    resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                    toast = "已保存到相册"
+                } catch (err: Exception) {
+                    resolver.delete(uri, null, null)
+                    throw err
+                }
+            } catch (err: Exception) {
+                toast = "保存失败：${err.message}"
+            }
+        }
+    }
+
+    private fun mediaMimeType(media: TaskMedia): String = when (media.kind) {
+        "video" -> "video/mp4"
+        "voice", "audio" -> "audio/mp4"
+        else -> when (media.name.substringAfterLast('.', "").lowercase()) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "mp4" -> "video/mp4"
+            "pdf" -> "application/pdf"
+            else -> "application/octet-stream"
+        }
+    }
+
     fun withMediaFile(
         taskId: String,
         media: TaskMedia,

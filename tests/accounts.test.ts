@@ -202,3 +202,35 @@ test("accounts keeps tags and custom fields, and filters by tag", () => {
     f.close()
   }
 })
+
+test("accounts reports shared passwords without revealing them", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "Alpha", username: "u", password: "same-secret" })
+    store.add({ name: "Beta", username: "u", password: "same-secret" })
+    store.add({ name: "Gamma", username: "u", password: "other-secret" })
+    const groups = store.sharedPasswords()
+    assert.equal(groups.length, 1)
+    assert.deepEqual(groups[0]?.names, ["Alpha", "Beta"])
+    // The report must never carry the password or a digest
+    assert.ok(!JSON.stringify(groups).includes("same-secret"))
+  } finally {
+    f.close()
+  }
+})
+
+test("accounts snapshot answers list, categories and tags from a single read", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "One", username: "u", category: "开发", tags: ["A"] })
+    store.add({ name: "Two", username: "u", category: "社交", tags: ["A", "B"] })
+    const snapshot = store.snapshot()
+    assert.equal(snapshot.entries.length, 2)
+    assert.deepEqual(snapshot.categories.map((item) => item.name).sort(), ["开发", "社交"].sort())
+    assert.deepEqual(snapshot.tags.map((item) => item.name).sort(), ["A", "B"])
+  } finally {
+    f.close()
+  }
+})

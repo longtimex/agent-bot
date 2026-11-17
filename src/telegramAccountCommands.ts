@@ -29,6 +29,7 @@ interface AccountStoreLike {
   find(ref: string): AccountView | undefined
   reveal(ref: string): { entry: { name: string; category: string }; password: string } | undefined
   remove(ref: string): { name: string } | undefined
+  sharedPasswords(): Array<{ names: string[] }>
   update(ref: string, patch: AccountUpdate): { id: string; name: string; category: string; extras?: Record<string, string> }
   add(input: {
     name: string
@@ -53,6 +54,7 @@ const USAGE = [
   "• `/account tag 名称 标签1,标签2` 覆盖标签",
   "• `/account field 名称 键=值 键=值` 增改自定义字段",
   "• `/account unfield 名称 键` 删除一个字段",
+  "• `/account dup` 检查是否有多个账号共用同一密码",
   "• `/account rm 名称 yes` 删除一条",
   "",
   "密码用 AES-256-GCM 加密保存，密钥在 `data/accounts.key`，不会进入备份包。",
@@ -89,6 +91,9 @@ export class TelegramAccountCommands {
         return this.#field(chatId, tail)
       case "unfield":
         return this.#unfield(chatId, tail)
+      case "dup":
+      case "duplicates":
+        return this.#duplicates(chatId)
       case "pass":
       case "password":
         return this.#pass(chatId, tail)
@@ -346,6 +351,23 @@ export class TelegramAccountCommands {
     } catch (err) {
       await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(err instanceof Error ? err.message : String(err))}`)
     }
+  }
+
+  /** Warns about shared passwords without ever printing one. */
+  async #duplicates(chatId: number): Promise<void> {
+    const groups = this.#deps.accounts.sharedPasswords()
+    if (groups.length === 0) {
+      await this.#deps.sendText(chatId, "✅ 没有发现重复密码。")
+      return
+    }
+    const lines = groups.map(
+      (group, index) => `${index + 1}. ${group.names.map((name) => escapeMarkdown(name)).join(" / ")}`,
+    )
+    await this.#deps.sendText(
+      chatId,
+      `⚠️ *这些账号使用了同一密码*（共 ${groups.length} 组）\n\n${lines.join("\n")}\n\n` +
+        "建议至少让重要平台各用一个密码。",
+    )
   }
 
   async #remove(chatId: number, tail: string): Promise<void> {

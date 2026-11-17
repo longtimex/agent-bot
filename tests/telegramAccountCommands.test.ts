@@ -65,6 +65,14 @@ function fakeStore() {
       if (patch.extras !== undefined) entry.extras = patch.extras as Record<string, string>
       return entry
     },
+    sharedPasswords() {
+      const groups = new Map<string, string[]>()
+      for (const entry of entries.values()) {
+        if (!entry.secret) continue
+        groups.set(entry.secret, [...(groups.get(entry.secret) ?? []), entry.name])
+      }
+      return [...groups.values()].filter((names) => names.length > 1).map((names) => ({ names }))
+    },
     remove(ref: string) {
       const entry = this.find(ref)
       if (!entry) return undefined
@@ -201,4 +209,23 @@ test("account pass sends the password as a disappearing message", async () => {
   assert.ok((secrets[0] ?? "").includes("top-secret"))
   assert.ok((secrets[0] ?? "").includes("60 秒后自动删除"))
   assert.equal(sent.length, 1, "no plain copy may be left in the chat")
+})
+
+test("account dup warns about shared passwords without printing them", async () => {
+  const { commands, sent } = setup()
+  await commands.handle(1, "add Alpha | u | same")
+  await commands.handle(1, "add Beta | u | same")
+  await commands.handle(1, "add Gamma | u | unique")
+  await commands.handle(1, "dup")
+  const report = sent[3] ?? ""
+  assert.match(report, /Alpha \/ Beta/)
+  assert.ok(!report.includes("same"), "the password itself must never appear")
+})
+
+test("account dup says so when every password is distinct", async () => {
+  const { commands, sent } = setup()
+  await commands.handle(1, "add One | u | a")
+  await commands.handle(1, "add Two | u | b")
+  await commands.handle(1, "dup")
+  assert.match(sent[2] ?? "", /没有发现重复密码/)
 })

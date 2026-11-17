@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "bot": "tsx src/bot-cli.ts",
+    "account": "tsx src/account-cli.ts",
     "smoke:app": "node scripts/app-smoke.mjs",
     "setup": "tsx src/setup-cli.ts",
     "setup:tools": "tsx src/install-tools-cli-entry.ts",

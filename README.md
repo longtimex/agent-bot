@@ -552,7 +552,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/access add <ID>` / `/access del <ID>` | 增删当前渠道白名单：Telegram 填数字用户 ID，飞书填 `ou_` 开头的 open_id；写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
 | `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
 | `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留）。名称不能与内置命令或 App 保留命令重名，避免创建出永远无法触发的指令 |
-| `/account` | 加密账号库：`add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注 \| 标签` 保存，`edit` 修改（空段不改、`-` 清空）、`rename` 改名、`tag` 覆盖标签、`field 键=值` 增改自定义字段、`unfield` 删除字段、`ls [分类]`、`show`、`pass`（明文仅显示一次，60 秒后自动删除该消息）、`rm 名称 yes`。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥在 `data/accounts.key`（不进 `/ops backup`）；未加密通道下会拒绝携带密码的请求，除非设置 `ALLOW_PLAINTEXT_SECRETS=1` |
+| `/account` | 加密账号库：`add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注 \| 标签` 保存，`edit` 修改（空段不改、`-` 清空）、`rename` 改名、`tag` 覆盖标签、`field 键=值` 增改自定义字段、`unfield` 删除字段、`dup` 检查多个账号是否共用同一密码、`ls [分类]`、`show`、`pass`（明文仅显示一次，60 秒后自动删除该消息）、`rm 名称 yes`。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥在 `data/accounts.key`（不进 `/ops backup`）；保存密码要求加密通道：`API_ENCRYPTION=1`（需重新配对）、`API_PUBLIC_URL` 为 `https://`，或 `ALLOW_PLAINTEXT_SECRETS=1` |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。
@@ -589,7 +589,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
 | `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：连接 Telegram/飞书时与所有者会话共享同一份列表，仅安卓端时保存在 App 会话；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
-| `GET/POST /accounts` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回，客户端不缓存 |
+| `GET/POST /accounts` · `PATCH /accounts/:id` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回，客户端不缓存 |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
 | `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
 | `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |
@@ -872,6 +872,21 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `RELEASE_HEALTH_TIMEOUT` / `RELEASE_HEALTH_INTERVAL`：启动健康等待的总超时与轮询间隔（秒）。`install --systemd` 生成的 unit 以自身 manifest 决定监督方式；`RELEASE_SUPERVISOR` / `RELEASE_SYSTEMD_UNIT` 仅由旧版 `apply-release.sh` 交接使用。
 - `GROK_API_KEY`：Grok provider 的密钥，`opencode.json` 通过 `{env:GROK_API_KEY}` 读取。
 - `SNIPER_EMAIL` / `SNIPER_PASSWORD`：仅 `scripts/sniper_free_vps.mjs` 使用。
+
+### 任务中取用账号（只读 CLI）
+
+Agent 执行任务需要登录某个平台时，不必让它去解析 `data/accounts.json`：
+
+```bash
+npm run -s account -- list                      # 名称 / 分类 / 账号，不含密码
+npm run -s account -- get 小红书-品牌号            # 只输出密码，便于 $(...) 取用
+npm run -s account -- get 小红书-品牌号 --json     # 账号、密码、网址、备注、标签与自定义字段
+npm run -s account -- tags                      # 标签与计数
+```
+
+每次取用都会在 `data/account-access.log` 追加一行（时间、动作、名称、父进程、工作目录），超过 256 KB 自动清空。这个命令**只读**——新增、修改、删除仍走 `/account` 或 App 的账号库。
+
+它不是权限边界：agent 与 Bot 以同一用户运行时，仍能直接读 `data/accounts.key` 解密。要真正隔离，让 agent 以另一个用户运行，或把密钥放到它的可见范围之外。
 
 ## 运行
 
