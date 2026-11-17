@@ -275,6 +275,70 @@ test("loadConfig treats empty numeric env vars as unset", () => {
   assert.equal(cfg.taskMaxTimeoutMs, 24 * 60 * 60 * 1000)
 })
 
+test("loadConfig rejects invalid or out-of-range numeric env vars", () => {
+  const base = { TELEGRAM_BOT_TOKEN: "token", TELEGRAM_ALLOW_USERS: "1" }
+  const cases: Array<[Record<string, string>, RegExp]> = [
+    [{ API_PORT: "0" }, /API_PORT 必须是 1 到 65535 之间的整数/],
+    [{ API_PORT: "70000" }, /API_PORT 必须是 1 到 65535 之间的整数/],
+    [{ API_PORT: "3080.5" }, /API_PORT 必须是 1 到 65535 之间的整数/],
+    [
+      { FEISHU_CALLBACK_ENABLED: "1", FEISHU_CALLBACK_PORT: "abc" },
+      /FEISHU_CALLBACK_PORT 必须是 1 到 65535 之间的整数/,
+    ],
+    [{ TASK_TIMEOUT_MS: "0" }, /TASK_TIMEOUT_MS 必须是 10000 到 9007199254740991 之间的整数/],
+    [{ TASK_MAX_TIMEOUT_MS: "9000" }, /TASK_MAX_TIMEOUT_MS 必须是 0 或 600000 到/],
+    [{ TASK_MAX_TIMEOUT_MS: "-1" }, /TASK_MAX_TIMEOUT_MS 必须是 0 或 600000 到/],
+    [{ TASK_MAX_TIMEOUT_MS: "600000.5" }, /TASK_MAX_TIMEOUT_MS 必须是 0 或 600000 到/],
+    [{ MAX_REPLY_LENGTH: "5000" }, /MAX_REPLY_LENGTH 必须是 100 到 4000 之间的整数/],
+    [{ MAX_MEDIA_MB: "1.5" }, /MAX_MEDIA_MB 必须是 1 到 100 之间的整数/],
+    [{ MAX_INPUT_MB: "100001" }, /MAX_INPUT_MB 必须是 0 到 100000 之间的整数/],
+  ]
+  for (const [env, expected] of cases) assert.throws(() => loadConfig({ ...base, ...env }), expected)
+})
+
+test("loadConfig rejects misspelled booleans instead of silently disabling features", () => {
+  const base = { TELEGRAM_BOT_TOKEN: "token", TELEGRAM_ALLOW_USERS: "1" }
+  for (const [name, env] of [
+    ["API_ENABLED", { API_ENABLED: "ture" }],
+    ["API_ENCRYPTION", { API_ENCRYPTION: "treu" }],
+    ["FEISHU_CALLBACK_ENABLED", { FEISHU_CALLBACK_ENABLED: "ture" }],
+    ["MEDIA_ALLOW_PRIVATE_URLS", { MEDIA_ALLOW_PRIVATE_URLS: "ture" }],
+    ["STARTUP_NOTICE", { STARTUP_NOTICE: "ture" }],
+    ["USAGE_DAILY_REPORT", { USAGE_DAILY_REPORT: "ture" }],
+    ["TELEGRAM_ALLOW_ALL_USERS", { TELEGRAM_ALLOW_ALL_USERS: "ture" }],
+  ] as const) {
+    assert.throws(() => loadConfig({ ...base, ...env }), new RegExp(`${name} 必须是`))
+  }
+
+  const accepted = loadConfig({
+    ...base,
+    API_ENABLED: "yes",
+    API_BIND: "192.168.1.10",
+    API_ENCRYPTION: "true",
+    STARTUP_NOTICE: "off",
+    USAGE_DAILY_REPORT: "0",
+  })
+  assert.equal(accepted.api.enabled, true)
+  assert.equal(accepted.encryption.enabled, true)
+  assert.equal(accepted.startupNotice, false)
+  assert.equal(accepted.usageReport?.enabled, false)
+})
+
+test("disabled API and Feishu callback ignore their unused invalid settings", () => {
+  const telegram = loadConfig({
+    TELEGRAM_BOT_TOKEN: "token",
+    TELEGRAM_ALLOW_USERS: "1",
+    API_ENABLED: "0",
+    API_PORT: "0",
+    API_PUBLIC_URL: "not-a-url",
+    FEISHU_CALLBACK_ENABLED: "off",
+    FEISHU_CALLBACK_PORT: "0",
+  })
+  assert.equal(telegram.api.enabled, false)
+  assert.equal(telegram.api.publicUrl, undefined)
+  assert.equal(telegram.feishu, undefined)
+})
+
 test("loadConfig migrates the old ten-minute sample hard cap but keeps explicit choices", () => {
   const legacy = loadConfig({
     TELEGRAM_BOT_TOKEN: "token",

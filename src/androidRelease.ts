@@ -120,11 +120,15 @@ export class AndroidReleaseService {
       if (!existsSync(apkFile) || !statSync(apkFile).isFile()) {
         throw new Error(`APK 不存在：${release.apk}`)
       }
-      const bytes = statSync(apkFile).size
-      if (release.size > 0 && release.size !== bytes) {
-        throw new Error(`APK 大小与清单不一致：清单 ${release.size} 字节，文件 ${bytes} 字节`)
+      const bytes = readFileSync(apkFile)
+      if (release.size > 0 && release.size !== bytes.byteLength) {
+        throw new Error(`APK 大小与清单不一致：清单 ${release.size} 字节，文件 ${bytes.byteLength} 字节`)
       }
-      release.size = bytes
+      const digest = createHash("sha256").update(bytes).digest("hex")
+      if (digest !== release.sha256) {
+        throw new Error("APK 校验失败：文件与清单的 SHA-256 不一致")
+      }
+      release.size = bytes.byteLength
       this.#cached = { signature, release }
       return this.#cached
     } catch (err) {
@@ -162,6 +166,8 @@ export class AndroidReleaseService {
       throw new ApiError(404, "APK 路径越界")
     }
     const bytes = readFileSync(real)
+    // `load()` already verified the digest for this cached manifest signature. Check again
+    // because the APK can be replaced between loading the manifest and serving the bytes.
     const digest = createHash("sha256").update(bytes).digest("hex")
     if (digest !== release.sha256) throw new ApiError(500, "APK 校验失败：文件与清单的 SHA-256 不一致")
     if (release.size && bytes.length !== release.size) throw new ApiError(500, "APK 校验失败：文件大小与清单不一致")

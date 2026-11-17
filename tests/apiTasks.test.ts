@@ -166,7 +166,6 @@ test("a rejected model pin leaves no attachment behind in the inbox", async () =
     rmSync(dir, { recursive: true, force: true })
   }
 })
-
 test("an accepted model pin still stores the attachment it was given", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-task-order-ok-"))
   try {
@@ -310,6 +309,23 @@ test("attachment parsing still caps a message at four files", () => {
     data: Buffer.from("x").toString("base64"),
   }))
   assert.throws(() => manager.parseAttachments(attachments), /附件最多 4 个/)
+})
+
+test("attachment parsing rejects malformed base64 instead of silently dropping bytes", () => {
+  const manager = new ApiTaskManager({ cfg: {} } as never)
+  for (const data of ["A", "abcde", "AQ=", "====", "AA=A"]) {
+    assert.throws(
+      () => manager.parseAttachments([{ name: "bad.bin", mime: "application/octet-stream", data }]),
+      (err: unknown) => err instanceof ApiError && err.status === 400 && /合法的 base64/.test(err.message),
+      data,
+    )
+  }
+  for (const data of ["AQ==", "AQ", "AAA=", "AAAA", "abc"]) {
+    assert.equal(
+      manager.parseAttachments([{ name: "ok.bin", mime: "application/octet-stream", data }])?.[0]?.data,
+      data,
+    )
+  }
 })
 
 test("an unset engine falls back from a dead OpenCode to an installed CLI", async () => {

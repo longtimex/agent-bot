@@ -27,7 +27,7 @@
 - `apply-release.sh` 在没有 pending 时也会重启 current release，而不是错误地启动 checkout；systemd 下由 Bot 触发的重启使用 `systemd-run`，避免 installer 被自身重启杀死。
 - Android 清单中的 APK 大小若与文件不一致会在加载时拒绝，而不是等到下载后才失败。
 
-## [未发布]
+## [0.5.0] - 2026-11-15
 
 ### 新增
 

@@ -206,16 +206,50 @@ function feishuIds(value: Set<string>): string | undefined {
   return invalid.length > 0 ? invalid.join("、") : undefined
 }
 
-function bool(value: string | undefined, fallback: boolean): boolean {
-  if (value === undefined || value === "") return fallback
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase())
+const TRUE_BOOLS = new Set(["1", "true", "yes", "on"])
+const FALSE_BOOLS = new Set(["0", "false", "no", "off"])
+
+/** An unrecognized boolean must not silently disable a security or control surface. */
+function strictBool(name: string, value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback
+  const normalized = value.trim().toLowerCase()
+  if (TRUE_BOOLS.has(normalized)) return true
+  if (FALSE_BOOLS.has(normalized)) return false
+  throw new StartupConfigError(
+    `拒绝启动：${name} 必须是 1、0、true、false、yes、no、on 或 off（当前为 ${value.trim()}）。`,
+  )
 }
 
-function int(value: string | undefined, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
+function bool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return fallback
-  return Math.min(max, Math.max(min, Math.floor(parsed)))
+  const normalized = value.trim().toLowerCase()
+  if (TRUE_BOOLS.has(normalized)) return true
+  if (FALSE_BOOLS.has(normalized)) return false
+  return fallback
+}
+
+/**
+ * User-managed `.env` values need to fail loudly. Silently clamping a typo such as
+ * `API_PORT=0` to port 1, or `TASK_TIMEOUT_MS=0` to ten seconds, makes the bot listen on a
+ * different port than the operator asked for and aborts long tasks far too early.
+ */
+function strictInt(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+  min = 1,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
+  if (value === undefined || value.trim() === "") return fallback
+  const text = value.trim()
+  if (!/^[+-]?\d+$/.test(text)) {
+    throw new StartupConfigError(`拒绝启动：${name} 必须是 ${min} 到 ${max} 之间的整数（当前为 ${text}）。`)
+  }
+  const parsed = Number(text)
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new StartupConfigError(`拒绝启动：${name} 必须是 ${min} 到 ${max} 之间的整数（当前为 ${text}）。`)
+  }
+  return parsed
 }
 
 /**
@@ -231,13 +265,21 @@ const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1000
 function taskMaxTimeout(value: string | undefined, idleTimeoutMs: number): number {
   const raw = value?.trim()
   if (!raw) return DEFAULT_HARD_TIMEOUT_MS
+  if (!/^[+-]?\d+$/.test(raw)) {
+    throw new StartupConfigError(
+      `拒绝启动：TASK_MAX_TIMEOUT_MS 必须是 0 或 ${idleTimeoutMs} 到 ${Number.MAX_SAFE_INTEGER} 之间的整数（当前为 ${raw}）。`,
+    )
+  }
   const parsed = Number(raw)
-  if (!Number.isFinite(parsed)) return DEFAULT_HARD_TIMEOUT_MS
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || (parsed > 0 && parsed < idleTimeoutMs)) {
+    throw new StartupConfigError(
+      `拒绝启动：TASK_MAX_TIMEOUT_MS 必须是 0 或 ${idleTimeoutMs} 到 ${Number.MAX_SAFE_INTEGER} 之间的整数（当前为 ${raw}）。`,
+    )
+  }
   if (parsed === LEGACY_HARD_TIMEOUT_MS && idleTimeoutMs === LEGACY_HARD_TIMEOUT_MS) {
     return DEFAULT_HARD_TIMEOUT_MS
   }
-  if (parsed <= 0) return 0
-  return Math.max(idleTimeoutMs, Math.floor(parsed))
+  return parsed
 }
 
 function pick(value: string | undefined): string | undefined {
@@ -265,26 +307,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   const tgToken = pick(env.TELEGRAM_BOT_TOKEN)
   const tgUsers = csv(env.TELEGRAM_ALLOW_USERS)
-  const tgAllowAll = bool(env.TELEGRAM_ALLOW_ALL_USERS, false)
+  const tgAllowAll = strictBool("TELEGRAM_ALLOW_ALL_USERS", env.TELEGRAM_ALLOW_ALL_USERS, false)
   const feishuAppId = pick(env.FEISHU_APP_ID)
   const feishuAppSecret = pick(env.FEISHU_APP_SECRET)
   const feishuUsers = csv(env.FEISHU_ALLOW_OPEN_IDS)
-  const feishuAllowAll = bool(env.FEISHU_ALLOW_ALL_USERS, false)
-  const feishuCallbackEnabled = bool(env.FEISHU_CALLBACK_ENABLED, false)
-  const feishuCallbackPort = int(env.FEISHU_CALLBACK_PORT, 3081, 1, 65535)
+  const feishuAllowAll = strictBool("FEISHU_ALLOW_ALL_USERS", env.FEISHU_ALLOW_ALL_USERS, false)
+  const feishuCallbackEnabled = strictBool("FEISHU_CALLBACK_ENABLED", env.FEISHU_CALLBACK_ENABLED, false)
+  const feishuCallbackPort = feishuCallbackEnabled
+    ? strictInt("FEISHU_CALLBACK_PORT", env.FEISHU_CALLBACK_PORT, 3081, 1, 65535)
+    : 3081
   const feishuCallbackBind = pick(env.FEISHU_CALLBACK_BIND) ?? "127.0.0.1"
   const feishuCallbackPath = pick(env.FEISHU_CALLBACK_PATH) ?? "/feishu/card"
   const feishuCallbackVerificationToken = pick(env.FEISHU_CALLBACK_VERIFICATION_TOKEN)
   const feishuCallbackEncryptKey = pick(env.FEISHU_CALLBACK_ENCRYPT_KEY)
-  const apiEnabled = bool(env.API_ENABLED, true)
-  const apiPort = int(env.API_PORT, 3080, 1, 65535)
+  const apiEnabled = strictBool("API_ENABLED", env.API_ENABLED, true)
+  const apiPort = apiEnabled ? strictInt("API_PORT", env.API_PORT, 3080, 1, 65535) : 3080
   const apiBind = pick(env.API_BIND) ?? "127.0.0.1"
   if (isPortLikeApiBind(apiBind)) {
     throw new StartupConfigError(
       `拒绝启动：API_BIND=${apiBind} 是端口号，不是监听地址。监听地址请填 IP 或主机名（例如 127.0.0.1、0.0.0.0），端口请填 API_PORT。`,
     )
   }
-  const apiPublicUrl = parseApiPublicUrl(pick(env.API_PUBLIC_URL))
+  const apiPublicUrl = apiEnabled ? parseApiPublicUrl(pick(env.API_PUBLIC_URL)) : undefined
   const apiToken = pick(env.API_TOKEN)
   // The API is on by default, but the sample .env binds it to loopback. Treating that as a
   // configured control client would let an untouched .env start a bot no phone can reach.
@@ -342,7 +386,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   }
 
   const dataDir = resolve(pick(env.DATA_DIR) ?? "./data")
-  const taskTimeoutMs = int(pick(env.TASK_TIMEOUT_MS) ?? env.OPENCODE_TIMEOUT_MS, 600_000, 10_000)
+  const taskTimeoutMs = strictInt(
+    "TASK_TIMEOUT_MS",
+    pick(env.TASK_TIMEOUT_MS) ?? env.OPENCODE_TIMEOUT_MS,
+    600_000,
+    10_000,
+  )
   const taskMaxTimeoutMs = taskMaxTimeout(env.TASK_MAX_TIMEOUT_MS, taskTimeoutMs)
   const ccswitchApp = pick(env.CC_SWITCH_APP) ?? "opencode"
   if (!CC_SWITCH_APPS.includes(ccswitchApp as (typeof CC_SWITCH_APPS)[number])) {
@@ -403,9 +452,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       publicUrl: apiPublicUrl,
       token: apiToken,
     },
-    maxReplyLength: int(env.MAX_REPLY_LENGTH, 1500, 100, 4000),
-    maxMediaBytes: int(env.MAX_MEDIA_MB, 20, 1, 100) * 1024 * 1024,
-    mediaAllowPrivateUrls: bool(env.MEDIA_ALLOW_PRIVATE_URLS, false),
+    maxReplyLength: strictInt("MAX_REPLY_LENGTH", env.MAX_REPLY_LENGTH, 1500, 100, 4000),
+    maxMediaBytes: strictInt("MAX_MEDIA_MB", env.MAX_MEDIA_MB, 20, 1, 100) * 1024 * 1024,
+    mediaAllowPrivateUrls: strictBool("MEDIA_ALLOW_PRIVATE_URLS", env.MEDIA_ALLOW_PRIVATE_URLS, false),
     // 0 means no application-level ceiling. Telegram's getFile endpoint still has
     // its own 20MB limit; that is reported by the channel instead of being hidden
     // behind this setting.
@@ -414,22 +463,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     outboxDir: resolve(dataDir, "outbox"),
     inboxDir: resolve(dataDir, "inbox"),
     logLevel: logLevel(env.LOG_LEVEL),
-    startupNotice: bool(env.STARTUP_NOTICE, true),
+    startupNotice: strictBool("STARTUP_NOTICE", env.STARTUP_NOTICE, true),
     usageReport: {
-      enabled: bool(env.USAGE_DAILY_REPORT, false),
+      enabled: strictBool("USAGE_DAILY_REPORT", env.USAGE_DAILY_REPORT, false),
       time: validateReportTime(pick(env.USAGE_DAILY_REPORT_TIME) ?? "21:00"),
     },
     stt: parseStt(env),
     encryption: {
-      enabled: bool(env.API_ENCRYPTION, false),
+      enabled: strictBool("API_ENCRYPTION", env.API_ENCRYPTION, false),
     },
   }
 }
 
 /** `MAX_INPUT_MB=0` disables the project-level inbound ceiling. */
 export function parseInputLimitBytes(value: string | undefined): number {
-  if (value === undefined || value.trim() === "") return 0
-  return int(value, 0, 0, 100_000) * 1024 * 1024
+  return strictInt("MAX_INPUT_MB", value, 0, 0, 100_000) * 1024 * 1024
 }
 
 /** magpie's local gateway is informational: only protocol+host[:port], no path/query. */

@@ -107,7 +107,15 @@ export class ApiTaskManager {
       if (!name || !data) throw new ApiError(400, "附件缺少 name 或 data")
       if (!MIME_RE.test(mime)) throw new ApiError(400, `附件 ${name} 的 mime 无效`)
       const stripped = data.replace(/\s+/g, "")
-      if (!BASE64_RE.test(stripped)) throw new ApiError(400, `附件 ${name} 不是合法的 base64`)
+      // Unpadded base64 is valid, except that a four-symbol group can never carry one byte.
+      // A padded payload must complete a four-symbol group.
+      if (
+        !BASE64_RE.test(stripped) ||
+        stripped.length % 4 === 1 ||
+        (stripped.includes("=") && stripped.length % 4 !== 0)
+      ) {
+        throw new ApiError(400, `附件 ${name} 不是合法的 base64`)
+      }
       return { name, mime: mime.toLowerCase(), data: stripped }
     })
     return parsed.length > 0 ? parsed : undefined

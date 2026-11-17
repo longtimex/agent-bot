@@ -85,8 +85,12 @@ test("android release refuses a checksum or declared size that does not match th
     const bytes = Buffer.from("PK-APK")
     const wrongChecksum = new AndroidReleaseService({ projectDir: dir })
     seed(dir, bytes, { sha256: "0".repeat(64) })
-    assert.equal(wrongChecksum.load().release?.sha256, "0".repeat(64))
-    assert.throws(() => wrongChecksum.readApk(), (err: unknown) => err instanceof ApiError && err.status === 500 && /SHA-256/.test(err.message))
+    assert.equal(wrongChecksum.load().release, undefined)
+    assert.match(wrongChecksum.load().error ?? "", /SHA-256/)
+    assert.throws(
+      () => wrongChecksum.readApk(),
+      (err: unknown) => err instanceof ApiError && err.status === 404 && /SHA-256/.test(err.message),
+    )
 
     seed(dir, bytes, { size: bytes.length + 1 })
     assert.match(new AndroidReleaseService({ projectDir: dir }).load().error ?? "", /大小与清单不一致/)
