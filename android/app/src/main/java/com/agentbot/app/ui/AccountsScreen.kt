@@ -189,13 +189,13 @@ private fun CategoryChips(vm: AppViewModel) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            CategoryChip("全部 ${vm.accounts.size}", vm.accountFilter == null) { vm.setAccountFilter(null) }
+            CategoryChip("全部 ${vm.accounts.size}", vm.accountFilter == null) { vm.filterAccounts(null) }
         }
         items(vm.accountCategories, key = { it.name }) { category ->
             CategoryChip(
                 label = "${category.name} ${category.count}",
                 selected = vm.accountFilter == category.name,
-            ) { vm.setAccountFilter(category.name) }
+            ) { vm.filterAccounts(category.name) }
         }
     }
 }

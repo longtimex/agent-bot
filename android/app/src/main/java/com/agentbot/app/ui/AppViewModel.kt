@@ -624,8 +624,9 @@ class AppViewModel(
     var accountTags by mutableStateOf<List<AccountCategory>>(emptyList())
         private set
 
-    /** Null means every category. */
+    /** Null means every category. Written through [filterAccounts]. */
     var accountFilter by mutableStateOf<String?>(null)
+        private set
 
     var accountError by mutableStateOf<String?>(null)
 
@@ -2739,7 +2740,7 @@ class AppViewModel(
         }
     }
 
-    fun setAccountFilter(category: String?) {
+    fun filterAccounts(category: String?) {
         accountFilter = category
     }
 
