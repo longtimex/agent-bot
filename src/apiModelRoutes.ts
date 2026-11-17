@@ -1,11 +1,53 @@
+import type { AgentCliRegistry } from "./agentCli.js"
+import type { AgentCustomModelStore } from "./agentCustomModels.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { customModelView } from "./apiPersonal.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 
 export interface ModelRouteDeps {
   models: ModelAdmin
+  /** CLI engines and their hand-added models: a CLI takes the name as a plain --model. */
+  registry: AgentCliRegistry
+  customModels: AgentCustomModelStore
   json: (res: ApiRequestContext["res"], status: number, body: unknown) => void
   readJsonBody: (req: ApiRequestContext["req"]) => Promise<Record<string, unknown>>
+}
+
+/**
+ * `GET/POST/DELETE /models/agent?engine=` — model ids the operator adds for a CLI engine.
+ *
+ * Discovery still wins: a hand-added entry only widens the list, it never hides what the CLI
+ * reports for itself.
+ */
+export async function routeAgentModels(deps: ModelRouteDeps, ctx: ApiRequestContext): Promise<void> {
+  const requested = ctx.url.searchParams.get("engine") ?? ""
+  const engine = deps.registry.resolve(requested)
+  if (!engine) throw new ApiError(400, `未知的 Agent 引擎：${requested || "(空)"}`)
+  if (ctx.method === "GET") {
+    deps.json(ctx.res, 200, { engine, models: deps.customModels.list(engine) })
+    return
+  }
+  if (ctx.method === "POST") {
+    const body = await deps.readJsonBody(ctx.req)
+    try {
+      const models = deps.customModels.add(engine, {
+        value: typeof body.value === "string" ? body.value : "",
+        label: typeof body.label === "string" ? body.label : "",
+      })
+      deps.json(ctx.res, 201, { ok: true, engine, models })
+    } catch (err) {
+      throw new ApiError(400, err instanceof Error ? err.message : "无法添加模型")
+    }
+    return
+  }
+  if (ctx.method === "DELETE") {
+    if (!deps.customModels.remove(engine, ctx.url.searchParams.get("value") ?? "")) {
+      throw new ApiError(404, "没有这个自定义模型")
+    }
+    deps.json(ctx.res, 200, { ok: true, engine, models: deps.customModels.list(engine) })
+    return
+  }
+  throw new ApiError(404, "未知的模型 API 路径")
 }
 
 export async function routeCustomModels(deps: ModelRouteDeps,

@@ -81,7 +81,12 @@ export class SessionStore {
   readonly #log: Logger
   #data: Record<string, SessionRecord> = emptyMap<SessionRecord>()
 
-  constructor(path: string, log: Logger) {
+  constructor(
+    path: string,
+    log: Logger,
+    /** Resolved by the caller: a saved default, DEFAULT_ENGINE, or the first installed CLI. */
+    private readonly fallback: () => BackendEngine = () => "opencode",
+  ) {
     this.#path = path
     this.#log = log
     this.#load()
@@ -114,7 +119,7 @@ export class SessionStore {
   }
 
   getEngine(key: string): BackendEngine {
-    return this.#data[key]?.engine || "opencode"
+    return this.#data[key]?.engine || this.fallback()
   }
 
   /** The engine the user (or a previous switch) actually chose, if any. */

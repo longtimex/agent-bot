@@ -2,6 +2,7 @@ import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AccountEntry, AccountUpdate } from "./accounts.js"
 import type { AppNotice } from "./appNotices.js"
 import type { PersonalRouteDeps } from "./apiPersonal.js"
+import { resolveDefaultEngine } from "./engineDefault.js"
 
 /**
  * The account vault and the App mailbox, split out of apiPersonal.ts so the reminder and
@@ -130,3 +131,35 @@ export async function routeAccounts(
   throw new ApiError(404, "未知的账号库 API 路径")
 }
 
+
+/**
+ * `GET/POST /settings` — the engine a new conversation starts on.
+ *
+ * `effective` is what an unset key actually runs on, so the App can mark one card as the
+ * default without repeating the "first installed" rule on the client.
+ */
+export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestContext): Promise<void> {
+  const settings = deps.settings
+  if (!settings) throw new ApiError(409, "当前运行环境不支持该设置")
+  const effective = resolveDefaultEngine(deps.registry, settings.defaultEngine, deps.cfg.defaultEngine)
+  if (ctx.method === "GET") {
+    deps.json(ctx.res, 200, { defaultEngine: settings.defaultEngine ?? null, effective })
+    return
+  }
+  if (ctx.method === "POST") {
+    const body = await deps.readJsonBody(ctx.req)
+    if (body.defaultEngine === null) {
+      settings.setDefaultEngine(undefined)
+    } else if (typeof body.defaultEngine === "string" && body.defaultEngine.trim()) {
+      const resolved = deps.registry.resolve(body.defaultEngine)
+      if (!resolved) throw new ApiError(400, `未知的 Agent 引擎：${body.defaultEngine}`)
+      settings.setDefaultEngine(resolved)
+    } else {
+      throw new ApiError(400, "缺少 defaultEngine 字段，例如：{\"defaultEngine\":\"codex\"}")
+    }
+    const next = resolveDefaultEngine(deps.registry, settings.defaultEngine, deps.cfg.defaultEngine)
+    deps.json(ctx.res, 200, { ok: true, defaultEngine: settings.defaultEngine ?? null, effective: next })
+    return
+  }
+  throw new ApiError(404, "未知的设置 API 路径")
+}

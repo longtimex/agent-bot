@@ -23,6 +23,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -33,6 +38,11 @@ import com.agentbot.app.ui.theme.TextTertiary
 /** Telegram's `/cc model` panel: custom OpenCode provider models and agent bindings. */
 @Composable
 fun ModelsScreen(vm: AppViewModel) {
+    // OpenCode keeps its provider registry; every other engine gets a plain id list
+    if (vm.agentModelEngine != "opencode") {
+        AgentEngineModelsScreen(vm)
+        return
+    }
     var adding by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<String?>(null) }
     var assigning by remember { mutableStateOf<String?>(null) }
@@ -63,6 +73,8 @@ fun ModelsScreen(vm: AppViewModel) {
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 20.dp),
         )
+
+        EngineModelChips(vm)
 
         if (vm.modelBusy || vm.customModelsBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
@@ -255,5 +267,156 @@ private fun CustomModelCard(vm: AppViewModel, model: CustomModel, onRemove: () -
                 )
             }
         }
+    }
+}
+
+/** Engines whose model list this screen can edit; OpenCode is first because it is the default. */
+@Composable
+private fun EngineModelChips(vm: AppViewModel) {
+    val engines = (listOf("opencode") + vm.agents.filter { it.supportsModel == true }.map { it.id }).distinct()
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(engines, key = { it }) { engine ->
+            val label = vm.agents.firstOrNull { it.id == engine }?.label ?: "OpenCode"
+            val selected = vm.agentModelEngine == engine
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.clickable { vm.selectAgentModelEngine(engine) },
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) MaterialTheme.colorScheme.primary else TextSecondary,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Custom model ids for one CLI engine. A CLI takes the name as a plain `--model`, so an id the
+ * bot's built-in table does not know yet still works once it is listed here.
+ */
+@Composable
+private fun AgentEngineModelsScreen(vm: AppViewModel) {
+    var adding by remember { mutableStateOf(false) }
+    var pendingRemove by remember { mutableStateOf<String?>(null) }
+    val engine = vm.agentModelEngine
+    val label = vm.agents.firstOrNull { it.id == engine }?.label ?: engine
+
+    LaunchedEffect(engine) { vm.loadAgentCustomModels(engine) }
+
+    Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
+        ScreenHeader(
+            title = "模型管理",
+            subtitle = "$label 的自定义模型",
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onBack = { vm.navigate(Screen.Chat) },
+            trailing = {
+                AppIconButton(
+                    icon = Icons.Filled.Add,
+                    contentDescription = "添加模型",
+                    onClick = { adding = true },
+                )
+                AppIconButton(
+                    icon = Icons.Filled.Refresh,
+                    contentDescription = "刷新模型",
+                    onClick = { vm.loadAgentCustomModels(engine) },
+                )
+            },
+        )
+        EngineModelChips(vm)
+        Text(
+            "把 $label 新出的模型 ID 加进来，切换模型时就能直接选。CLI 自己报告的模型优先，同名的自定义项会被忽略。",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+        )
+        PageErrorNotice(
+            message = vm.agentModelError,
+            onDismiss = { vm.agentModelError = null },
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (vm.agentCustomModels.isEmpty()) {
+                item {
+                    AppCard {
+                        Text("还没有自定义模型", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "点右上角 + 添加，格式：模型 ID [显示名]，例如 claude-opus-4-6 Opus 4.6。",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
+                }
+            }
+            items(vm.agentCustomModels, key = { it.value }) { model ->
+                AppCard {
+                    Text(model.label, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        model.value,
+                        color = TextTertiary,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                    Row(modifier = Modifier.padding(top = 6.dp)) {
+                        QuietButton(
+                            text = "删除",
+                            danger = true,
+                            onClick = { pendingRemove = model.value },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (adding) {
+        TextPromptDialog(
+            title = "添加自定义模型",
+            hint = "格式：模型 ID [显示名]。显示名可省略，省略时列表里显示 ID。",
+            confirmLabel = "添加",
+            placeholder = "claude-opus-4-6 Opus 4.6",
+            onDismiss = { adding = false },
+            onConfirm = { input ->
+                val trimmed = input.trim()
+                if (trimmed.isNotEmpty()) {
+                    val space = trimmed.indexOf(' ')
+                    val value = if (space > 0) trimmed.substring(0, space) else trimmed
+                    val name = if (space > 0) trimmed.substring(space + 1).trim() else ""
+                    vm.addAgentCustomModel(value, name)
+                    adding = false
+                }
+            },
+        )
+    }
+
+    pendingRemove?.let { value ->
+        AppDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("删除 $value？", style = MaterialTheme.typography.titleLarge) },
+            text = { Text("删除后切换模型的列表里不再出现它。", style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.removeAgentCustomModel(value)
+                    pendingRemove = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("取消") }
+            },
+        )
     }
 }

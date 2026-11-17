@@ -18,6 +18,7 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.agentbot.app.data.AccountCategory
+import com.agentbot.app.data.AgentCustomModel
 import com.agentbot.app.data.AppNotice
 import com.agentbot.app.data.AccountEntry
 import com.agentbot.app.data.AgentActionResult
@@ -250,6 +251,14 @@ class AppViewModel(
 
     /** A failed engine read must not look like a bot that has no engines. */
     var agentsError by mutableStateOf<String?>(null)
+
+    /** The explicit default; null means the server picks the first installed CLI. */
+    var defaultEngine by mutableStateOf<String?>(null)
+        private set
+
+    /** What an unset key actually runs on, used to mark one card in the list. */
+    var effectiveDefaultEngine by mutableStateOf<String?>(null)
+        private set
         private set
 
     var modelChoices by mutableStateOf(ModelChoices())
@@ -1184,6 +1193,75 @@ class AppViewModel(
         guarded("加载引擎", onError = { agentsError = "无法加载引擎：${it.message}" }) {
             agentsError = null
             agents = api.agents(conn())
+            // Which card carries the "default" mark; a failed read must not hide the list
+            try {
+                val view = api.settings(conn())
+                defaultEngine = view.defaultEngine
+                effectiveDefaultEngine = view.effective
+            } catch (_: Exception) {
+                // older server without /settings
+            }
+        }
+    }
+
+    // ---- per-engine custom models ----
+
+    /** Which engine the model screen is editing; "opencode" keeps the original registry view. */
+    var agentModelEngine by mutableStateOf("opencode")
+        private set
+
+    /** Hand-added ids for [agentModelEngine]; empty for OpenCode, which uses its own registry. */
+    var agentCustomModels by mutableStateOf<List<AgentCustomModel>>(emptyList())
+        private set
+
+    var agentModelError by mutableStateOf<String?>(null)
+
+    fun selectAgentModelEngine(engine: String) {
+        if (engine == agentModelEngine) return
+        agentModelEngine = engine
+        agentModelError = null
+        if (engine != "opencode") loadAgentCustomModels(engine)
+    }
+
+    fun loadAgentCustomModels(engine: String = agentModelEngine) {
+        if (engine == "opencode") {
+            agentCustomModels = emptyList()
+            return
+        }
+        guarded("加载自定义模型", onError = { agentModelError = "无法加载自定义模型：${it.message}" }) {
+            agentModelError = null
+            agentCustomModels = api.agentCustomModels(conn(), engine)
+        }
+    }
+
+    fun addAgentCustomModel(value: String, label: String) {
+        val engine = agentModelEngine
+        if (engine == "opencode") return
+        guarded("添加自定义模型", onError = { agentModelError = "添加失败：${it.message}" }) {
+            agentCustomModels = api.addAgentCustomModel(conn(), engine, value.trim(), label.trim())
+            agentModelError = null
+            toast = "已添加 $value"
+            // The switcher list is served from the merged catalog, so refresh it too
+            refreshModels(force = true)
+        }
+    }
+
+    fun removeAgentCustomModel(value: String) {
+        val engine = agentModelEngine
+        if (engine == "opencode") return
+        guarded("删除自定义模型", onError = { agentModelError = "删除失败：${it.message}" }) {
+            agentCustomModels = api.removeAgentCustomModel(conn(), engine, value)
+            refreshModels(force = true)
+        }
+    }
+
+    /** Passing null clears the explicit choice and restores "first installed". */
+    fun setDefaultEngine(engine: String?) {
+        guarded("设置默认引擎") {
+            val view = api.setDefaultEngine(conn(), engine)
+            defaultEngine = view.defaultEngine
+            effectiveDefaultEngine = view.effective
+            toast = if (engine == null) "已恢复自动选择默认引擎" else "默认引擎已设为 $engine"
         }
     }
 

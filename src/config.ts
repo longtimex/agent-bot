@@ -67,6 +67,8 @@ export interface BotConfig {
     token?: string
   }
   dataDir: string
+  /** Engine a new conversation starts on; falls back to the first installed CLI. */
+  defaultEngine?: string
   outboxDir: string
   inboxDir: string
   logLevel: LogLevel
@@ -386,6 +388,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   }
 
   const dataDir = resolve(pick(env.DATA_DIR) ?? "./data")
+  // Kept from the hardening commit: a bad timeout must fail the start, not silently default
+  const defaultEngine = pick(env.DEFAULT_ENGINE)
   const taskTimeoutMs = strictInt(
     "TASK_TIMEOUT_MS",
     pick(env.TASK_TIMEOUT_MS) ?? env.OPENCODE_TIMEOUT_MS,
@@ -460,6 +464,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     // behind this setting.
     maxInputBytes: parseInputLimitBytes(env.MAX_INPUT_MB),
     dataDir,
+    defaultEngine,
     outboxDir: resolve(dataDir, "outbox"),
     inboxDir: resolve(dataDir, "inbox"),
     logLevel: logLevel(env.LOG_LEVEL),

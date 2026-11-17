@@ -313,6 +313,8 @@ API_PORT=3080
 API_PUBLIC_URL=https://3080-<机器ID>.instabox.tech
 API_TOKEN=
 API_ENCRYPTION=1
+# 新会话默认引擎；留空则用「第一个已安装的 CLI」，App 的引擎页也能改
+# DEFAULT_ENGINE=codex
 # 账号库拒绝在未加密的请求里传密码；确实要在明文通道上使用才打开这一项
 # ALLOW_PLAINTEXT_SECRETS=1
 ```
@@ -623,6 +625,8 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /usage` | 用量统计与近 7 天趋势 |
 | `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
 | `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天；没有聊天但开启了 API 时改写入 App 信箱 `data/app-notices.json` 并返回 `200`）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
+| `GET/POST /settings` | 新会话的默认引擎：`{defaultEngine}`（`null` 表示恢复「第一个已安装」）；响应带 `effective`，即未指定时会真正使用的引擎 |
+| `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label}`；CLI 自己发现的同名模型优先 |
 | `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果与用量报告（`kind` 分别为 `reminder`/`schedule`/`report`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |
 | `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
 | `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |

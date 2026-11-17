@@ -10,6 +10,8 @@ import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { AliasEntry, AliasStore } from "./aliases.js"
 import type { AccountStore } from "./accounts.js"
 import { APP_CHAT_ID, type NoticeStore } from "./appNotices.js"
+import type { SettingsStore } from "./settings.js"
+import type { AgentCustomModelStore } from "./agentCustomModels.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -60,6 +62,8 @@ export interface PersonalRouteDeps {
   aliases?: AliasStore
   accounts?: AccountStore
   notices?: NoticeStore
+  settings?: SettingsStore
+  customModels?: AgentCustomModelStore
   ops?: OpsService
   proxies?: ProxyService
   history: TaskHistoryStore
@@ -783,9 +787,15 @@ export async function modelsView(
     }
   }
   const discovered = await deps.agentModels.list(engine, refresh)
+  // Hand-added ids widen the list; discovery stays authoritative for names it already knows
+  const custom = deps.customModels?.list(engine) ?? []
+  const known = new Set(discovered.models.map((model) => model.id))
+  const extra = custom
+    .filter((model) => !known.has(model.value))
+    .map((model) => ({ id: model.value, label: model.label, desc: "自定义模型" }))
   return {
     engine,
-    models: discovered.models,
+    models: [...discovered.models, ...extra],
     modelHint: discovered.hint,
     source: discovered.source,
     checkedAt: discovered.checkedAt,

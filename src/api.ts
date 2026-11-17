@@ -35,7 +35,7 @@ import {
   modelsView,
   type PersonalRouteDeps,
 } from "./apiPersonal.js"
-import { routeAccounts as routeAccountsApi, routeNotices as routeNoticesApi } from "./apiAccounts.js"
+import { routeAccounts as routeAccountsApi, routeNotices as routeNoticesApi, routeSettings as routeSettingsApi } from "./apiAccounts.js"
 import type { SessionStore } from "./store.js"
 import type { UsageStore } from "./usage.js"
 import type { TaskHistoryStore } from "./history.js"
@@ -48,12 +48,14 @@ import type { Opencode } from "./opencode.js"
 import { type OpsResult, type OpsService } from "./ops.js"
 import type { AccountStore } from "./accounts.js"
 import type { NoticeStore } from "./appNotices.js"
+import type { SettingsStore } from "./settings.js"
+import type { AgentCustomModelStore } from "./agentCustomModels.js"
 import type { AliasStore } from "./aliases.js"
 import type { ProxyService } from "./proxy.js"
 import { routeTasks, type TaskRouteDeps } from "./apiTaskRoutes.js"
 import { OpsActionJobs, routeOps } from "./apiOpsRoutes.js"
 import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
-import { routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
+import { routeAgentModels, routeCustomModels, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
@@ -98,6 +100,8 @@ export interface ApiServerOptions {
   aliases?: AliasStore
   accounts?: AccountStore
   notices?: NoticeStore
+  settings?: SettingsStore
+  customModels: AgentCustomModelStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
   access?: {
     list: () => { users: string[]; allowAll: boolean }
@@ -480,6 +484,11 @@ export class ApiServer {
       return
     }
 
+    if (resource === "settings") {
+      await routeSettingsApi(this.#personalDeps(), ctx)
+      return
+    }
+
     if (resource === "notices") {
       await routeNoticesApi(this.#personalDeps(), ctx)
       return
@@ -575,6 +584,11 @@ export class ApiServer {
         sessionMessage: sessionMessage ?? null,
         session: this.#sessionView(),
       })
+      return
+    }
+
+    if (resource === "models" && id === "agent") {
+      await routeAgentModels(this.#modelRouteDeps(), ctx)
       return
     }
 
@@ -815,6 +829,8 @@ export class ApiServer {
   #modelRouteDeps(): ModelRouteDeps {
     return {
       models: this.#opts.models,
+      registry: this.#opts.agents.registry,
+      customModels: this.#opts.customModels,
       json: (res, status, body) => this.#json(res, status, body),
       readJsonBody: (req) => this.#readJsonBody(req),
     }
@@ -859,6 +875,8 @@ export class ApiServer {
       aliases: this.#opts.aliases,
       accounts: this.#opts.accounts,
       notices: this.#opts.notices,
+      settings: this.#opts.settings,
+      customModels: this.#opts.customModels,
       ops: this.#opts.ops,
       proxies: this.#opts.proxies,
       history: this.#opts.history,

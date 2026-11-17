@@ -17,6 +17,9 @@ import { ModelAdmin } from "./modelAdmin.js"
 import { Opencode } from "./opencode.js"
 import { ProxyService } from "./proxy.js"
 import { canRunSetup, setupFromCli } from "./setup.js"
+import { SettingsStore } from "./settings.js"
+import { AgentCustomModelStore } from "./agentCustomModels.js"
+import { resolveDefaultEngine } from "./engineDefault.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
 import { appVersion } from "./version.js"
@@ -128,9 +131,16 @@ async function main(): Promise<void> {
     log.warn(`opencode server not reachable at ${cfg.opencode.url}; start it with: npm run serve`)
   }
 
-  const store = new SessionStore(resolve(cfg.dataDir, "sessions.json"), log)
   const proxies = new ProxyService(resolve(cfg.dataDir, "proxies.json"), log)
   const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
+  const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
+  const customModels = new AgentCustomModelStore(resolve(cfg.dataDir, "agent-custom-models.json"), log)
+  // Resolved per call so changing the default in the App takes effect without a restart
+  const store = new SessionStore(
+    resolve(cfg.dataDir, "sessions.json"),
+    log,
+    () => resolveDefaultEngine(agentRegistry, settings.defaultEngine, cfg.defaultEngine),
+  )
   const agents = new AgentCliService(
     process.cwd(),
     store,
@@ -217,6 +227,8 @@ async function main(): Promise<void> {
           androidRelease: new AndroidReleaseService({ projectDir: process.cwd() }),
           proxies,
           aliases: tgBridge.aliasStore,
+          settings,
+          customModels,
           accounts: tgBridge.accountStore,
           notices: tgBridge.noticeStore,
           ccswitch: tgBridge.ccSwitch,

@@ -174,6 +174,8 @@ fun AgentsScreen(vm: AppViewModel) {
             }
             if (loadError == null) items(vm.agents, key = { it.id }) { agent ->
                 val current = agent.id == vm.session?.engine
+                // The engine an unset conversation would start on
+                val isDefault = agent.id == vm.effectiveDefaultEngine
                 AppCard(contentPadding = PaddingValues(0.dp)) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
@@ -188,12 +190,14 @@ fun AgentsScreen(vm: AppViewModel) {
                             StatusPill(
                                 text = when {
                                     current -> "当前"
+                                    isDefault -> "默认"
                                     agent.installed && agent.managed -> "Bot 托管"
                                     agent.installed -> "已安装"
                                     else -> "未安装"
                                 },
                                 tone = when {
                                     current -> StatusTone.Success
+                                    isDefault -> StatusTone.Neutral
                                     agent.installed -> StatusTone.Neutral
                                     else -> StatusTone.Warning
                                 },
@@ -248,6 +252,15 @@ fun AgentsScreen(vm: AppViewModel) {
                                     text = if (agent.installed) "使用" else "仍要使用",
                                     enabled = true,
                                     onClick = { vm.switchAgent(agent.id) },
+                                )
+                            }
+                            if (agent.installed) {
+                                QuietButton(
+                                    text = if (vm.defaultEngine == agent.id) "取消默认" else "设为默认",
+                                    enabled = !busy,
+                                    onClick = {
+                                        vm.setDefaultEngine(if (vm.defaultEngine == agent.id) null else agent.id)
+                                    },
                                 )
                             }
                             if (agent.installable) {

@@ -293,6 +293,23 @@ data class AccountEntry(
 )
 
 @Serializable
+data class AgentCustomModel(val value: String, val label: String = "")
+
+@Serializable
+data class AgentCustomModelList(
+    val engine: String = "",
+    val models: List<AgentCustomModel> = emptyList(),
+)
+
+@Serializable
+data class SettingsView(
+    /** What the operator picked; null means "first installed". */
+    val defaultEngine: String? = null,
+    /** The engine an unset key actually runs on. */
+    val effective: String = "",
+)
+
+@Serializable
 data class AppNotice(
     val id: String,
     /** "reminder" / "schedule" / "system"; the text already carries the icon. */

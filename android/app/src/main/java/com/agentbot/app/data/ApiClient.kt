@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -648,6 +649,52 @@ class ApiClient {
 
     suspend fun deleteAlias(connection: Connection, name: String) {
         send(connection, "DELETE", "/aliases/$name")
+    }
+
+    // ---- per-engine custom models ----
+
+    suspend fun agentCustomModels(connection: Connection, engine: String): List<AgentCustomModel> =
+        json.decodeFromJsonElement(
+            AgentCustomModelList.serializer(),
+            getBody(connection, "/models/agent?engine=$engine"),
+        ).models
+
+    suspend fun addAgentCustomModel(
+        connection: Connection,
+        engine: String,
+        value: String,
+        label: String,
+    ): List<AgentCustomModel> {
+        val body = buildJsonObject {
+            put("value", value)
+            put("label", label)
+        }
+        val res = send(connection, "POST", "/models/agent?engine=$engine", body)
+        return json.decodeFromJsonElement(AgentCustomModelList.serializer(), res).models
+    }
+
+    suspend fun removeAgentCustomModel(
+        connection: Connection,
+        engine: String,
+        value: String,
+    ): List<AgentCustomModel> {
+        val encoded = java.net.URLEncoder.encode(value, "UTF-8")
+        val res = send(connection, "DELETE", "/models/agent?engine=$engine&value=$encoded")
+        return json.decodeFromJsonElement(AgentCustomModelList.serializer(), res).models
+    }
+
+    // ---- settings ----
+
+    suspend fun settings(connection: Connection): SettingsView =
+        json.decodeFromJsonElement(SettingsView.serializer(), getBody(connection, "/settings"))
+
+    /** Passing null clears the choice so the server falls back to the first installed engine. */
+    suspend fun setDefaultEngine(connection: Connection, engine: String?): SettingsView {
+        val body = buildJsonObject {
+            if (engine == null) put("defaultEngine", JsonNull) else put("defaultEngine", engine)
+        }
+        val res = send(connection, "POST", "/settings", body)
+        return json.decodeFromJsonElement(SettingsView.serializer(), res)
     }
 
     // ---- notices ----
