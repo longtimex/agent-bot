@@ -117,8 +117,12 @@ export async function routeReminders(
   action?: string,
 ): Promise<void> {
   const chatId = requireOwnerChat(deps, "提醒")
+  // Reminders created before a chat was bound live under APP_CHAT_ID. They keep firing into
+  // the mailbox, so the list has to show both scopes or they become invisible.
+  const scopes = chatId === APP_CHAT_ID ? [chatId] : [chatId, APP_CHAT_ID]
   if (ctx.method === "GET" && !id) {
-    deps.json(ctx.res, 200, { reminders: deps.reminders.list(chatId).map((r) => publicReminder(r)) })
+    const rows = scopes.flatMap((scope) => deps.reminders.list(scope))
+    deps.json(ctx.res, 200, { reminders: rows.map((r) => publicReminder(r)) })
     return
   }
   if (ctx.method === "POST" && !id) {
@@ -136,7 +140,8 @@ export async function routeReminders(
   }
   const reminderId = Number(id)
   if (ctx.method === "DELETE" && Number.isInteger(reminderId)) {
-    const removed = deps.reminders.cancel(chatId, reminderId)
+    let removed = deps.reminders.cancel(chatId, reminderId)
+    if (!removed && chatId !== APP_CHAT_ID) removed = deps.reminders.cancel(APP_CHAT_ID, reminderId)
     if (!removed) throw new ApiError(404, "提醒不存在")
     deps.json(ctx.res, 200, { ok: true })
     return
@@ -145,13 +150,16 @@ export async function routeReminders(
   if (ctx.method === "POST" && Number.isInteger(reminderId) && action === "snooze") {
     const body = await deps.readJsonBody(ctx.req)
     const minutes = typeof body.minutes === "number" ? body.minutes : Number(body.minutes)
-    try {
-      const postponed = deps.reminders.postpone(chatId, reminderId, minutes)
-      deps.json(ctx.res, 200, { ok: true, reminder: publicReminder(postponed) })
-    } catch (err) {
-      throw new ApiError(400, err instanceof Error ? err.message : "无法延后该提醒")
+    for (const scope of scopes) {
+      try {
+        const postponed = deps.reminders.postpone(scope, reminderId, minutes)
+        deps.json(ctx.res, 200, { ok: true, reminder: publicReminder(postponed) })
+        return
+      } catch {
+        // Not in this scope; try the other one before giving up
+      }
     }
-    return
+    throw new ApiError(400, "无法延后该提醒")
   }
   throw new ApiError(404, "未知的提醒 API 路径")
 }
@@ -463,6 +471,13 @@ export async function routeAliases(deps: PersonalRouteDeps, ctx: ApiRequestConte
   throw new ApiError(404, "未知的快捷指令 API 路径")
 }
 
+function secretChannelError(): ApiError {
+  return new ApiError(
+    403,
+    "账号密码需要通过加密通道传输：请开启 API_ENCRYPTION=1 并在 App 中重新扫码配对；确实接受明文时设置 ALLOW_PLAINTEXT_SECRETS=1",
+  )
+}
+
 function accountView(entry: AccountEntry): Record<string, unknown> {
   return {
     id: entry.id,
@@ -501,14 +516,11 @@ export async function routeAccounts(
 ): Promise<void> {
   const accounts = deps.accounts
   if (!accounts) throw new ApiError(409, "当前运行环境不支持账号库")
-  // A password must not cross a plaintext hop: without message encryption the App would post
-  // it in clear text over the LAN. An operator who accepts that sets ALLOW_PLAINTEXT_SECRETS=1.
-  const carriesSecret = ctx.method === "PATCH" || (ctx.method === "POST" && (!id || action === "reveal"))
-  if (carriesSecret && !ctx.encrypted && process.env.ALLOW_PLAINTEXT_SECRETS !== "1") {
-    throw new ApiError(
-      403,
-      "账号密码需要通过加密通道传输：请开启 API_ENCRYPTION=1 并在 App 中重新扫码配对；确实接受明文时设置 ALLOW_PLAINTEXT_SECRETS=1",
-    )
+  // A password must not cross a plaintext hop. The check sits on the requests that actually
+  // carry one, so editing a note over plain HTTP still works on an unencrypted deployment.
+  const plaintext = process.env.ALLOW_PLAINTEXT_SECRETS === "1"
+  const guardSecret = (): void => {
+    if (!ctx.encrypted && !plaintext) throw secretChannelError()
   }
   if (ctx.method === "GET" && !id) {
     deps.json(ctx.res, 200, {
@@ -520,6 +532,7 @@ export async function routeAccounts(
   }
   if (ctx.method === "POST" && !id) {
     const body = await deps.readJsonBody(ctx.req)
+    if (typeof body.password === "string" && body.password) guardSecret()
     const name = typeof body.name === "string" ? body.name : ""
     if (!name.trim()) throw new ApiError(400, "缺少 name 字段，例如：{\"name\":\"GitHub\"}")
     try {
@@ -541,6 +554,7 @@ export async function routeAccounts(
   }
   if (ctx.method === "PATCH" && id) {
     const body = await deps.readJsonBody(ctx.req)
+    if (typeof body.password === "string" && body.password) guardSecret()
     const patch: AccountUpdate = {}
     if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim()
     if (typeof body.username === "string") patch.username = body.username
@@ -562,6 +576,7 @@ export async function routeAccounts(
     return
   }
   if (ctx.method === "POST" && id && action === "reveal") {
+    guardSecret()
     const revealed = accounts.reveal(id)
     if (!revealed) throw new ApiError(404, "账号不存在")
     deps.json(ctx.res, 200, { ok: true, password: revealed.password })

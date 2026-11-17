@@ -10,6 +10,8 @@ const budgets = new Map([
   ["api.ts", 1250],
   ["ops.ts", 1200],
   ["agentCli.ts", 1120],
+  // reminders + schedules + accounts + notices all delegate through this module
+  ["apiPersonal.ts", 940],
   ["ccCommands.ts", 1100],
   ["ccswitch.ts", 950],
 ])

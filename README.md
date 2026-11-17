@@ -156,8 +156,8 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 - **飞书自建应用 Bot**：通过长连接接收私聊消息，无需公网地址；命令、面板、附件、提醒、定时任务、运维与访问控制与 Telegram 端完全共用。面板按钮需要可选的公网 HTTP 卡片回调（飞书 SDK 长连接不分发卡片回调），不启用时文字命令仍可用。飞书单聊中 @ 机器人或直接发命令均可；群聊默认忽略。
 - **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/视频/文件附件、语音消息、单条消息临时换引擎、图片/视频/语音回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
 - **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 或飞书聊天里发 `/api` 查看配对信息。
-- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qoder、Antigravity、Cursor、Copilot、Aider、Goose、Kiro 等 10 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
-- **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载由 Bot 安装的版本。默认推荐使用 OpenCode。
+- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qoder、Antigravity、Cursor、Copilot、Kiro 等 8 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
+- **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载——Bot 安装的版本直接移除，其他方式安装的先展示将执行的 npm/pip 命令并要求确认。默认推荐使用 OpenCode。
 - **多模型切换**：OpenCode 的模型由你自己登记（`/cc model add` 或 `npm run models -- add` 写入 `data/models.json`），provider/model 任意组合；CLI 引擎的模型按登录账号与 CLI 自身配置动态探测，不再内置推荐列表。
 - **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
 - **magpie 集成**：`/magpie` 面板与 `/magpie <命令>` 管理 magpie 模型网关（Provider、各 Agent 的模型、路由组、配额、用量、守护进程），`/magpie run` 透传非交互命令；危险操作先确认，密钥与 Token 自动打码，并提供 `/api/v1/magpie/*` 给脚本与后续 App 面板使用。
@@ -475,7 +475,7 @@ $IBX exec ab-android-test -- bash -lc 'adb shell screencap -p /sdcard/shot.png; 
 $IBX pull ab-android-test /data/workspace/shot.png ./shots/shot.png
 ```
 
-一次完整回归至少覆盖：Linux 的 `npm run check` 与 `npm run smoke:app`；Android 的 `assembleDebug`、`adb install -r`、`firstInstallTime` 不变；从 App 发一条真实对话并看到回复；提醒/定时任务页面在无推送目标时显示 `409` 的原因而不误报为空；断网/错误地址时首屏引导设置；设置页令牌默认遮蔽；左抽屉重开回到顶部。把截图、APK 哈希和上述命令输出留存在工作区（例如 `shots/` 与 `ITERATIONS.md`），不要把 token、密钥或 `data/` 提交进仓库。
+一次完整回归至少覆盖：Linux 的 `npm run check` 与 `npm run smoke:app`；Android 的 `assembleDebug`、`adb install -r`、`firstInstallTime` 不变；从 App 发一条真实对话并看到回复；提醒与定时任务页面在只有 App 时可用（结果落进 App 信箱），在 API 也关闭时显示 `409` 原因而不是误报为空；断网/错误地址时首屏引导设置；设置页令牌默认遮蔽；左抽屉重开回到顶部。把截图、APK 哈希和上述命令输出留存在工作区（例如 `shots/` 与 `ITERATIONS.md`），不要把 token、密钥或 `data/` 提交进仓库。
 
 > 用完只删除**你自己新建且确认不再需要**的实例：`instabox rm <name>`。测试结束后若仍要保留证据，可不删除；长期测试期间不要 `stop` 别人的实例来腾资源。免费实例闲置 30 分钟会自动暂停，重新执行 `instabox resume <name>` 即可继续。
 
@@ -507,7 +507,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/agents` | 检测本机 CLI，查看可安装/可更新/可卸载项 |
 | `/agents install <id>` | 通过 npm/pip 安装内置 Agent CLI（需确认） |
 | `/agents update <id>` | 更新由 Bot 安装的 CLI（需确认） |
-| `/agents uninstall <id>` | 卸载由 Bot 安装的 CLI（需确认） |
+| `/agents uninstall <id>` | 卸载任意已安装的 CLI；非 Bot 安装的会先显示 `npm uninstall` / `pip uninstall` 命令并要求确认 |
 | `/model` | 查看或切换当前引擎的模型，支持按引擎分组的按钮；`/model default`（或面板上的「↩️ 清除模型选择」）取消本会话选择，之后由对应引擎自身的配置决定模型，并重置上下文 |
 | `/model <模型ID>` | 为当前 Agent CLI 指定模型（如 `/model sonnet`；OpenCode 仍走 `/model` 面板） |
 | `/dir` | 查看本会话 CLI 引擎的工作目录（默认是 Bot 自身所在目录），面板上有「恢复默认目录」按钮 |
@@ -575,7 +575,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 存活检查：版本、当前引擎、时区 |
-| `GET /info` | 会话与配对信息：引擎/模型、会话 ID、工作目录、当前 owner 聊天 `chatId`、用户 `userId`、API 监听地址，以及 `automation.{available,reason}` 说明提醒/定时任务是否具备聊天推送目标；令牌不会回传 |
+| `GET /info` | 会话与配对信息：引擎/模型、会话 ID、工作目录、当前 owner 聊天 `chatId`、用户 `userId`、API 监听地址，以及 `automation.{available,reason}` 说明提醒/定时任务有没有投递去处（绑定聊天，或仅 App 时回落到信箱）；令牌不会回传 |
 | `GET /help` | 与聊天端共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记）；`commands` 是全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`） |
 | `GET /session` | 当前引擎/模型/工作目录；OpenCode 额外给出 `modelRef`，CLI 只给模型名。配套 `POST /agent` 切换引擎，`POST /model` 切换模型（复位词与聊天端一致），`POST /new` 重置会话。切换或恢复模型会清空上一个模型的上下文；`POST /model`、`POST /new`、`POST /dir`、`POST /peers/follow` 在任务排队/执行时返回 409；`POST /agent` 不影响当前上下文 |
 | `GET /peers` · `POST /peers/follow {scope}` | 列出 App 与当前 owner 聊天（Telegram 或飞书）的引擎/模型/目录及用量；不返回内部会话键或聊天正文，也无法读取聊天端的队列深度。`follow` 只让 App 单向对齐该会话，不会反向修改聊天端设置 |
@@ -660,7 +660,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 
 启动日志会输出 `agent CLI detection: n/N installed (...)`（N 为当前内置档案数），并列出可在聊天内安装的 id。首次使用发送 `/start` 或 `/agents` 即可看到本机检测结果。
 
-自动安装只支持内置的 npm/pip 包，执行前会展示完整命令并要求点击确认。`/agents` 面板里的 ⬇️ 安装、🔄 更新、🗑 卸载按钮同样先弹出一次性确认（5 分钟有效、点击即失效），确认时还会复查前置条件（是否由 Bot 托管、是否为当前正在使用的引擎）。
+自动安装只支持内置的 npm/pip 包，执行前会展示完整命令并要求点击确认。`/agents` 面板里的 ⬇️ 安装、🔄 更新、🗑 卸载按钮同样先弹出一次性确认（5 分钟有效、点击即失效），确认时还会复查前置条件（当前是否正在使用该引擎；是否由 Bot 托管决定要不要额外确认）。
 
 <!-- BEGIN AGENT INSTALL TABLE: edited by `npm run docs:agents`, do not hand-edit -->
 | id | 安装命令 |
@@ -671,8 +671,8 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | `copilot` | `npm install -g @github/copilot` |
 <!-- END AGENT INSTALL TABLE -->
 
-- Qoder、Antigravity、Cursor、Goose、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。
-- 卸载只针对 `data/agent-cli-installs.json` 中记录的、由 Bot 安装的 CLI；系统预装或其他方式安装的版本不会被删除。卸载当前正在使用的引擎会被拒绝，请先 `/agent opencode`。
+- Qoder、Antigravity、Cursor、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。
+- 卸载覆盖所有已安装的 CLI：由 Bot 安装的（`data/agent-cli-installs.json` 有记录）直接执行；系统预装或手动安装的会先展示将执行的 `npm uninstall` / `pip uninstall` 命令，确认后才移除——这类版本删掉后要重装得自己动手。卸载当前正在使用的引擎会被拒绝，请先 `/agent opencode`。
 - 安装/卸载最长 10 分钟，会继承当前启用的代理；同一时间只允许一个任务。输出会自动脱敏。
 - 检测与调用不依赖登录 shell 的 `PATH`：Bot 会在 `PATH` 之后自动补上常见的用户级全局目录（`~/.npm-global/bin`、`~/.local/bin`、`~/.local/share/pnpm`、`~/.bun/bin`、`~/.deno/bin`、`~/.cargo/bin`、`~/.pyenv/shims`、`~/bin`、`/usr/local/bin`、`/snap/bin`），systemd / cron 启动时同样能找到自己装好的 CLI；系统已有同名可执行文件时仍以 `PATH` 中的为准。这些目录每次检测都会重新扫描，因此在聊天里装完 CLI 立刻就能被识别，无需重启 Bot。
 - 全局目录不可写时会自动降级重试，无需 root：npm 报 `EACCES` 时改用 `--prefix=~/.npm-global` 重装一次；pip 遇到 `externally-managed-environment`（Debian 12 / Ubuntu 24.04 常见）时改用 `--break-system-packages` 重装一次。重试成功的标记会记入 `data/agent-cli-installs.json`，`/agents update` 与 `/agents uninstall` 复用同一标记，消息里也会说明发生过降级。

@@ -827,6 +827,8 @@ class AppViewModel(
     init {
         messages = LocalStore.loadMessages(appContext)
         draft = LocalStore.loadDraft(appContext)
+        // The app opens straight on Chat, so navigate() never runs on a cold start
+        pollNotices()
         // The two stored values share one writer each and stay alive for the ViewModel: a writer
         // that ends between sends is how a queued snapshot goes missing.
         viewModelScope.launch(Dispatchers.IO) {

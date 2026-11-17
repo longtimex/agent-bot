@@ -4492,3 +4492,37 @@ test("accounts refuse to carry a password over a plaintext hop", async () => {
     }
   })
 })
+
+test("editing an account note does not need an encrypted channel, a password does", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const created = await fetch(`${h.base}/api/v1/accounts`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ name: "edit-me", username: "u" }),
+    })
+    assert.equal(created.status, 201)
+    const id = ((await created.json()) as { account: { id: string } }).account.id
+
+    const saved = process.env.ALLOW_PLAINTEXT_SECRETS
+    delete process.env.ALLOW_PLAINTEXT_SECRETS
+    try {
+      // A note carries no secret, so plain HTTP is fine
+      const note = await fetch(`${h.base}/api/v1/accounts/${id}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ notes: "只改备注" }),
+      })
+      assert.equal(note.status, 200)
+
+      // A password still needs the encrypted channel
+      const password = await fetch(`${h.base}/api/v1/accounts/${id}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ password: "n3w" }),
+      })
+      assert.equal(password.status, 403)
+    } finally {
+      if (saved !== undefined) process.env.ALLOW_PLAINTEXT_SECRETS = saved
+    }
+  })
+})
