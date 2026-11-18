@@ -706,10 +706,14 @@ class ApiClient {
         engine: String,
         value: String,
         label: String,
+        baseURL: String? = null,
+        apiKey: String? = null,
     ): List<AgentCustomModel> {
         val body = buildJsonObject {
             put("value", value)
             put("label", label)
+            baseURL?.takeIf { it.isNotBlank() }?.let { put("baseURL", it) }
+            apiKey?.takeIf { it.isNotBlank() }?.let { put("apiKey", it) }
         }
         val res = send(connection, "POST", "/models/agent?engine=$engine", body)
         return json.decodeFromJsonElement(AgentCustomModelList.serializer(), res).models

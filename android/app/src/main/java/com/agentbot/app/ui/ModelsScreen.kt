@@ -346,9 +346,7 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Only engines that read their endpoint from the environment can use a relay;
-            // showing the card elsewhere just leads to a rejected save
-            if (relaySupported) item { RelayCard(vm, label) }
+
             if (vm.agentCustomModels.isEmpty()) {
                 item {
                     AppCard {
@@ -380,27 +378,13 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
                     }
                 }
             }
+            // The per-model endpoint above wins; this is the fallback for models without one
+            if (relaySupported) item { RelayCard(vm, label) }
         }
     }
 
     if (adding) {
-        TextPromptDialog(
-            title = "添加自定义模型",
-            hint = "格式：模型 ID [显示名]。显示名可省略，省略时列表里显示 ID。",
-            confirmLabel = "添加",
-            placeholder = "claude-opus-4-6 Opus 4.6",
-            onDismiss = { adding = false },
-            onConfirm = { input ->
-                val trimmed = input.trim()
-                if (trimmed.isNotEmpty()) {
-                    val space = trimmed.indexOf(' ')
-                    val value = if (space > 0) trimmed.substring(0, space) else trimmed
-                    val name = if (space > 0) trimmed.substring(space + 1).trim() else ""
-                    vm.addAgentCustomModel(value, name)
-                    adding = false
-                }
-            },
-        )
+        CustomModelDialog(vm, engine) { adding = false }
     }
 
     pendingRemove?.let { value ->
@@ -426,7 +410,9 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
  * yet, plus a probe so a wrong baseURL fails here instead of inside a conversation.
  */
 @Composable
-private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onDismiss: () -> Unit) {
+    // OpenCode needs a provider id; a CLI engine only needs the model id and an endpoint
+    val isRegistry = engine == "opencode"
     var providerID by remember { mutableStateOf("") }
     var modelID by remember { mutableStateOf("") }
     var key by remember { mutableStateOf("") }
@@ -446,16 +432,22 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "填 Provider 与模型 ID。要新建 Provider，再填 baseURL 与 API Key（Key 会明文写入 opencode.json）。",
+                    if (isRegistry) {
+                        "填 Provider 与模型 ID。要新建 Provider，再填 baseURL 与 API Key（Key 会明文写入 opencode.json）。"
+                    } else {
+                        "填模型 ID；中转站信息填 baseURL 与 API Key，只有这个模型会走它（Key 加密保存）。"
+                    },
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                AppTextField(
-                    value = providerID,
-                    onValueChange = { providerID = it },
-                    placeholder = "Provider ID（如 openrouter）",
-                    singleLine = true,
-                )
+                if (isRegistry) {
+                    AppTextField(
+                        value = providerID,
+                        onValueChange = { providerID = it },
+                        placeholder = "Provider ID（如 openrouter）",
+                        singleLine = true,
+                    )
+                }
                 AppTextField(
                     value = modelID,
                     onValueChange = {
@@ -465,12 +457,14 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                     placeholder = "模型 ID（如 gpt-4o）",
                     singleLine = true,
                 )
-                AppTextField(
-                    value = key,
-                    onValueChange = { key = it },
-                    placeholder = "简称（默认取模型 ID 末段）",
-                    singleLine = true,
-                )
+                if (isRegistry) {
+                    AppTextField(
+                        value = key,
+                        onValueChange = { key = it },
+                        placeholder = "简称（默认取模型 ID 末段）",
+                        singleLine = true,
+                    )
+                }
                 AppTextField(
                     value = label,
                     onValueChange = { label = it },
@@ -480,7 +474,7 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 AppTextField(
                     value = baseURL,
                     onValueChange = { baseURL = it },
-                    placeholder = "baseURL（留空 = Provider 已存在）",
+                    placeholder = if (isRegistry) "baseURL（留空 = Provider 已存在）" else "baseURL（留空 = 用引擎默认）",
                     singleLine = true,
                 )
                 AppTextField(
@@ -509,8 +503,15 @@ private fun CustomModelDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                     enabled = baseURL.isNotBlank() && !testing,
                 ) { Text(if (testing) "测试中…" else "测试连通") }
                 TextButton(
-                    onClick = { vm.addCustomModelFull(key, providerID, modelID, label, baseURL, apiKey) },
-                    enabled = providerID.isNotBlank() && modelID.isNotBlank() && !testing,
+                    onClick = {
+                        if (isRegistry) {
+                            vm.addCustomModelFull(key, providerID, modelID, label, baseURL, apiKey)
+                        } else {
+                            vm.addAgentCustomModelFull(engine, modelID, label, baseURL, apiKey)
+                        }
+                    },
+                    enabled = (isRegistry && providerID.isNotBlank() || !isRegistry && modelID.isNotBlank()) &&
+                        modelID.isNotBlank() && !testing,
                 ) { Text("添加") }
             }
         },

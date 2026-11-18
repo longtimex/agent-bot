@@ -80,3 +80,21 @@ test("envFor maps each engine to the variables its CLI reads", () => {
     f.close()
   }
 })
+
+test("a model's own endpoint wins over the engine-level relay", () => {
+  const f = fixture()
+  try {
+    const providers = f.store()
+    providers.set("codex", { baseURL: "https://engine-default/v1", apiKey: "sk-engine" })
+    // Engine default applies when the model has none
+    assert.equal(providers.envFor("codex").OPENAI_BASE_URL, "https://engine-default/v1")
+    // ...but a model that names its own relay switches the spawn to it
+    const override = { baseURL: "https://model-relay/v1", apiKey: "sk-model" }
+    assert.deepEqual(providers.envFor("codex", override), {
+      OPENAI_BASE_URL: "https://model-relay/v1",
+      OPENAI_API_KEY: "sk-model",
+    })
+  } finally {
+    f.close()
+  }
+})

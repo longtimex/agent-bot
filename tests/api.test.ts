@@ -124,7 +124,7 @@ export async function withApi(
   const accounts = new AccountStore(join(dir, "accounts.json"), join(dir, "accounts.key"), log)
   const notices = new NoticeStore(join(dir, "app-notices.json"), log)
   const settings = new SettingsStore(join(dir, "settings.json"), log)
-  const customModels = new AgentCustomModelStore(join(dir, "agent-custom-models.json"), log)
+  const customModels = new AgentCustomModelStore(join(dir, "agent-custom-models.json"), join(dir, "accounts.key"), log)
   const providers = new AgentProviderStore(join(dir, "agent-providers.json"), join(dir, "accounts.key"), log)
   // One entry so the contract test can check the shape instead of an empty array
   notices.push({ kind: "system", text: "探针通知", at: 1_700_000_000_000 })

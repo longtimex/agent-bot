@@ -64,10 +64,14 @@ export class AgentProviderStore {
     )
   }
 
-  /** Variables a spawn of [engine] needs; empty when no relay is configured. */
-  envFor(engine: string): Record<string, string> {
+  /**
+   * Variables a spawn of [engine] needs. [override] is the endpoint of the model being run,
+   * which wins over the engine-level relay — that is what lets two models of one CLI talk to
+   * two different relays.
+   */
+  envFor(engine: string, override?: { baseURL: string; apiKey?: string }): Record<string, string> {
     const keys = ENV_KEYS[engine]
-    const config = this.get(engine)
+    const config = override ?? this.get(engine)
     if (!keys || !config) return {}
     const env: Record<string, string> = { [keys.baseURL]: config.baseURL }
     if (config.apiKey) env[keys.apiKey] = config.apiKey

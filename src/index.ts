@@ -135,7 +135,11 @@ async function main(): Promise<void> {
   const proxies = new ProxyService(resolve(cfg.dataDir, "proxies.json"), log)
   const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
   const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
-  const customModels = new AgentCustomModelStore(resolve(cfg.dataDir, "agent-custom-models.json"), log)
+  const customModels = new AgentCustomModelStore(
+    resolve(cfg.dataDir, "agent-custom-models.json"),
+    resolve(cfg.dataDir, "accounts.key"),
+    log,
+  )
   const agentProviders = new AgentProviderStore(
     resolve(cfg.dataDir, "agent-providers.json"),
     // Shares the account key: the relay credential is encrypted exactly like a password
@@ -156,7 +160,9 @@ async function main(): Promise<void> {
     cfg.taskMaxTimeoutMs,
     () => proxies.env(),
     agentRegistry,
-    (engine) => agentProviders.envFor(engine),
+    // A model may carry its own endpoint; otherwise the engine-level relay applies
+    (engine, model) =>
+      agentProviders.envFor(engine, model ? customModels.endpointFor(engine, model) : undefined),
   )
   const allProfiles = agentRegistry.list()
   const detectedAgents = allProfiles.filter((profile) => agentRegistry.binPath(profile))

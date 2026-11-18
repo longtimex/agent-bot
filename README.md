@@ -629,7 +629,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET/POST /settings` | 新会话的默认引擎：`{defaultEngine}`（`null` 表示恢复「第一个已安装」）；响应带 `effective`，即未指定时会真正使用的引擎 |
 | `GET/POST/DELETE /models/provider?engine=` | CLI 引擎的第三方中转站：`{baseURL,apiKey?}` 存进 `data/agent-providers.json`，Bot 启动该引擎时按引擎注入环境变量（codex/qoder → `OPENAI_BASE_URL`/`OPENAI_API_KEY`，claude → `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`，gemini → `GOOGLE_GEMINI_BASE_URL`/`GEMINI_API_KEY`）；`DELETE` 恢复官方端点；apiKey 用 `data/accounts.key` 加密后存 `secret` 字段，备份里没有明文密钥 |
 | `POST /models/test` | 探测 `{baseURL}/models`：`{baseURL,apiKey?,model?}` → `{ok,message,models[]}`；服务只有 chat/completions 时报告「可访问但无法列模型」 |
-| `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label}`；CLI 自己发现的同名模型优先 |
+| `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label,baseURL?,apiKey?}`；带 baseURL 的模型在运行时用它自己的中转站（apiKey 加密存 `secret`），没带的回落到引擎级配置 |
 | `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果与用量报告（`kind` 分别为 `reminder`/`schedule`/`report`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |
 | `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
 | `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |

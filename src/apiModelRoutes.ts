@@ -152,6 +152,8 @@ export async function routeAgentModels(deps: ModelRouteDeps, ctx: ApiRequestCont
       const models = deps.customModels.add(engine, {
         value: typeof body.value === "string" ? body.value : "",
         label: typeof body.label === "string" ? body.label : "",
+        baseURL: typeof body.baseURL === "string" && body.baseURL ? body.baseURL : undefined,
+        apiKey: typeof body.apiKey === "string" && body.apiKey ? body.apiKey : undefined,
       })
       deps.json(ctx.res, 201, { ok: true, engine, models })
     } catch (err) {

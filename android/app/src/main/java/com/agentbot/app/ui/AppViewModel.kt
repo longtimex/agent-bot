@@ -1321,6 +1321,36 @@ class AppViewModel(
         }
     }
 
+    /** CLI engines get the same form as OpenCode: id, display name and an optional endpoint. */
+    fun addAgentCustomModelFull(
+        engine: String,
+        value: String,
+        label: String,
+        baseURL: String,
+        apiKey: String,
+    ) {
+        if (engine == "opencode") return
+        guarded(
+            "添加模型",
+            onError = {
+                agentModelError = "添加失败：${it.message}"
+                modelDraftRejected = true
+            },
+        ) {
+            agentCustomModels = api.addAgentCustomModel(
+                conn(),
+                engine,
+                value.trim(),
+                label.trim(),
+                baseURL.trim().ifBlank { null },
+                apiKey.trim().ifBlank { null },
+            )
+            agentModelError = null
+            toast = "已添加 $value"
+            refreshModels()
+        }
+    }
+
     fun addAgentCustomModel(value: String, label: String) {
         val engine = agentModelEngine
         if (engine == "opencode") return
