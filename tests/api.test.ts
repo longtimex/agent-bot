@@ -4697,3 +4697,35 @@ test("api refuses to probe a cloud metadata address", async () => {
     assert.match(((await res.json()) as { error: string }).error, /元数据端点/)
   })
 })
+
+test("api can switch to a hand-added model that discovery does not know", async () => {
+  await withApi(async () => "ok", async (h) => {
+    // The App adds the model and then picks it from the switcher; both must agree
+    const added = await fetch(`${h.base}/api/v1/models/agent?engine=codex`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        value: "relay-model",
+        label: "Relay Model",
+        baseURL: "https://relay.example.com/v1",
+        apiKey: "sk-relay",
+      }),
+    })
+    assert.equal(added.status, 201)
+
+    const engine = await fetch(`${h.base}/api/v1/agent`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ engine: "codex" }),
+    })
+    assert.equal(engine.status, 200)
+
+    const switched = await fetch(`${h.base}/api/v1/model`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ model: "relay-model" }),
+    })
+    assert.equal(switched.status, 200, "a listed model must also be switchable")
+    assert.match(((await switched.json()) as { message: string }).message, /Relay Model/)
+  })
+})

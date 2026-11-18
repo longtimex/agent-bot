@@ -766,6 +766,21 @@ export function agentsView(deps: PersonalRouteDeps): Array<Record<string, unknow
   return entries.sort((a, b) => Number(b.installed) - Number(a.installed))
 }
 
+/**
+ * Discovery stays authoritative for names it already knows; hand-added ids widen the list.
+ * `/model <id>` resolves against this too, otherwise a model could be listed but not picked.
+ */
+export function mergeCustomModels(
+  discovered: Array<{ id: string; label: string; desc?: string }>,
+  custom: Array<{ value: string; label: string }>,
+): Array<{ id: string; label: string; desc?: string }> {
+  const known = new Set(discovered.map((model) => model.id))
+  const extra = custom
+    .filter((model) => !known.has(model.value))
+    .map((model) => ({ id: model.value, label: model.label, desc: "自定义模型" }))
+  return [...discovered, ...extra]
+}
+
 export async function modelsView(
   deps: PersonalRouteDeps,
   requestedEngine?: string,
@@ -793,15 +808,9 @@ export async function modelsView(
     }
   }
   const discovered = await deps.agentModels.list(engine, refresh)
-  // Hand-added ids widen the list; discovery stays authoritative for names it already knows
-  const custom = deps.customModels?.list(engine) ?? []
-  const known = new Set(discovered.models.map((model) => model.id))
-  const extra = custom
-    .filter((model) => !known.has(model.value))
-    .map((model) => ({ id: model.value, label: model.label, desc: "自定义模型" }))
   return {
     engine,
-    models: [...discovered.models, ...extra],
+    models: mergeCustomModels(discovered.models, deps.customModels?.list(engine) ?? []),
     modelHint: discovered.hint,
     source: discovered.source,
     checkedAt: discovered.checkedAt,

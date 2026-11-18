@@ -36,6 +36,7 @@ import {
   type PersonalRouteDeps,
 } from "./apiPersonal.js"
 import { routeAccounts as routeAccountsApi, routeNotices as routeNoticesApi, routeSettings as routeSettingsApi } from "./apiAccounts.js"
+import { mergeCustomModels } from "./apiPersonal.js"
 import type { SessionStore } from "./store.js"
 import type { UsageStore } from "./usage.js"
 import type { TaskHistoryStore } from "./history.js"
@@ -1003,7 +1004,11 @@ export class ApiServer {
     const engine = this.#opts.store.getEngine(this.appKey)
     const word = raw.trim().toLowerCase()
     let catalog: Awaited<ReturnType<AgentModelCatalog["list"]>> | undefined
-    if (engine !== "opencode") catalog = await this.#agentModels.list(engine)
+    if (engine !== "opencode") {
+      const live = await this.#agentModels.list(engine)
+      // A hand-added model must be selectable here too, not only visible in the panel
+      catalog = { ...live, models: mergeCustomModels(live.models, this.#opts.customModels.list(engine)) }
+    }
     // Non-strict CLI profiles take any string as a model id, so only a model the engine
     // really declares (live or explicitly configured) may shadow the reset keyword.
     const declared =
