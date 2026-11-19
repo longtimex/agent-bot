@@ -237,15 +237,20 @@ export async function routeCustomModels(deps: ModelRouteDeps,
         input.contextWindow ? `上下文 ${input.contextWindow}` : "",
         input.outputLimit ? `输出上限 ${input.outputLimit}` : "",
       ].filter(Boolean)
-      const capabilityNote =
-        capabilities.length === 0
-          ? ""
-          : added.providerUpdated
-            ? `已写入模型能力：${capabilities.join("、")}。`
-            : `⚠️ 模型能力参数（${capabilities.join("、")}）未写入：Provider 不在项目 opencode.json 中。`
+      // Telegram and `npm run models` already say when nothing was written; the App used to
+      // report a bare success, so a model OpenCode can never resolve looked usable. Say it
+      // whenever the project config did not take the entry, capability flags or not.
+      const providerNote = added.providerUpdated
+        ? capabilities.length > 0
+          ? `已写入模型能力：${capabilities.join("、")}。`
+          : ""
+        : `⚠️ 未写入 opencode.json：Provider ${input.providerID} 不存在，且没有提供 baseURL。` +
+          (capabilities.length > 0 ? `模型能力（${capabilities.join("、")}）也未写入。` : "") +
+          "OpenCode 只会认识它自带的 Provider（如 anthropic、openai）；自建中转站请填写 baseURL 后重新添加。"
       deps.json(ctx.res, 200, {
         ok: true,
-        message: `已添加自定义模型 ${added.key}（${input.providerID}/${input.modelID}）。${capabilityNote}`,
+        providerUpdated: added.providerUpdated,
+        message: `已添加自定义模型 ${added.key}（${input.providerID}/${input.modelID}）。${providerNote}`,
         model: customModelView(added.key, added.entry),
       })
       return

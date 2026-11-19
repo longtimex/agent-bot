@@ -17,7 +17,9 @@ import { createInterface } from "node:readline/promises"
 import { pathToFileURL } from "node:url"
 import { whichSync } from "./agentCli.js"
 import { isSafeDataRoot, removeManaged, removeUnit, writeManagedFile } from "./lifecycle-files.js"
+import { opencodeOnDemand } from "./config.js"
 import { parseLifecycleOptions, type LifecycleOptions } from "./lifecycle-options.js"
+import { ensureOpencode, resolveManageOpencode } from "./opencodeCli.js"
 import { createLogger } from "./logger.js"
 import { OpsService } from "./ops.js"
 import { parseSetupToolMode, setupFromCli } from "./setup.js"
@@ -68,7 +70,8 @@ Options:
   --systemd          install/use system units (requires sudo)
   --user-systemd     install/use a systemd --user unit
   --docker           select the Docker supervisor
-  --no-opencode      do not start a Bot-managed OpenCode
+  --opencode         install/start a Bot-managed OpenCode without asking
+  --no-opencode      do not install or start a Bot-managed OpenCode
   --skip-deps        install: reuse existing node_modules
   --skip-build       install: reuse an existing dist/ build
   --keep-data        uninstall: keep data/ and .env (default)
@@ -184,23 +187,6 @@ function shellQuote(value: string): string {
 function runNpm(projectDir: string, args: string[]): boolean {
   const npm = whichSync("npm") ?? "npm"
   return spawnSync(npm, args, { cwd: projectDir, env: projectEnv(projectDir), stdio: "inherit" }).status === 0
-}
-
-function ensureOpencode(projectDir: string): void {
-  if (whichSync("opencode")) {
-    console.log(`opencode CLI: ${whichSync("opencode")}`)
-    return
-  }
-  console.log("Installing the opencode CLI…")
-  const npm = whichSync("npm") ?? "npm"
-  const result = spawnSync(npm, ["install", "-g", "opencode-ai", "--no-audit", "--no-fund"], {
-    cwd: projectDir,
-    env: projectEnv(projectDir),
-    stdio: "inherit",
-  })
-  if (result.status !== 0) {
-    console.error("Could not install opencode-ai globally; run: sudo npm install -g opencode-ai")
-  }
 }
 
 function renderBotUnit(projectDir: string, user: string | undefined, userScope: boolean): string {
@@ -336,12 +322,21 @@ async function install(options: Options, args: string[], projectDir = process.cw
   if (options.dryRun) {
     console.log(`would install dependencies${options.skipDeps ? " (skipped)" : ""} and build${options.skipBuild ? " (skipped)" : ""} in ${projectDir}`)
     if (options.systemd || options.userSystemd) console.log("would generate and install systemd units")
+    console.log(
+      options.opencode === undefined
+        ? "would ask whether to install and manage the opencode CLI"
+        : options.opencode
+          ? "would install and manage the opencode CLI"
+          : "would leave the opencode CLI alone",
+    )
     if (options.skipBuild && !existsSync(join(projectDir, "dist", "bot-cli.js"))) {
       console.error("--skip-build requires an existing dist/bot-cli.js")
       return 1
     }
     return 0
   }
+  // Asked before the build so the answer is not buried under npm output.
+  const manageOpencode = await resolveManageOpencode(options.opencode)
   if (!options.skipDeps) {
     console.log("Installing dependencies…")
     if (!runNpm(projectDir, ["ci", "--no-audit", "--no-fund"])) {
@@ -360,7 +355,7 @@ async function install(options: Options, args: string[], projectDir = process.cw
     console.error("the build did not produce dist/bot-cli.js; run npm run build")
     return 1
   }
-  if (options.opencode) ensureOpencode(projectDir)
+  if (manageOpencode) ensureOpencode(projectDir)
   if (!existsSync(join(projectDir, ".env"))) {
     const example = join(projectDir, ".env.example")
     if (existsSync(example)) {
@@ -371,9 +366,16 @@ async function install(options: Options, args: string[], projectDir = process.cw
   }
   const launcher = installLauncher(projectDir)
   const previous = readInstallManifest(projectDir)
+  // On-demand mode owns the server from the bot process, so a systemd unit would fight it:
+  // the supervisor refuses to spawn when a unit exists, and a stopped unit would then leave
+  // every OpenCode task failing. The bot unit alone is enough.
+  const systemdOpencode = manageOpencode && !opencodeOnDemand(projectEnv(projectDir))
+  if (manageOpencode && !systemdOpencode && (options.systemd || options.userSystemd)) {
+    console.log("OpenCode 按需模式：不生成 opencode unit，由 Bot 在需要时启动（OPENCODE_ON_DEMAND=0 可改回常驻）")
+  }
   const unitInfo =
     options.systemd || options.userSystemd
-      ? installSystemd(projectDir, options.userSystemd, options.opencode)
+      ? installSystemd(projectDir, options.userSystemd, systemdOpencode)
       : undefined
   if ((options.systemd || options.userSystemd) && !unitInfo) return 1
   const supervisor: Supervisor = options.docker ? "docker" : unitInfo ? "systemd" : "script"
@@ -390,10 +392,10 @@ async function install(options: Options, args: string[], projectDir = process.cw
   console.log(`manifest: ${manifestPath}`)
   if (launcher) console.log(`launcher: ${launcher}`)
   if (unitInfo?.unitPath) console.log(`unit: ${unitInfo.unitPath}`)
-  if (previous?.supervisor === "systemd" && (!unitInfo || !options.opencode)) {
+  if (previous?.supervisor === "systemd" && (!unitInfo || !systemdOpencode)) {
     const previousUserScope = previous.systemdScope === "user"
     const staleBotUnit = !unitInfo || previous.unitPath !== unitInfo.unitPath ? previous.unitPath : undefined
-    const staleOpencodeUnit = !unitInfo || !options.opencode ? previous.opencodeUnitPath : undefined
+    const staleOpencodeUnit = !unitInfo || !systemdOpencode ? previous.opencodeUnitPath : undefined
     if (staleOpencodeUnit && previous.opencodeUnitName) {
       systemctl(["disable", "--now", previous.opencodeUnitName], previousUserScope)
     }
@@ -784,7 +786,15 @@ async function waitForHealth(state: RuntimeState, pid: number, startedAt: string
 
 async function startManagedOpencode(state: RuntimeState, options: Options): Promise<boolean> {
   const env = projectEnv(state.paths.projectDir)
-  if (!options.opencode || !localOpencodeTarget(env)) return true
+  if (options.opencode === false || !localOpencodeTarget(env)) return true
+  // On-demand mode: the bot starts the server itself when a task needs it, so pre-starting
+  // here would defeat the point and leave it running after boot.
+  if (!options.requireOpencode && opencodeOnDemand(env)) {
+    console.log(
+      "OpenCode 将按需启动（首个使用 OpenCode 的任务）；要常驻请设置 OPENCODE_ON_DEMAND=0 或加 --require-opencode。",
+    )
+    return true
+  }
   const result = await startOpencode(state.paths, env)
   if (result.ok) {
     console.log(result.message)

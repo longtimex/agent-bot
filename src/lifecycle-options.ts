@@ -5,7 +5,12 @@ export interface LifecycleOptions {
   setup: boolean
   skipDeps: boolean
   skipBuild: boolean
-  opencode: boolean
+  /**
+   * Tri-state on purpose: `true`/`false` come from `--opencode`/`--no-opencode`, and
+   * `undefined` means nobody answered yet. `install` then asks on a terminal and skips
+   * the global npm install everywhere else, instead of installing unattended.
+   */
+  opencode?: boolean
   requireOpencode: boolean
   keepData: boolean
   purgeData: boolean
@@ -27,7 +32,6 @@ export function parseLifecycleOptions(argv: string[]): {
     setup: false,
     skipDeps: false,
     skipBuild: false,
-    opencode: true,
     requireOpencode: false,
     keepData: true,
     purgeData: false,
@@ -42,6 +46,7 @@ export function parseLifecycleOptions(argv: string[]): {
     else if (arg === "--setup") options.setup = true
     else if (arg === "--skip-deps") options.skipDeps = true
     else if (arg === "--skip-build") options.skipBuild = true
+    else if (arg === "--opencode") options.opencode = true
     else if (arg === "--no-opencode") options.opencode = false
     else if (arg === "--require-opencode") options.requireOpencode = true
     else if (arg === "--keep-data") {

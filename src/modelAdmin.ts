@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { dirname, resolve } from "node:path"
+import { parseJsoncObject, removeJsonPath, setJsonPath, writeFileAtomic, type JsonPath } from "./jsoncEdit.js"
 import { withFileLock } from "./fileLock.js"
 import { clip } from "./messages.js"
 import {
@@ -247,13 +248,30 @@ export class ModelAdmin {
     return resolve(this.#projectDir, "opencode.json")
   }
 
-  #readProjectConfig(): Record<string, unknown> | undefined {
-    const parsed = readJson(this.#projectConfigPath())
-    return isRecord(parsed) ? parsed : undefined
+  #readProjectConfigText(): string | undefined {
+    try {
+      return readFileSync(this.#projectConfigPath(), "utf8")
+    } catch {
+      return undefined
+    }
   }
 
-  #writeProjectConfig(config: Record<string, unknown>): void {
-    writeJson(this.#projectConfigPath(), config)
+  #readProjectConfig(): Record<string, unknown> | undefined {
+    const text = this.#readProjectConfigText()
+    return text === undefined ? undefined : parseJsoncObject(text)
+  }
+
+  /**
+   * Changes one path and nothing else. The project file is hand-edited and may carry
+   * comments, its own indentation and key order, so re-serialising the whole document
+   * would rewrite content the operator put there.
+   */
+  #editProjectConfig(text: string, path: JsonPath, value: unknown): void {
+    writeFileAtomic(this.#projectConfigPath(), setJsonPath(text, path, value))
+  }
+
+  #dropProjectConfig(text: string, path: JsonPath): void {
+    writeFileAtomic(this.#projectConfigPath(), removeJsonPath(text, path))
   }
 
   listCustomModels(): Record<string, ModelInfo> {
@@ -375,24 +393,12 @@ export class ModelAdmin {
   }
 
   #upsertProviderModel(entry: ModelInfo, input: AddModelInput): boolean {
-    const config = this.#readProjectConfig()
+    const text = this.#readProjectConfigText()
+    if (text === undefined) return false
+    const config = parseJsoncObject(text)
     if (!config) return false
-    if (!isRecord(config.provider)) config.provider = {}
-    const providers = config.provider as Record<string, unknown>
-    if (!isRecord(providers[entry.providerID])) {
-      // Without baseURL there is nothing to point at, so leave the project file alone
-      const spec = input.provider
-      if (!spec?.baseURL) return false
-      providers[entry.providerID] = {
-        npm: spec.npm?.trim() || "@ai-sdk/openai-compatible",
-        name: spec.name?.trim() || entry.providerID,
-        options: { baseURL: spec.baseURL.trim(), ...(spec.apiKey ? { apiKey: spec.apiKey } : {}) },
-      }
-    }
+    const providers = isRecord(config.provider) ? (config.provider as Record<string, unknown>) : {}
     const provider = providers[entry.providerID]
-    if (!isRecord(provider)) return false
-    if (!isRecord(provider.models)) provider.models = {}
-    const models = provider.models as Record<string, unknown>
 
     const spec: Record<string, unknown> = { name: cleanText(input.label, 60) ?? entry.modelID }
     if (input.attachment) spec.attachment = true
@@ -401,20 +407,45 @@ export class ModelAdmin {
     if (input.outputLimit && input.outputLimit > 0) limit.output = Math.floor(input.outputLimit)
     if (Object.keys(limit).length > 0) spec.limit = limit
 
-    models[entry.modelID] = spec
-    this.#writeProjectConfig(config)
+    // `null` is treated as missing: a hand-edited file that left one behind is repaired
+    if (provider !== undefined && provider !== null && !isRecord(provider)) return false
+    if (!isRecord(provider)) {
+      // Without baseURL there is nothing to point at, so leave the project file alone
+      const providerSpec = input.provider
+      if (!providerSpec?.baseURL) return false
+      // One edit creates the provider and its first model together, so a failure cannot
+      // leave a provider block with an empty `models`
+      this.#editProjectConfig(text, ["provider", entry.providerID], {
+        npm: providerSpec.npm?.trim() || "@ai-sdk/openai-compatible",
+        name: providerSpec.name?.trim() || entry.providerID,
+        options: {
+          baseURL: providerSpec.baseURL.trim(),
+          ...(providerSpec.apiKey ? { apiKey: providerSpec.apiKey } : {}),
+        },
+        models: { [entry.modelID]: spec },
+      })
+      return true
+    }
+
+    // A hand-edited file can leave `models` as an array or a string. Replace the whole
+    // table then, or that one bad entry would block every later add for this provider.
+    if (provider.models !== undefined && !isRecord(provider.models)) {
+      this.#editProjectConfig(text, ["provider", entry.providerID, "models"], { [entry.modelID]: spec })
+      return true
+    }
+    this.#editProjectConfig(text, ["provider", entry.providerID, "models", entry.modelID], spec)
     return true
   }
 
   #removeProviderModel(entry: ModelInfo): boolean {
-    const config = this.#readProjectConfig()
+    const text = this.#readProjectConfigText()
+    if (text === undefined) return false
+    const config = parseJsoncObject(text)
     if (!config || !isRecord(config.provider)) return false
     const provider = config.provider[entry.providerID]
     if (!isRecord(provider) || !isRecord(provider.models)) return false
-    const models = provider.models as Record<string, unknown>
-    if (!Object.hasOwn(models, entry.modelID)) return false
-    delete models[entry.modelID]
-    this.#writeProjectConfig(config)
+    if (!Object.hasOwn(provider.models, entry.modelID)) return false
+    this.#dropProjectConfig(text, ["provider", entry.providerID, "models", entry.modelID])
     return true
   }
 

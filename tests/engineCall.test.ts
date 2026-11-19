@@ -6,6 +6,7 @@ import test from "node:test"
 import { callEngine, cliAttachmentNotice, resolveOpencodeModel } from "../src/engineCall.js"
 import type { EngineCallDeps } from "../src/engineCall.js"
 import { OpencodeError } from "../src/opencode.js"
+import { OpencodeSupervisor, configureOpencodeSupervisor } from "../src/opencodeSupervisor.js"
 import { SessionStore } from "../src/store.js"
 
 const log = { debug() {}, info() {}, warn() {}, error() {} }
@@ -171,4 +172,89 @@ test("the CLI notice is only added when a binary part was actually built", async
   assert.equal(plain, "CLI:无附件")
   assert.equal(cliAttachmentNotice([]), undefined)
   assert.equal(cliAttachmentNotice(undefined), undefined)
+})
+
+test("callEngine starts an on-demand OpenCode server before the first prompt", async () => {
+  const { deps, fake } = makeDeps()
+  const dir = mkdtempSync(join(tmpdir(), "bot-engine-call-sup-"))
+  let healthy = false
+  let starts = 0
+  const supervisor = new OpencodeSupervisor({
+    paths: {
+      projectDir: dir,
+      dataDir: dir,
+      envPath: join(dir, ".env"),
+      logPath: join(dir, "bot.log"),
+      opencodeLogPath: join(dir, "opencode.log"),
+      pidPath: join(dir, "bot.pid"),
+      lockPath: join(dir, "bot.lock"),
+      opencodePidPath: join(dir, "opencode.pid"),
+      startupPath: join(dir, "startup.json"),
+    },
+    env: {},
+    log: log as never,
+    onDemand: true,
+    idleStopMs: 60_000,
+    tickMs: 3_600_000,
+    healthy: async () => healthy,
+    start: async () => {
+      starts += 1
+      healthy = true
+      return { ok: true, message: "started" }
+    },
+    stop: async () => "stopped",
+    localTarget: () => ({ host: "127.0.0.1", port: 4096 }),
+    unitManaged: () => false,
+  })
+  configureOpencodeSupervisor(supervisor)
+  try {
+    const reply = await callEngine(deps, { key: "tg:1", engine: "opencode", text: "你好" })
+    assert.equal(reply, "回复:你好")
+    assert.equal(starts, 1, "the server must be started before the prompt")
+    assert.equal(fake.prompts.length, 1)
+  } finally {
+    configureOpencodeSupervisor(undefined)
+    supervisor.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("callEngine fails without calling the model when the server cannot be started", async () => {
+  const { deps, fake } = makeDeps()
+  const dir = mkdtempSync(join(tmpdir(), "bot-engine-call-down-"))
+  const supervisor = new OpencodeSupervisor({
+    paths: {
+      projectDir: dir,
+      dataDir: dir,
+      envPath: join(dir, ".env"),
+      logPath: join(dir, "bot.log"),
+      opencodeLogPath: join(dir, "opencode.log"),
+      pidPath: join(dir, "bot.pid"),
+      lockPath: join(dir, "bot.lock"),
+      opencodePidPath: join(dir, "opencode.pid"),
+      startupPath: join(dir, "startup.json"),
+    },
+    env: {},
+    log: log as never,
+    onDemand: true,
+    idleStopMs: 60_000,
+    tickMs: 3_600_000,
+    healthy: async () => false,
+    start: async () => ({ ok: false, message: "no binary" }),
+    stop: async () => "stopped",
+    localTarget: () => ({ host: "127.0.0.1", port: 4096 }),
+    unitManaged: () => false,
+  })
+  configureOpencodeSupervisor(supervisor)
+  try {
+    await assert.rejects(
+      () => callEngine(deps, { key: "tg:1", engine: "opencode", text: "你好" }),
+      /OpenCode 未运行，且无法自动启动/,
+    )
+    assert.equal(fake.prompts.length, 0, "a dead engine must not receive the prompt")
+  } finally {
+    configureOpencodeSupervisor(undefined)
+    supervisor.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -397,3 +397,89 @@ test("ModelAdmin.add repairs a provider whose models entry is not an object", ()
     rmSync(fx.dir, { recursive: true, force: true })
   }
 })
+
+test("ModelAdmin.add edits opencode.json in place and remove restores it byte for byte", () => {
+  const fx = createFixture()
+  try {
+    const configPath = join(fx.project, "opencode.json")
+    // A hand-maintained file: a comment, 4-space indent, an inline object and unrelated keys
+    const original = `{
+    // 手写注释：不要动我
+    "$schema": "https://opencode.ai/config.json",
+    "model": "custom/base",
+    "provider": {
+        "custom": {
+            "name": "Custom",
+            "models": {
+                "base": { "name": "Base" }
+            }
+        }
+    },
+    "tools": { "qoder": true }
+}
+`
+    writeFileSync(configPath, original)
+    const result = fx.admin.add({ key: "opus", providerID: "custom", modelID: "opus-1", label: "Opus" })
+    assert.equal(result.providerUpdated, true)
+
+    const added = readFileSync(configPath, "utf8")
+    // Everything the operator wrote is still there, unchanged
+    assert.match(added, /\/\/ 手写注释：不要动我/)
+    assert.match(added, /"tools": \{ "qoder": true \}/)
+    assert.match(added, /"base": \{ "name": "Base" \}/, "an inline object next to the insertion stays inline")
+    assert.match(added, /"model": "custom\/base"/)
+    // The new entry follows the file's own indentation, not JSON.stringify's default
+    assert.match(added, /\n {16}"opus-1": \{\n {20}"name": "Opus"\n {16}\}/)
+
+    fx.admin.remove("opus")
+    assert.equal(readFileSync(configPath, "utf8"), original, "removing the model leaves the file as it was")
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test("ModelAdmin.add keeps a 2-space opencode.json at 2 spaces", () => {
+  const fx = createFixture()
+  try {
+    const configPath = join(fx.project, "opencode.json")
+    const original = `{
+  "provider": {
+    "custom": {
+      "models": {
+        "base": { "name": "Base" }
+      }
+    }
+  }
+}
+`
+    writeFileSync(configPath, original)
+    fx.admin.add({ key: "two", providerID: "custom", modelID: "two-1", label: "Two" })
+    const added = readFileSync(configPath, "utf8")
+    assert.match(added, /\n {8}"two-1": \{\n {10}"name": "Two"\n {8}\}/)
+    assert.ok(added.startsWith('{\n  "provider": {\n    "custom": {\n      "models": {\n        "base": { "name": "Base" },'))
+
+    fx.admin.remove("two")
+    assert.equal(readFileSync(configPath, "utf8"), original)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test("ModelAdmin.add keeps a CRLF opencode.json on CRLF", () => {
+  const fx = createFixture()
+  try {
+    const configPath = join(fx.project, "opencode.json")
+    const original =
+      '{\r\n  "provider": {\r\n    "custom": {\r\n      "models": {\r\n        "base": { "name": "Base" }\r\n      }\r\n    }\r\n  }\r\n}\r\n'
+    writeFileSync(configPath, original)
+    fx.admin.add({ key: "crlf", providerID: "custom", modelID: "crlf-1", label: "CRLF" })
+    const added = readFileSync(configPath, "utf8")
+    assert.ok(!/(?<!\r)\n/.test(added), "an inserted block must not introduce a lone LF")
+    assert.match(added, /\r\n {8}"crlf-1": \{\r\n {10}"name": "CRLF"\r\n {8}\}/)
+
+    fx.admin.remove("crlf")
+    assert.equal(readFileSync(configPath, "utf8"), original)
+  } finally {
+    fx.cleanup()
+  }
+})

@@ -465,6 +465,9 @@ test("telegram /retry replays the last user prompt but never a scheduled one", a
     async createSession(): Promise<string> {
       return "ses_test"
     },
+    async health(): Promise<boolean> {
+      return true
+    },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},
     async inputCapabilities(): Promise<undefined> {
@@ -516,6 +519,9 @@ test("telegram a queued /retry is discarded by /stop instead of replaying it", a
     async createSession(): Promise<string> {
       return "ses_test"
     },
+    async health(): Promise<boolean> {
+      return true
+    },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},
     async inputCapabilities(): Promise<undefined> {
@@ -556,6 +562,9 @@ test("telegram failure cards retry their own prompt, not the newest one", async 
   const fake = {
     async createSession(): Promise<string> {
       return "ses_test"
+    },
+    async health(): Promise<boolean> {
+      return true
     },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},
@@ -617,7 +626,28 @@ test("telegram bridge records and shows usage stats", async () => {
 })
 
 test("telegram bridge records task history and clears it", async () => {
-  const h = await createHarness()
+  // A healthy client whose prompt fails the way a dead server does: an unhealthy one would
+  // now be replaced by an installed CLI engine, and the machine's PATH must not decide this
+  const unreachable = {
+    async health(): Promise<boolean> {
+      return true
+    },
+    async createSession(): Promise<string> {
+      return "ses_test"
+    },
+    async deleteSession(): Promise<void> {},
+    async abortSession(): Promise<void> {},
+    async inputCapabilities(): Promise<undefined> {
+      return undefined
+    },
+    subscribeSession(): () => void {
+      return () => {}
+    },
+    async prompt(): Promise<string> {
+      throw new Error("fetch failed")
+    },
+  } as unknown as Opencode
+  const h = await createHarness(["7"], { oc: unreachable })
   try {
     await h.send("/history")
     assert.match(h.lastText(), /任务历史/)
@@ -655,6 +685,9 @@ test("telegram masks the bot token when a task fails", async () => {
     async createSession(): Promise<string> {
       return "ses_test"
     },
+    async health(): Promise<boolean> {
+      return true
+    },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},
     async inputCapabilities(): Promise<undefined> {
@@ -689,6 +722,9 @@ test("running tasks do not block /status, /queue or /stop", async () => {
   const fake = {
     async createSession(): Promise<string> {
       return "ses_test"
+    },
+    async health(): Promise<boolean> {
+      return true
     },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},
@@ -745,6 +781,9 @@ test("queue panel cancels one queued message and leaves the rest of the queue in
   const fake = {
     async createSession(): Promise<string> {
       return "ses_test"
+    },
+    async health(): Promise<boolean> {
+      return true
     },
     async deleteSession(): Promise<void> {},
     async abortSession(): Promise<void> {},

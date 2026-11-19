@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
 import process from "node:process"
 
 export const MANAGED_MARKER = "managed by agent-bot"
@@ -81,7 +81,11 @@ export function removeUnit(path: string, userScope: boolean, dryRun: boolean): b
 export function isSafeDataRoot(dataDir: string, projectDir: string): boolean {
   const data = resolve(dataDir)
   const project = resolve(projectDir)
-  if (data === "/" || project === data) return false
-  return !project.startsWith(`${data}/`)
+  // Purging is only safe when the project sits outside the data directory. `relative`
+  // answers that for a nested path, the same path and a filesystem root ("/" or "C:\\")
+  // in one comparison, and it matches case-insensitively on Windows — a hand-built
+  // `${data}/` prefix silently accepted `C:\data` as a parent of `C:\data\project`.
+  const rel = relative(data, project)
+  return rel !== "" && (rel.startsWith("..") || isAbsolute(rel))
 }
 

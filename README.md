@@ -80,7 +80,8 @@ cd agent-bot
 --repo URL         git 仓库地址（默认：https://github.com/longtimex/agent-bot.git）
 --branch NAME      安装分支（默认：main）
 --local            强制使用当前 checkout
---no-opencode      不安装 opencode CLI
+--opencode         直接安装并交给 Bot 管理 opencode CLI（不再询问）
+--no-opencode      不安装、也不交给 Bot 管理 opencode CLI
 --setup            即使已有控制端，也打开配置向导（增补/修改）
 --no-setup         不运行控制端配置向导
 --tools            检测并询问安装 Agent CLI / magpie / cc-switch
@@ -104,7 +105,7 @@ cd agent-bot
 AGENT_BOT_DIR
 AGENT_BOT_REPO
 AGENT_BOT_BRANCH
-AGENT_BOT_OPENCODE=0
+AGENT_BOT_OPENCODE=auto # auto / 1 / 0；auto 在交互终端里询问，非交互环境不安装
 AGENT_BOT_SETUP=0     # 跳过控制端向导；设为 1 可强制打开
 AGENT_BOT_TOOLS=auto  # auto / check / 1 / 0；非交互环境默认 check
 AGENT_BOT_SYSTEMD=0    # 0 / 1 / user；等价于 --systemd 或 --user-systemd
@@ -133,7 +134,7 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 4. 执行 `npm run build`
 5. 创建 `data/`、`data/inbox/`、`data/outbox/`
 6. 缺少 `.env` 时从 `.env.example` 生成，并设置为 `600` 权限
-7. 可选安装 `opencode-ai`
+7. 询问是否安装 `opencode-ai`（交互终端给出 1/2 菜单，非交互环境跳过并提示安装命令）
 8. 使用 `--systemd` / `--user-systemd` 时生成并启用 Bot 与 OpenCode unit
 9. 使用 `--uninstall` 时进入安全卸载流程
 10. 自动检测 Agent CLI、magpie、cc-switch；交互终端按编号选择安装，非交互环境只检测
@@ -919,7 +920,7 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-- 镜像内置 opencode CLI 与 git；入口脚本按 `OPENCODE_URL` 的端口自动拉起 `opencode serve`（设 `OPENCODE_AUTO_START=0` 关闭，适合把 `OPENCODE_URL` 指向宿主机或其他容器）。
+- 镜像内置 opencode CLI 与 git；默认由 Bot 按需拉起 `opencode serve`（`OPENCODE_ON_DEMAND=0` 时改回入口脚本预启动；`OPENCODE_AUTO_START=0` 则完全不在容器内启动，适合把 `OPENCODE_URL` 指向宿主机或其他容器）。
 - 安卓 App 访问需容器内监听 `0.0.0.0`，compose 已默认注入 `API_BIND=0.0.0.0`（优先于 `.env`），发布端口仍绑定宿主机 `127.0.0.1:3080`。仅使用安卓端时必须同时设置手机可达的 `API_PUBLIC_URL`（如 `http://192.168.1.10:3080` 或反向代理域名），否则通配监听不会被识别为可用的安卓控制端，Bot 会拒绝启动。
 - 飞书按钮回调若要使用，将 `FEISHU_CALLBACK_BIND=0.0.0.0`，并在 compose 增加端口映射（如 `127.0.0.1:3081:3081`），再由宿主机反向代理 HTTPS 域名；仍只用文字命令时保持回调关闭即可。
 - 挂载的 `./data` 属主需与容器内 `node` 用户（uid 1000）一致：`chown -R 1000:1000 data`。
@@ -1071,7 +1072,7 @@ npm run bot -- start
 
 **重启 Bot**：脚本模式与 systemd 模式都统一使用 `npm run bot -- restart`；它会激活 pending、等待本次启动自检，并在失败时回滚。不要用旧 unit 的 `systemctl restart` 或 `scripts/restart.sh` 替代。
 
-**OpenCode 服务**：`/service opencode start` 使用当前 `OPENCODE_URL` 的端口与 `--hostname 127.0.0.1` 启动 `opencode serve`，PID 写入 `data/opencode.pid`，日志追加到 `data/opencode.log`（超过 10MB 自动轮转）。Bot 只会停止自己启动的实例；手动启动的 OpenCode 会被识别为“未托管”并拒绝停止/重启。`OPENCODE_URL` 指向非本机地址时也不提供启停管理。
+**OpenCode 服务**：默认按需启动——第一条使用 OpenCode 的任务会拉起 `opencode serve`（端口取自 `OPENCODE_URL`，绑定 `--hostname 127.0.0.1`），空闲 `OPENCODE_IDLE_STOP_MS`（默认 10 分钟）后自动停止；会话存在磁盘上，停止不丢上下文。`OPENCODE_ON_DEMAND=0` 退回常驻模式。手动执行 `/service opencode start` 时，PID 写入 `data/opencode.pid`，日志追加到 `data/opencode.log`（超过 10MB 自动轮转）。Bot 只会停止自己启动的实例；手动启动的 OpenCode 会被识别为“未托管”并拒绝停止/重启。`OPENCODE_URL` 指向非本机地址时也不提供启停管理。
 
 **cc-switch 安装/更新**：`/ops` 中的「cc-switch 安装/更新」会确认后执行 `scripts/install-cc-switch.sh`，下载对应平台二进制到 `./bin/cc-switch`；已安装时使用 `--force` 覆盖更新。下载自动继承 `/proxy` 中启用的代理。
 
@@ -1261,7 +1262,7 @@ npm run models -- del fast --force
 npm run models -- assign self fast
 ```
 
-- 自定义模型保存在 `data/models.json`（权限 600），`add` 会同步写入 `opencode.json` 对应 provider 的 `models`，`/model` 立即可选。`/cc model add` 支持 `--attachment`（声明支持图片输入）、`--context 200000`（上下文窗口）与 `--output 64000`（输出上限），效果与 CLI 的 `--attach` / `--context` 相同。
+- 自定义模型保存在 `data/models.json`（权限 600），`add` 会同步写入 `opencode.json` 对应 provider 的 `models`（只插入这一个属性，文件里手写的注释、缩进、内联对象与其它键原样保留），`/model` 立即可选。`/cc model add` 支持 `--attachment`（声明支持图片输入）、`--context 200000`（上下文窗口）与 `--output 64000`（输出上限），效果与 CLI 的 `--attach` / `--context` 相同。
 - `assign self` 指向 Bot 使用的 agent（默认 `assistant`），同时把当前聊天切到该模型；其他 agent 只修改 `.opencode/agent/<name>.md` 的 `model` 字段。
 - 删除仍被 agent 或 `opencode.json` 引用的模型会被拒绝，确认后才可加 `force` / `--force`。
 - 强制删除时，被删模型所在 agent 文件 frontmatter 的 `model:` 行会被清除（该 agent 不再绑定模型，由引擎自身配置决定），引用它的会话选择同样被清除；`opencode.json` 的 `model` / `small_model` 仍指向它时只提示、不自动改动。

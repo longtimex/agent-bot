@@ -38,3 +38,10 @@ test("loadConfig parses STARTUP_NOTICE=0 as disabled and defaults to enabled", (
 test("appVersion reads the package version", () => {
   assert.match(appVersion(), /^\d+\.\d+\.\d+$|^dev$/)
 })
+
+test("startup notice calls an idle on-demand server normal instead of unreachable", () => {
+  const text = startupNoticeText({ version: "0.2.0", opencodeOk: false, onDemand: true, timezone: "UTC" })
+  assert.match(text, /按需启动/)
+  assert.doesNotMatch(text, /不可达/)
+  assert.doesNotMatch(text, /npm run serve/)
+})

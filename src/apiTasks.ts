@@ -17,6 +17,7 @@ import {
 } from "./attachments.js"
 import type { BotConfig } from "./config.js"
 import { callEngine, resolveOpencodeModel, type EngineCallDeps, type ResolvedModel } from "./engineCall.js"
+import { OpencodeHealth, resolveUsableEngine } from "./engineFallback.js"
 import type { TaskHistoryStore } from "./history.js"
 import type { Logger } from "./logger.js"
 import { mediaLabel, parseReply, resolveMedia } from "./media.js"
@@ -36,7 +37,6 @@ const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 export const MAX_TASK_RECORDS = 200
 const MAX_API_QUEUE = 4
-const OPENCODE_HEALTH_CACHE_MS = 10_000
 
 export interface TaskManagerDeps {
   cfg: BotConfig
@@ -63,12 +63,12 @@ export class ApiTaskManager {
   /** SSE subscribers per task id; each gets the serialized task view on every update. */
   readonly #taskListeners = new Map<string, Set<(payload: string) => void>>()
   readonly #lastEmit = new Map<string, number>()
-  #opencodeHealthAt = 0
-  #opencodeHealthy = false
+  readonly #opencodeHealth: OpencodeHealth
 
   constructor(deps: TaskManagerDeps) {
     this.#deps = deps
     this.#appKey = deps.appKey
+    this.#opencodeHealth = new OpencodeHealth(() => deps.oc.health())
   }
 
   hasActiveTask(): boolean {
@@ -368,18 +368,20 @@ export class ApiTaskManager {
   async #runTask(task: ApiTask): Promise<void> {
     if (task.status === "cancelled") return
 
-    // A brand-new session has no explicit engine and therefore starts on OpenCode. If
-    // that server is not running, every task would fail in milliseconds before any model
-    // is reached. Only this implicit default may fall back; a user who chose OpenCode
-    // explicitly keeps it, even when the health probe is down, so the error is truthful.
-    if (task.autoEngine && task.engine === "opencode" && !task.model) {
-      const healthy = await this.#opencodeIsHealthy()
-      if (!healthy) {
-        const fallback = this.#fallbackEngine()
-        if (fallback) {
-          task.engine = fallback
-          task.engineNote = `OpenCode 未运行，本次自动使用 ${this.#deps.agents.registry.label(fallback)}`
-        }
+    // A brand-new session has no explicit engine and therefore starts on OpenCode. If that
+    // engine cannot run (uninstalled, server down, or a CLI whose binary disappeared), every
+    // task would fail in milliseconds before any model is reached. Only an implicit choice
+    // may be replaced; a user who picked an engine keeps it, so the error stays truthful.
+    if (task.autoEngine && !task.model) {
+      const choice = await resolveUsableEngine({
+        engine: task.engine,
+        explicit: false,
+        registry: this.#deps.agents.registry,
+        opencodeHealthy: () => this.#opencodeHealth.isHealthy(),
+      })
+      if (choice.engine !== task.engine) {
+        task.engine = choice.engine
+        task.engineNote = choice.note
       }
     }
     task.status = "running"
@@ -475,22 +477,6 @@ export class ApiTaskManager {
       // One terminal snapshot (reply/error + status + finishedAt) for SSE subscribers
       this.#emitTask(task, true)
     }
-  }
-
-  async #opencodeIsHealthy(): Promise<boolean> {
-    if (Date.now() - this.#opencodeHealthAt < OPENCODE_HEALTH_CACHE_MS) return this.#opencodeHealthy
-    this.#opencodeHealthAt = Date.now()
-    this.#opencodeHealthy = await this.#deps.oc.health().catch(() => false)
-    return this.#opencodeHealthy
-  }
-
-  /** Codex first because it is the most common replacement, then any installed CLI profile. */
-  #fallbackEngine(): string | undefined {
-    const registry = this.#deps.agents.registry
-    const profiles = registry.list()
-    const codex = profiles.find((profile) => profile.id === "codex" && registry.binPath(profile))
-    if (codex) return codex.id
-    return profiles.find((profile) => registry.binPath(profile))?.id
   }
 
   /** History label for an attachment-only task, which has no prompt text of its own. */

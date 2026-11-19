@@ -470,18 +470,25 @@ export class TelegramOpsCommands {
   }
 
   async servicePanel(): Promise<Panel> {
-    let status: { reachable: boolean; managed: boolean; pid?: number; url: string }
+    let status: { reachable: boolean; managed: boolean; onDemand: boolean; pid?: number; url: string }
     try {
       status = await this.#deps.ops.opencodeStatus()
     } catch {
-      status = { reachable: false, managed: false, url: this.#deps.cfg.opencode.url }
+      status = { reachable: false, managed: false, onDemand: this.#deps.cfg.opencode.onDemand, url: this.#deps.cfg.opencode.url }
     }
-    const state = status.reachable ? "🟢 运行中" : "🔴 未运行"
+    // In on-demand mode "not running" is the normal resting state, not a fault
+    const state = status.reachable
+      ? "🟢 运行中"
+      : status.onDemand
+        ? "⚪️ 按需启动（当前空闲未运行）"
+        : "🔴 未运行"
     const managed = status.pid
       ? `由 Bot 托管（PID ${status.pid}）`
       : status.reachable
         ? "运行中，但未由 Bot 托管"
-        : "未运行"
+        : status.onDemand
+          ? "按需启动，空闲时会自动停止"
+          : "未运行"
     return {
       text:
         `⚡ *OpenCode 服务*\n\n• 状态：${state}\n• 托管：${managed}\n• URL：\`${escapeMarkdown(status.url)}\`\n\n` +

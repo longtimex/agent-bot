@@ -65,6 +65,17 @@ test("lifecycle options keep subcommand flags and consume shared flags", () => {
   assert.equal(parsed.options.yes, true)
 })
 
+test("lifecycle options leave opencode undecided until the install asks", () => {
+  // Undefined is the whole point: install asks on a terminal and skips elsewhere, so a
+  // piped or CI install never runs a global npm install on its own.
+  assert.equal(parseLifecycleOptions(["install"]).options.opencode, undefined)
+  assert.equal(parseLifecycleOptions(["install", "--opencode"]).options.opencode, true)
+  assert.equal(parseLifecycleOptions(["install", "--no-opencode"]).options.opencode, false)
+  // The last flag wins, like every other lifecycle switch.
+  assert.equal(parseLifecycleOptions(["install", "--opencode", "--no-opencode"]).options.opencode, false)
+  assert.equal(parseLifecycleOptions(["install", "--no-opencode", "--opencode"]).options.opencode, true)
+})
+
 test("managed removal refuses unmanaged files and accepts regular managed files", () => {
   const dir = tempDir()
   try {

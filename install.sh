@@ -10,7 +10,8 @@
 #   AGENT_BOT_REPO      git repository (default: https://github.com/longtimex/agent-bot.git)
 #   AGENT_BOT_BRANCH    branch to install (default: main)
 #   AGENT_BOT_DIR       install directory (default: the checkout, or ~/.agent-bot)
-#   AGENT_BOT_OPENCODE  1 to install the opencode CLI (default: 1)
+#   AGENT_BOT_OPENCODE  auto to ask before installing the opencode CLI, 1/0 to force
+#                       (default: auto; a non-interactive run installs nothing)
 #   AGENT_BOT_SETUP     1 to run the client setup wizard (Telegram / Android / Feishu)
 #                       (default: 1 only when stdin is a TTY)
 #   AGENT_BOT_TOOLS     auto to detect and offer Agent CLI / magpie / cc-switch,
@@ -23,7 +24,7 @@ set -eu
 repo="${AGENT_BOT_REPO:-https://github.com/longtimex/agent-bot.git}"
 branch="${AGENT_BOT_BRANCH:-main}"
 install_dir="${AGENT_BOT_DIR:-}"
-want_opencode="${AGENT_BOT_OPENCODE:-1}"
+want_opencode="${AGENT_BOT_OPENCODE:-auto}"
 want_setup="${AGENT_BOT_SETUP:-auto}"
 want_tools="${AGENT_BOT_TOOLS:-auto}"
 use_local=auto
@@ -51,7 +52,8 @@ Usage: install.sh [options]
   --repo URL         git repository to clone
   --branch NAME      git branch (default: main)
   --local            install this checkout (default when the script is in one)
-  --no-opencode      do not install the opencode CLI
+  --opencode         install and manage the opencode CLI without asking
+  --no-opencode      do not install or manage the opencode CLI
   --setup            always open the client setup wizard (even if a client exists)
   --no-setup         do not run the client setup wizard
   --tools            detect and offer Agent CLI / magpie / cc-switch (interactive)
@@ -72,7 +74,7 @@ Clients: Telegram / Android / Feishu. The wizard can configure one or more;
 rerun npm run clients later to add another client without losing existing settings.
 
 Environment: AGENT_BOT_REPO, AGENT_BOT_BRANCH, AGENT_BOT_DIR,
-AGENT_BOT_OPENCODE=0, AGENT_BOT_SETUP=0|1, AGENT_BOT_TOOLS=auto|check|1|0,
+AGENT_BOT_OPENCODE=auto|1|0, AGENT_BOT_SETUP=0|1, AGENT_BOT_TOOLS=auto|check|1|0,
 AGENT_BOT_SYSTEMD=0|1|user, AGENT_BOT_START=0|1,
 AGENT_BOT_SKIP_DEPS=0|1, AGENT_BOT_SKIP_BUILD=0|1
 EOF
@@ -90,6 +92,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "install.sh: --branch needs a name" >&2; exit 2; }
       branch="$2"; shift 2 ;;
     --local) use_local=1; shift ;;
+    --opencode) want_opencode=1; shift ;;
     --no-opencode) want_opencode=0; shift ;;
     --setup) want_setup=1; shift ;;
     --no-setup) want_setup=0; shift ;;
@@ -130,6 +133,10 @@ case "$skip_build" in
   0|1) ;;
   *) echo "install.sh: AGENT_BOT_SKIP_BUILD must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$want_opencode" in
+  auto|0|1) ;;
+  *) echo "install.sh: AGENT_BOT_OPENCODE must be auto, 1 or 0" >&2; exit 2 ;;
+esac
 
 fail() {
   printf '\ninstall.sh: %s\n' "$1" >&2
@@ -153,6 +160,30 @@ run() {
     return 0
   fi
   "$@"
+}
+
+# Asks before the long npm steps so the answer is not buried under build output.
+# Only reached for AGENT_BOT_OPENCODE=auto on a real terminal; an explicit
+# --opencode / --no-opencode (or AGENT_BOT_OPENCODE=1|0) answers it up front.
+ask_opencode() {
+  printf '\n  %s选择 Agent 引擎%s\n' "$bold" "$reset" >&2
+  printf '    %s1)%s 安装 OpenCode CLI，并交给 Bot 管理（内置引擎，推荐）\n' "$bold" "$reset" >&2
+  printf '    %s2)%s 跳过，稍后自行安装（npm i -g opencode-ai）\n' "$bold" "$reset" >&2
+  while :; do
+    printf '  选择 [1/2]（回车 = 1）: ' >&2
+    answer=""
+    if ! read -r answer; then
+      # stdin closed mid-prompt: fall back to the non-interactive default
+      printf '\n' >&2
+      want_opencode=0
+      return 0
+    fi
+    case "${answer:-1}" in
+      1) want_opencode=1; return 0 ;;
+      2) want_opencode=0; return 0 ;;
+      *) printf '  %s\n' "请输入 1 或 2。" >&2 ;;
+    esac
+  done
 }
 
 script_dir=""
@@ -208,6 +239,23 @@ command -v npm >/dev/null 2>&1 || fail "npm is required (it ships with Node.js)"
 node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a < 20 || (a === 20 && (b < 18 || (b === 18 && c < 1)))) process.exit(1)' \
   || fail "Node.js >= 20.18.1 is required (found $(node -v))"
 
+# The menu comes before the clone and the build: a fresh install spends minutes in
+# npm ci, and asking afterwards buries the question in build output. A non-interactive
+# run (curl | sh, CI) never installs a global package unattended.
+if [ "$want_opencode" = auto ]; then
+  if [ "$interactive" = true ] && [ -t 0 ] && [ "$dry_run" -eq 0 ]; then
+    ask_opencode
+  else
+    want_opencode=0
+    if [ "$dry_run" -eq 1 ]; then
+      opencode_note="Would ask whether to install the opencode CLI (assuming no for this dry run)"
+      opencode_ask_only=1
+    elif ! command -v opencode >/dev/null 2>&1; then
+      opencode_note="No terminal to ask about the opencode CLI; install it later with: npm install -g opencode-ai"
+    fi
+  fi
+fi
+
 step "Installing into ${install_dir}"
 if [ "$from_checkout" -eq 1 ]; then
   ok "Using the existing checkout at ${install_dir}"
@@ -256,9 +304,14 @@ else
   ok ".env already exists; leaving it unchanged"
 fi
 
-if [ "$want_opencode" != 0 ] && [ "$dry_run" -eq 0 ]; then
+if [ -n "${opencode_note:-}" ]; then
+  step "$opencode_note"
+fi
+if [ "$want_opencode" = 1 ]; then
   if command -v opencode >/dev/null 2>&1; then
     ok "opencode CLI already installed"
+  elif [ "$dry_run" -eq 1 ]; then
+    run npm install -g opencode-ai --no-audit --no-fund
   else
     step "Installing the opencode CLI..."
     if npm install -g opencode-ai --no-audit --no-fund; then
@@ -267,6 +320,12 @@ if [ "$want_opencode" != 0 ] && [ "$dry_run" -eq 0 ]; then
       printf '  %s\n' "Could not install opencode globally; run: sudo npm install -g opencode-ai" >&2
     fi
   fi
+elif [ "${opencode_ask_only:-0}" = 1 ]; then
+  : # dry run: the note above already says the question would be asked
+elif command -v opencode >/dev/null 2>&1; then
+  ok "opencode CLI already installed (left as is)"
+else
+  step "Skipped the opencode CLI; install it later with: npm install -g opencode-ai"
 fi
 
 # The setup wizard owns the tool stage when it runs, so clients and optional tools
@@ -339,20 +398,23 @@ fi
 has_channel=0
 if has_control_channel; then has_channel=1; fi
 
+# Always explicit: the lifecycle CLI asks the same question on its own, and passing the
+# answer here is what makes --no-opencode survive the --start path as well.
+opencode_args="--no-opencode"
+if [ "$want_opencode" = 1 ]; then opencode_args="--opencode"; fi
+
 if [ "$use_systemd" -eq 1 ] || [ "$use_user_systemd" -eq 1 ]; then
   step "Installing systemd units..."
   systemd_args=""
   if [ "$use_systemd" -eq 1 ]; then systemd_args="--systemd"; else systemd_args="--user-systemd"; fi
-  opencode_args=""
-  if [ "$want_opencode" -eq 0 ]; then opencode_args="--no-opencode"; fi
-  run npm run bot -- install --skip-deps --skip-build $opencode_args "$systemd_args"
+  run npm run bot -- install --skip-deps --skip-build "$opencode_args" "$systemd_args"
 fi
 
 if [ "$start_after" -eq 1 ] && [ "$dry_run" -eq 0 ]; then
   [ "$has_channel" -eq 1 ] || fail "refusing to start without a configured Telegram, Android App or Feishu client; run npm run setup or edit .env first"
   step "Starting the bot..."
   if [ "$use_systemd" -eq 0 ] && [ "$use_user_systemd" -eq 0 ]; then
-    run npm run bot -- install --skip-deps --skip-build
+    run npm run bot -- install --skip-deps --skip-build "$opencode_args"
   fi
   run npm run bot -- start
 fi
@@ -368,8 +430,11 @@ printf '    1. %scd %s%s\n' "$bold" "$install_dir" "$reset"
 if [ "$has_channel" -eq 0 ]; then
   printf '    2. %snpm run setup%s   # choose Telegram, Android App or Feishu\n' "$bold" "$reset"
 else
-  printf '    2. %snpm run bot -- start%s # start the bot and its local opencode (log: data/bot.log)\n' "$bold" "$reset"
+  printf '    2. %snpm run bot -- start%s # start the bot (log: data/bot.log)\n' "$bold" "$reset"
   printf '       %snpm run clients%s   # add or edit another control client later\n' "$bold" "$reset"
+fi
+if [ "$want_opencode" != 1 ] && ! command -v opencode >/dev/null 2>&1; then
+  printf '       %snpm i -g opencode-ai%s # install the built-in engine when you need it\n' "$bold" "$reset"
 fi
 printf '    3. %snpm run setup:tools%s # add Agent CLI / magpie / cc-switch later\n' "$bold" "$reset"
 printf '    4. %snpm run bot -- status%s # inspect supervisor, release and health\n' "$bold" "$reset"

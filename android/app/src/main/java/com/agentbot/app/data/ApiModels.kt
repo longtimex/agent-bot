@@ -402,6 +402,8 @@ data class OpsResult(
 data class ServiceStatus(
     val reachable: Boolean = false,
     val managed: Boolean = false,
+    /** 按需模式：没在运行是常态，第一条 OpenCode 任务会把它拉起来 */
+    val onDemand: Boolean = false,
     val pid: Int? = null,
     val url: String? = null,
 )

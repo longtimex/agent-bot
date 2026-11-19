@@ -46,6 +46,29 @@ test("install.sh points at the client wizard for adding control clients later", 
   assert.match(source, /Telegram \/ Android App \/ Feishu/)
 })
 
+test("install.sh asks before installing opencode and never does it unattended", () => {
+  const help = execFileSync("sh", ["install.sh", "--help"], { encoding: "utf8" })
+  assert.match(help, /--opencode\s+install and manage the opencode CLI without asking/)
+  assert.match(help, /AGENT_BOT_OPENCODE=auto\|1\|0/)
+
+  const source = execFileSync("sh", ["-c", "cat install.sh"], { encoding: "utf8" })
+  // auto is the default, and only a real terminal gets the menu
+  assert.match(source, /want_opencode="\$\{AGENT_BOT_OPENCODE:-auto\}"/)
+  assert.match(source, /^ask_opencode\(\) \{/m)
+  assert.match(source, /选择 Agent 引擎/)
+  assert.match(source, /if \[ "\$interactive" = true \] && \[ -t 0 \] && \[ "\$dry_run" -eq 0 \]; then/)
+  assert.match(source, /No terminal to ask about the opencode CLI/)
+  assert.match(source, /AGENT_BOT_OPENCODE must be auto, 1 or 0/)
+  // A skipped engine must not leave `--start` pointing at a Bot-managed OpenCode.
+  assert.match(source, /Skipped the opencode CLI; install it later with/)
+
+  // The answer reaches both bot install call sites, not just the systemd one: that
+  // omission is what made --no-opencode fail under --start.
+  const installCalls = source.match(/npm run bot -- install --skip-deps --skip-build[^\n]*/g) ?? []
+  assert.equal(installCalls.length, 2)
+  for (const call of installCalls) assert.match(call, /\$opencode_args/)
+})
+
 test("install.sh detects and offers optional tools without blocking the deployment", () => {
   const source = execFileSync("sh", ["-c", "cat install.sh"], { encoding: "utf8" })
   assert.match(source, /npm run setup:tools -- --check/)
@@ -75,7 +98,7 @@ test("install.sh rejects an unknown AGENT_BOT_TOOLS value before installing", ()
 })
 
 test("npm run setup documents the tool stage even without a TTY", () => {
-  const help = execFileSync("npx", ["tsx", "src/setup-cli.ts", "--help"], {
+  const help = execFileSync(process.execPath, ["--import", "tsx", "src/setup-cli.ts", "--help"], {
     encoding: "utf8",
     env: { ...process.env, CI: "1" },
   })
@@ -128,5 +151,5 @@ test("install.sh installs systemd units even without --start", () => {
   const units = source.indexOf('step "Installing systemd units..."')
   const start = source.indexOf('step "Starting the bot..."')
   assert.ok(units > 0 && start > units, "unit installation must be its own step before --start")
-  assert.match(source, /npm run bot -- install --skip-deps --skip-build \$opencode_args "\$systemd_args"/)
+  assert.match(source, /npm run bot -- install --skip-deps --skip-build "\$opencode_args" "\$systemd_args"/)
 })

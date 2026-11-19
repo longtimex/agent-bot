@@ -337,7 +337,7 @@ test("an unset engine falls back from a dead OpenCode to an installed CLI", asyn
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
     assert.equal(settled.engine, "codex")
-    assert.match(settled.engineNote ?? "", /OpenCode 未运行/)
+    assert.match(settled.engineNote ?? "", /OpenCode 不可用/)
     assert.deepEqual(manager.prompted, ["codex"], "the implicit OpenCode default was skipped")
     assert.equal(manager.view(settled).engineNote, settled.engineNote)
     assert.equal(new SessionStore(join(dir, "sessions.json"), log).getExplicitEngine("api:app"), undefined, "fallback must not be persisted")
@@ -358,7 +358,7 @@ test("a saved OpenCode model alone still allows the implicit default to fall bac
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
     assert.equal(settled.engine, "codex")
-    assert.match(settled.engineNote ?? "", /OpenCode 未运行/)
+    assert.match(settled.engineNote ?? "", /OpenCode 不可用/)
     assert.deepEqual(manager.prompted, ["codex"], "a model preference is not an engine choice")
     assert.equal(
       new SessionStore(join(dir, "sessions.json"), log).getExplicitEngine("api:app"),

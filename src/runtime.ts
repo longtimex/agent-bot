@@ -410,8 +410,18 @@ export async function startOpencode(
       detached: true,
       stdio: ["ignore", fd, fd],
     })
+    // A failed spawn emits 'error' asynchronously. Without a listener that becomes an
+    // uncaught exception and takes the whole bot down — exactly when the engine is broken.
+    let spawnError: Error | undefined
+    child.on("error", (err) => {
+      spawnError = err
+    })
     child.unref()
-    if (!child.pid) return { ok: false, message: "OpenCode 启动失败：没有返回 PID。" }
+    if (!child.pid) {
+      // The event lands on the next tick; give it one turn so the message names the cause
+      await new Promise((resolvePromise) => setImmediate(resolvePromise))
+      return { ok: false, message: `OpenCode 启动失败：${spawnError?.message ?? "没有返回 PID"}` }
+    }
     writeFileSync(paths.opencodePidPath, `${child.pid}\n`, { mode: 0o600 })
     const deadline = Date.now() + OPENCODE_START_WAIT_MS
     while (Date.now() < deadline) {

@@ -94,7 +94,7 @@ fun OpsScreen(vm: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { OpsActionsCard(vm) { path, label -> pending = path to label } }
-            vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.pid, status.url) { path, label -> pending = path to label } } }
+            vm.serviceStatus?.let { status -> item { ServiceCard(vm, status.reachable, status.managed, status.onDemand, status.pid, status.url) { path, label -> pending = path to label } } }
             vm.serviceStatusError?.let { message ->
                 item {
                     InlineNotice(
@@ -205,6 +205,7 @@ private fun ServiceCard(
     vm: AppViewModel,
     reachable: Boolean,
     managed: Boolean,
+    onDemand: Boolean,
     pid: Int?,
     url: String?,
     onConfirm: (String, String) -> Unit,
@@ -215,12 +216,20 @@ private fun ServiceCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("OpenCode 服务", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 StatusPill(
-                    text = if (reachable) "运行中" else "未运行",
-                    tone = if (reachable) StatusTone.Success else StatusTone.Warning,
+                    text = if (reachable) "运行中" else if (onDemand) "按需启动" else "未运行",
+                    tone = if (reachable) StatusTone.Success else if (onDemand) StatusTone.Neutral else StatusTone.Warning,
                 )
             }
             InfoRow("地址", url ?: "—")
-            InfoRow("托管", if (managed && pid != null) "Bot 托管（PID $pid）" else if (reachable) "运行中，未托管" else "未运行")
+            InfoRow(
+                "托管",
+                when {
+                    managed && pid != null -> "Bot 托管（PID $pid）"
+                    reachable -> "运行中，未托管"
+                    onDemand -> "按需启动，空闲时自动停止"
+                    else -> "未运行"
+                },
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!reachable) {
                     SecondaryButton(

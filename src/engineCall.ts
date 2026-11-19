@@ -1,6 +1,7 @@
 import type { AgentCliService } from "./agentCli.js"
 import type { Logger } from "./logger.js"
 import { Opencode, OpencodeError, type PromptFile } from "./opencode.js"
+import { activeOpencodeSupervisor } from "./opencodeSupervisor.js"
 import type { SessionStore } from "./store.js"
 
 export interface ResolvedModel {
@@ -50,45 +51,59 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
     )
   }
 
-  const model = opts.model
-  let sessionID = await ensureSession(deps, opts.key)
-  let unsubscribe: (() => void) | undefined
-  let touch: (() => void) | undefined
-  const promptOnce = (): Promise<string> =>
-    deps.oc.prompt(sessionID, opts.text, {
-      agent: deps.opencodeAgent,
-      ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
-      idleTimeoutMs: deps.taskTimeoutMs,
-      maxTimeoutMs: deps.taskMaxTimeoutMs,
-      onActivityHook: (hook) => {
-        touch = hook
-      },
-      signal: opts.signal,
-      files: opts.files,
-    })
-  const listen = (): void => {
-    unsubscribe = deps.oc.subscribeSession(sessionID, (status) => {
-      touch?.()
-      opts.onProgress?.(status)
-    })
-  }
-
+  // The server may be stopped between tasks; bring it back before the first request and keep
+  // the idle timer from reclaiming it while this task runs.
+  const runtime = activeOpencodeSupervisor()
+  const release = runtime?.track()
   try {
-    listen()
+    if (runtime && !(await runtime.ensureRunning())) {
+      throw new OpencodeError(
+        "OpenCode 未运行，且无法自动启动；请安装 opencode-ai，或在 /agent 切换到其他引擎。",
+      )
+    }
+
+    const model = opts.model
+    let sessionID = await ensureSession(deps, opts.key)
+    let unsubscribe: (() => void) | undefined
+    let touch: (() => void) | undefined
+    const promptOnce = (): Promise<string> =>
+      deps.oc.prompt(sessionID, opts.text, {
+        agent: deps.opencodeAgent,
+        ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+        idleTimeoutMs: deps.taskTimeoutMs,
+        maxTimeoutMs: deps.taskMaxTimeoutMs,
+        onActivityHook: (hook) => {
+          touch = hook
+        },
+        signal: opts.signal,
+        files: opts.files,
+      })
+    const listen = (): void => {
+      unsubscribe = deps.oc.subscribeSession(sessionID, (status) => {
+        touch?.()
+        opts.onProgress?.(status)
+      })
+    }
+
     try {
-      return await promptOnce()
-    } catch (err) {
-      const missing = err instanceof OpencodeError && err.status === 404
-      if (!missing) throw err
-      deps.log.warn(`session ${sessionID} is gone, creating a new one`)
-      deps.store.clearSession(opts.key)
-      sessionID = await ensureSession(deps, opts.key)
-      unsubscribe?.()
       listen()
-      return await promptOnce()
+      try {
+        return await promptOnce()
+      } catch (err) {
+        const missing = err instanceof OpencodeError && err.status === 404
+        if (!missing) throw err
+        deps.log.warn(`session ${sessionID} is gone, creating a new one`)
+        deps.store.clearSession(opts.key)
+        sessionID = await ensureSession(deps, opts.key)
+        unsubscribe?.()
+        listen()
+        return await promptOnce()
+      }
+    } finally {
+      unsubscribe?.()
     }
   } finally {
-    unsubscribe?.()
+    release?.()
   }
 }
 

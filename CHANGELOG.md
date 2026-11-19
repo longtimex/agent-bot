@@ -2,6 +2,29 @@
 
 本项目的显著变更记录在此文件中。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+### 变更
+
+- **OpenCode 服务改为按需启动**：默认不再常驻。第一条使用 OpenCode 的任务会拉起 `opencode serve`，空闲 `OPENCODE_IDLE_STOP_MS`（默认 10 分钟）后自动停止；只停止 Bot 自己启动的实例，systemd 托管的不会被抢管。会话存在磁盘上（实测 1.19.5 停止再启动仍可取回），因此不丢上下文。`OPENCODE_ON_DEMAND=0` 退回常驻；Docker 入口脚本同步遵循该开关；运维中心的「OpenCode 服务」在按需模式下显示"按需启动 / 空闲时自动停止"而不是"未运行"。顺带修掉两个相关缺陷：① 健康探针同步抛错（例如客户端没有 `health` 方法）会让整条任务失败，现在按"不健康"处理并交给引擎回退；② `startOpencode` 在 spawn 失败时没有监听 `error` 事件，未捕获异常会把整个 Bot 进程带崩——正是引擎已经坏掉、最不该崩的时刻，现在改为返回"OpenCode 启动失败：<原因>"。
+- **安装时先问再装 opencode**：`install.sh` 与 `npm run bot -- install` 不再默认执行全局 `npm install -g opencode-ai`。交互终端会在克隆与构建之前给出 `1) 安装并交给 Bot 管理（推荐）/ 2) 跳过` 的菜单（回车 = 1），非交互环境（`curl | sh`、CI）默认不装并提示稍后安装的命令。`AGENT_BOT_OPENCODE` 由 `0|1` 扩展为 `auto|1|0`（默认 `auto`），新增 `--opencode` 用于跳过询问；`bot install` 的同名选项改为三态，只有未指定时才询问，`start` 仍默认接管本机 OpenCode。相关逻辑从 `bot-cli.ts` 抽到 `src/opencodeCli.ts`，同时把该文件压回体积预算内。
+
+### Android 1.3.9
+
+- **运维中心的 OpenCode 卡片区分按需状态**：服务端新增 `onDemand`，App 在按需模式下显示「按需启动」而不是红色的「未运行」，托管行改为「按需启动，空闲时自动停止」。
+
+### 修复
+
+- **带尾随逗号的 `opencode.json` 写入后变成非法 JSON**：`src/jsoncEdit.ts` 把最后一个属性后面已有的逗号当成了分隔符，于是 `{\n  "a": 1,\n}` 加模型后得到 `"a": 1 "provider": …`（中间没有逗号）。现在插入时总是自带逗号，原逗号继续作为尾随逗号留在末尾；顺带让空的 `"models": {}` 按文件缩进展开，并在删除唯一属性时收敛回 `{}`，保证「加一条再删掉」逐字节还原。
+- **按需模式与 systemd unit 互相打架**：`install --systemd` 仍会生成 opencode unit，而按需模式下的 supervisor 检测到 unit 就不敢 spawn——unit 一旦被停，所有 OpenCode 任务都会失败。现在按需模式不再生成该 unit（`OPENCODE_ON_DEMAND=0` 恢复），由 Bot 自己启停。
+- **启动播报把按需的空闲状态说成故障**：`opencodeOk: false` 时固定输出「❌ 不可达（运行 npm run serve…）」，按需模式下每次开机都误报。现在显示「⏸ 按需启动（首条 OpenCode 任务会自动拉起）」。
+- **添加模型不再重写整份 `opencode.json`**：`ModelAdmin` 之前把项目配置 `JSON.parse` 后再 `JSON.stringify` 写回，加一个模型就把手写的注释、缩进、空行和内联对象全部重排一遍，而且带注释的 `opencode.json` 根本解析不了（被当成"Provider 不存在"，模型静默只进注册表）。现在新增 `src/jsoncEdit.ts`：基于 JSONC 语法树在目标位置做一次拼接，只插入/删除那一个属性，文件其余字节原样保留——4 空格还是 4 空格、内联的 `{ "name": "Base" }` 还是内联、注释还在，加完再删能逐字节回到原文件。`jsonc-parser` 的 `modify()` 不能用：带格式化选项会把相邻对象展开，不带则写成压缩 JSON。
+- **App 添加自定义模型时"假成功"**：`POST /models/custom` 在 Provider 不在 `opencode.json` 且没有提供 `baseURL` 时，只把模型登记进 `data/models.json`，OpenCode 根本解析不到它；Telegram 与 `npm run models` 都会明说这一点，唯独 App 的回执是一句"已添加自定义模型 X"，于是模型出现在选择列表里却永远用不了。现在这种"没写进 opencode.json"的情况一律带警告，并说明 OpenCode 只认识自带 Provider（anthropic、openai 等）、自建中转站需要填 `baseURL` 后重新添加；响应同时回 `providerUpdated`，供客户端区分。
+- **删掉 OpenCode 后其他引擎也跟着"不能用"**：会话没有显式选择引擎时，默认值解析（`engineDefault.ts`）直接返回 `opencode`、兜底也是它，而 Telegram 的任务分发拿到引擎就用、从不校验可用性——OpenCode 被卸载后，每条消息都失败在连不上它，看起来就像"所有 agent 都坏了"。现在两端共用 `src/engineFallback.ts`：**只有隐式选择**才会被替换（OpenCode 不可用 → 优先 codex，其次任意已安装的 CLI；CLI 引擎的可执行文件消失 → 换另一个已安装的），替换后在聊天里补一行「ℹ️ OpenCode 不可用（未安装或未运行），本次自动使用 Claude Code」，同一会话只提示一次；显式选择过的引擎保持不动，错误如实返回。同时修正失败提示：OpenCode 未安装时不再让人去 `npm run serve`，而是给出安装命令与 `/agent` 切换建议。
+- **`--no-opencode` 在 `--start` 路径上失效**：脚本只在 systemd 分支把开关传给 `npm run bot -- install`，`--start` 那条分支漏传，于是 `./install.sh --no-opencode --start` 仍会装上 opencode。现在两个调用点都传 `$opencode_args`，并且总是显式给出 `--opencode` / `--no-opencode`。
+- **`isSafeDataRoot` 在 Windows 上判定过宽**：旧实现用 `${data}/` 拼前缀比较，而 Windows 的分隔符是 `\`，`C:\data` 因此不被当作 `C:\data\project` 的父目录，`uninstall --purge-data` 有可能删掉包含项目的目录。改用 `path.relative` 判断，同时覆盖 `/`、`C:\` 这类根目录与大小写不敏感的比较。
+- **测试启动 TS CLI 的方式在 Windows 上必然失败**：`tests/install-script.test.ts` 用 `execFileSync("npx", …)`，而 Windows 的 `npx` 是 `.cmd`，直接 spawn 会 `ENOENT`；改为 `process.execPath --import tsx`，与 `accountCli` 测试保持一致。
+
 ## [0.4.0] - 2026-11-08
 
 ### 新增

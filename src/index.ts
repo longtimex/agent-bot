@@ -15,7 +15,9 @@ import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
 import { pruneOutbox } from "./media.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { Opencode } from "./opencode.js"
+import { OpencodeSupervisor, configureOpencodeSupervisor } from "./opencodeSupervisor.js"
 import { ProxyService } from "./proxy.js"
+import { runtimePaths } from "./runtime.js"
 import { canRunSetup, setupFromCli } from "./setup.js"
 import { SettingsStore } from "./settings.js"
 import { AgentCustomModelStore } from "./agentCustomModels.js"
@@ -109,6 +111,19 @@ async function main(): Promise<void> {
   pruneFiles()
   const pruneTimer = setInterval(pruneFiles, 24 * 60 * 60 * 1000).unref()
 
+  // A bot that mostly answers on CLI engines should not keep a resident OpenCode server.
+  // Stopping it is safe: sessions are persisted on disk, so the next task picks up where
+  // the chat left off.
+  configureOpencodeSupervisor(
+    new OpencodeSupervisor({
+      paths: runtimePaths(process.cwd(), process.env),
+      env: process.env,
+      log,
+      onDemand: cfg.opencode.onDemand,
+      idleStopMs: cfg.opencode.idleStopMs,
+    }),
+  )
+
   // restart.sh passes the redirected log path so long-running instances still rotate
   const logFile = process.env.BOT_LOG_FILE
   if (logFile) {
@@ -128,6 +143,9 @@ async function main(): Promise<void> {
   const oc = new Opencode(cfg.opencode.url, cfg.opencode.username, cfg.opencode.password)
   if (await oc.health()) {
     log.info(`opencode server reachable at ${cfg.opencode.url}`)
+  } else if (cfg.opencode.onDemand) {
+    // Expected in on-demand mode: the first OpenCode task starts it
+    log.info(`opencode server not running at ${cfg.opencode.url}; it will start on demand`)
   } else {
     log.warn(`opencode server not reachable at ${cfg.opencode.url}; start it with: npm run serve`)
   }

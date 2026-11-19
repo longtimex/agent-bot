@@ -22,7 +22,7 @@ import { clip, escapeMarkdown, pruneChatState, type Panel } from "./messages.js"
 export { pruneChatState }
 export { parseProviderAdd } from "./ccCommands.js"
 import { ModelAdmin } from "./modelAdmin.js"
-import { AgentCliService } from "./agentCli.js"
+import { AgentCliService, whichSync } from "./agentCli.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import { AgentModelCatalog } from "./agentModelCatalog.js"
 import { appVersion } from "./version.js"
@@ -32,6 +32,7 @@ import {
   type ModelInfo,
 } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
+import { OpencodeHealth, resolveUsableEngine } from "./engineFallback.js"
 import { ChatTaskOutcomeRecorder, chatTaskOutcomeRecorder } from "./telegramTaskOutcome.js"
 import { resolveEncKey } from "./api.js"
 import { Opencode, type PromptFile } from "./opencode.js"
@@ -183,6 +184,9 @@ export class TelegramBridge {
   #coreServicesStarted = false
   #usageReportStarted = false
   readonly #announcedStartups = new Set<string>()
+  /** Chats already told that an implicit engine was replaced (one note, not every reply). */
+  readonly #engineFallbackNoted = new Set<string>()
+  readonly #opencodeHealth: OpencodeHealth
   /** Live-overridable via /timezone; the reminder, schedule and usage stores all follow it. */
   #timezone: string
 
@@ -210,6 +214,7 @@ export class TelegramBridge {
     // transformer intercepts every call aimed at the Feishu namespace.
     this.#bot = bot ?? createChannelBot(cfg.telegram.token)
     this.#oc = oc
+    this.#opencodeHealth = new OpencodeHealth(() => this.#oc.health())
     this.#agents = agents
     this.#agentModels = new AgentModelCatalog(agents.registry, { log })
     this.#store = store
@@ -243,6 +248,7 @@ export class TelegramBridge {
           projectDir: process.cwd(),
           dataDir: cfg.dataDir,
           opencodeUrl: cfg.opencode.url,
+          opencodeOnDemand: cfg.opencode.onDemand,
           ccSwitchBin: cfg.ccswitch.bin,
           proxyEnv: () => proxies.env(),
           health: () => oc.health(),
@@ -545,7 +551,7 @@ export class TelegramBridge {
     try {
       const sent = await this.#sendTextMessage(
         chatId,
-        startupNoticeText({ username, version: appVersion(), opencodeOk, timezone: this.#timezone, channel }),
+        startupNoticeText({ username, version: appVersion(), opencodeOk, onDemand: this.#cfg.opencode.onDemand, timezone: this.#timezone, channel }),
       )
       if (!sent) this.#announcedStartups.delete(key)
     } catch (err) {
@@ -1776,12 +1782,25 @@ export class TelegramBridge {
     // A scheduled prompt is not something the user typed, so /retry must not replay it
     if (!job.scheduled) this.#lastPrompts.set(job.key, { text: job.text, attachments: job.attachments })
 
-    const engine = job.engine ?? this.#store.getEngine(job.key)
+    const requested = job.engine ?? this.#store.getEngine(job.key)
+    // A one-off override (job.engine) or a saved choice is explicit; only the chat's
+    // implicit default may be replaced, so a message is never answered by an engine the
+    // user did not ask for without saying so.
+    const explicitEngine = job.engine !== undefined || this.#store.getExplicitEngine(job.key) !== undefined
+    const choice = await resolveUsableEngine({
+      engine: requested,
+      explicit: explicitEngine,
+      registry: this.#agents.registry,
+      opencodeHealthy: () => this.#opencodeHealth.isHealthy(),
+    })
+    const engine = choice.engine
+    const switched = engine !== requested
     const isOpencode = engine === "opencode"
     const activeModel = isOpencode ? (job.model ?? this.#modelCommands.getCurrentModel(job.key)) : undefined
+    // A CLI model belongs to the engine it was chosen for, so a fallback drops it
     const cliModel = isOpencode
       ? undefined
-      : (job.cliModel ?? this.#store.getCliModel(job.key, engine))
+      : (switched ? undefined : job.cliModel) ?? this.#store.getCliModel(job.key, engine)
     const taskStarted = Date.now()
     let outcome: UsageOutcome = "failed"
     let failureDetail: string | undefined
@@ -1826,7 +1845,10 @@ export class TelegramBridge {
       void typingPromise
       await tracker.finish()
 
-      await this.#sendReply(job, reply)
+      // Told once per chat: repeating it on every reply would bury the answer
+      const note = choice.note && !this.#engineFallbackNoted.has(job.key) ? choice.note : undefined
+      if (note) this.#engineFallbackNoted.add(job.key)
+      await this.#sendReply(job, note ? `ℹ️ ${note}\n\n${reply}` : reply)
       outcome = "ok"
     } catch (err) {
       typingActive = false
@@ -1841,7 +1863,9 @@ export class TelegramBridge {
       failureDetail = redactSecrets(this.#maskToken(detail)).replace(/\s+/g, " ").slice(0, 300)
       const hint =
         engine === "opencode" && /ECONNREFUSED|UND_ERR_SOCKET|fetch failed/i.test(detail)
-          ? "\n\n请确认 opencode serve 已启动（npm run serve）。"
+          ? whichSync("opencode")
+            ? "\n\n请确认 opencode serve 已启动（npm run serve）。"
+            : "\n\n未检测到 opencode CLI：安装用 `npm install -g opencode-ai`，或发送 /agent 切换到已安装的引擎。"
           : ""
       this.#rememberRetry(job)
       await this.#sendTextMessage(
@@ -1867,10 +1891,17 @@ export class TelegramBridge {
   #pruneChatState(): void {
     const active = (key: string): boolean =>
       this.#queues.has(key) || this.#pending.has(key) || this.#runningSince.has(key)
-    const removed =
+    let removed =
       pruneChatState(this.#generation, active, CHAT_STATE_LIMIT) +
       pruneChatState(this.#lastPrompts, active, CHAT_STATE_LIMIT) +
       this.#ccCommands.pruneProviders((chatId) => active(this.#sessionKey(chatId)), CHAT_STATE_LIMIT)
+    // The fallback note set follows the same limit; deleting while iterating a Set is safe
+    for (const key of this.#engineFallbackNoted) {
+      if (this.#engineFallbackNoted.size <= CHAT_STATE_LIMIT) break
+      if (active(key)) continue
+      this.#engineFallbackNoted.delete(key)
+      removed += 1
+    }
     if (removed > 0) this.#log.debug(`pruned ${removed} idle chat state entries`)
   }
 

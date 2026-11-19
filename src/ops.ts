@@ -69,7 +69,7 @@ export interface OpsDiagnostics {
   projectDir: string
   uptimeSec: number
   git?: { branch: string; commit: string; dirty: boolean }
-  opencode: { url: string; reachable: boolean; managed: boolean; pid?: number }
+  opencode: { url: string; reachable: boolean; managed: boolean; onDemand: boolean; pid?: number }
   ccSwitch?: { bin: string; version?: string }
   log: { path: string; bytes: number }
   opencodeLog: { path: string; bytes: number }
@@ -114,6 +114,7 @@ export interface OpsServiceOptions {
   projectDir: string
   dataDir: string
   opencodeUrl: string
+  opencodeOnDemand?: boolean
   ccSwitchBin?: string
   logPath?: string
   envPath?: string
@@ -340,6 +341,7 @@ export class OpsService {
   readonly #projectDir: string
   readonly #dataDir: string
   readonly #opencodeUrl: string
+  readonly #opencodeOnDemand: boolean
   readonly #ccSwitchBin?: string
   readonly #logPath: string
   readonly #opencodeLogPath: string
@@ -364,6 +366,7 @@ export class OpsService {
     this.#projectDir = resolve(options.projectDir)
     this.#dataDir = resolve(options.dataDir)
     this.#opencodeUrl = options.opencodeUrl
+    this.#opencodeOnDemand = options.opencodeOnDemand ?? false
     this.#ccSwitchBin = options.ccSwitchBin
     this.#log = logger
     const logFromEnv = process.env.BOT_LOG_FILE?.trim()
@@ -459,7 +462,7 @@ export class OpsService {
       projectDir: this.#projectDir,
       uptimeSec: Math.round(process.uptime()),
       git,
-      opencode: { url: this.#opencodeUrl, reachable, managed: pid !== undefined, pid },
+      opencode: { url: this.#opencodeUrl, reachable, managed: pid !== undefined, onDemand: this.#opencodeOnDemand, pid },
       ccSwitch,
       log: { path: this.#logPath, bytes: this.#fileSize(this.#logPath) },
       opencodeLog: { path: this.#opencodeLogPath, bytes: this.#fileSize(this.#opencodeLogPath) },
@@ -627,10 +630,10 @@ export class OpsService {
     }
   }
 
-  async opencodeStatus(): Promise<{ reachable: boolean; managed: boolean; pid?: number; url: string }> {
+  async opencodeStatus(): Promise<{ reachable: boolean; managed: boolean; onDemand: boolean; pid?: number; url: string }> {
     const reachable = await this.#checkHealth()
     const pid = this.#managedPid()
-    return { reachable, managed: pid !== undefined, pid, url: this.#opencodeUrl }
+    return { reachable, managed: pid !== undefined, onDemand: this.#opencodeOnDemand, pid, url: this.#opencodeUrl }
   }
 
   async startOpencode(): Promise<OpsResult> {

@@ -6,6 +6,8 @@ export function startupNoticeText(opts: {
   username?: string
   version: string
   opencodeOk: boolean
+  /** On-demand mode: "not running" at boot is the normal state, not a fault. */
+  onDemand?: boolean
   timezone: string
   channel?: "telegram" | "feishu"
 }): string {
@@ -13,7 +15,9 @@ export function startupNoticeText(opts: {
   const who = opts.username ? ` @${opts.username}` : ""
   const opencode = opts.opencodeOk
     ? "OpenCode 服务：✅ 可达"
-    : feishu
+    : opts.onDemand
+      ? "OpenCode 服务：⏸ 按需启动（首条 OpenCode 任务会自动拉起）"
+      : feishu
       ? "OpenCode 服务：❌ 不可达（运行 npm run serve，或在这里发送 /service opencode start）"
       : "OpenCode 服务：❌ 不可达（运行 npm run serve，或在 Telegram 里发送 /service opencode start）"
   return [

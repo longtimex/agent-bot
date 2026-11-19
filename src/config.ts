@@ -30,6 +30,10 @@ export interface BotConfig {
     username: string
     password?: string
     agent?: string
+    /** Start the local server on the first task and stop it after `idleStopMs` without one. */
+    onDemand: boolean
+    /** 0 disables the idle stop; the server then stays up once started. */
+    idleStopMs: number
   }
   taskTimeoutMs: number
   /**
@@ -220,6 +224,20 @@ function strictBool(name: string, value: string | undefined, fallback: boolean):
   throw new StartupConfigError(
     `拒绝启动：${name} 必须是 1、0、true、false、yes、no、on 或 off（当前为 ${value.trim()}）。`,
   )
+}
+
+/**
+ * `OPENCODE_ON_DEMAND=0` keeps the previous always-on behaviour. Shared with `bot start`,
+ * which must not pre-start a server the bot is about to manage on demand.
+ */
+export function opencodeOnDemand(env: NodeJS.ProcessEnv): boolean {
+  return bool(env.OPENCODE_ON_DEMAND, true)
+}
+
+/** Idle window before the local server is stopped; 0 disables the idle stop. */
+export function opencodeIdleStopMs(env: NodeJS.ProcessEnv): number {
+  const raw = Number((env.OPENCODE_IDLE_STOP_MS ?? "").trim())
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 10 * 60_000
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -434,6 +452,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       username: pick(env.OPENCODE_SERVER_USERNAME) ?? "opencode",
       password: pick(env.OPENCODE_SERVER_PASSWORD),
       agent: pick(env.OPENCODE_AGENT) ?? "assistant",
+      onDemand: opencodeOnDemand(env),
+      idleStopMs: opencodeIdleStopMs(env),
     },
     taskTimeoutMs,
     taskMaxTimeoutMs,

@@ -253,7 +253,7 @@ export async function withApi(
       bytes: 10,
       text: `${source}-${lines}`,
     }),
-    opencodeStatus: async () => ({ reachable: true, managed: true, pid: 123, url: "http://127.0.0.1:4096" }),
+    opencodeStatus: async () => ({ reachable: true, managed: true, onDemand: false, pid: 123, url: "http://127.0.0.1:4096" }),
     runCheck: async () => ({
       ok: true,
       message: "检查通过。",
@@ -2179,9 +2179,18 @@ test("api manages custom models", async () => {
       body: JSON.stringify({ key: "my-test", providerID: "custom", modelID: "test-model", label: "测试模型" }),
     })
     assert.equal(added.status, 200)
-    const addedBody = (await added.json()) as { model: { key: string; label: string; providerID: string } }
+    const addedBody = (await added.json()) as {
+      model: { key: string; label: string; providerID: string }
+      providerUpdated: boolean
+      message: string
+    }
     assert.equal(addedBody.model.key, "my-test")
     assert.equal(addedBody.model.label, "测试模型")
+    // No opencode.json in this fixture, so nothing could be written. The App must say so:
+    // a bare "已添加" is what made an unusable model look ready.
+    assert.equal(addedBody.providerUpdated, false)
+    assert.match(addedBody.message, /未写入 opencode\.json/)
+    assert.match(addedBody.message, /baseURL/)
 
     const duplicate = await fetch(`${h.base}/api/v1/models/custom`, {
       method: "POST",
