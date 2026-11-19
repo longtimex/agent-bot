@@ -195,15 +195,16 @@ test("idleStopMs=0 keeps the server up, and onDemand=false disables the feature"
   }
 })
 
-test("a missing opencode binary is reported instead of crashing the process", async () => {
+test("a broken opencode binary is reported instead of crashing the process", async () => {
   // A failed spawn emits 'error' asynchronously; without a listener it used to take the
   // whole bot down — the one moment it must not, because the engine is already broken.
+  // The failure differs by platform: Windows cannot spawn the script at all (the 'error'
+  // path), while POSIX execvp falls back to /bin/sh, which exits 1 (the health path).
   const { startOpencode } = await import("../src/runtime.js")
   const dir = mkdtempSync(join(tmpdir(), "bot-opencode-start-"))
   try {
-    // A file that passes the `which` check but cannot be executed, on either platform
     const broken = join(dir, "broken-opencode")
-    writeFileSync(broken, "not an executable\n", { mode: 0o755 })
+    writeFileSync(broken, "#!/bin/sh\nexit 1\n", { mode: 0o755 })
     const result = await startOpencode(
       {
         projectDir: dir,
@@ -219,7 +220,7 @@ test("a missing opencode binary is reported instead of crashing the process", as
       { ...process.env, OPENCODE_BIN: broken, OPENCODE_URL: "http://127.0.0.1:4099" },
     )
     assert.equal(result.ok, false)
-    assert.match(result.message, /OpenCode 启动失败/)
+    assert.match(result.message, /OpenCode (启动失败|已启动)/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
