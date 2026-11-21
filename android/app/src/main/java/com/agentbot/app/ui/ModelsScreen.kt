@@ -434,9 +434,7 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
     LaunchedEffect(Unit) {
         vm.resetModelTest()
         // A previous attempt must not colour this one
-        vm.modelDraftRejected = false
-        vm.modelActionError = null
-        vm.agentModelError = null
+        vm.resetModelDraft()
     }
     val testing = vm.modelTesting
     val result = vm.modelTestResult

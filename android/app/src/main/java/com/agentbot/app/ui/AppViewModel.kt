@@ -1216,6 +1216,13 @@ class AppViewModel(
     var modelTesting by mutableStateOf(false)
         private set
 
+    /** Clears a previous rejection so a reopened dialog starts clean. */
+    fun resetModelDraft() {
+        modelDraftRejected = false
+        modelActionError = null
+        agentModelError = null
+    }
+
     fun resetModelTest() {
         modelTestResult = null
         modelTesting = false

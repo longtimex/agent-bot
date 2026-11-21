@@ -160,7 +160,6 @@ fun OpsScreen(vm: AppViewModel) {
 @Composable
 private fun OpsActionsCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
     val busy = vm.opsActionBusy != null
-    var editingUrl by remember { mutableStateOf(false) }
     AppCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             SectionHeader(title = "项目维护")
@@ -214,6 +213,7 @@ private fun ServiceCard(
     onConfirm: (String, String) -> Unit,
 ) {
     val busy = vm.opsActionBusy != null
+    var editingUrl by remember { mutableStateOf(false) }
     AppCard {
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
