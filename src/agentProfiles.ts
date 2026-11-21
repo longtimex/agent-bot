@@ -59,8 +59,9 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     sessionMode: "capture",
     parse: "codex-jsonl",
     supportsModel: true,
-    modelHint: "按当前 Codex 账号动态查询",
-    modelProbe: { args: ["debug", "models"], format: "json" },
+    // No probe on purpose: `codex debug models` lists the vendor catalogue, not what this
+    // installation can reach. The config file and its provider's /models are authoritative.
+    modelHint: "读取 ~/.codex/config.toml 与其 provider 的模型列表",
     args: {
       base: ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"],
       resumeBase: [

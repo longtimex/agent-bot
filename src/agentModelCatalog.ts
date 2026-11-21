@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import { spawn, type ChildProcess } from "node:child_process"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
@@ -12,6 +9,7 @@ import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { terminateProcess } from "./childKill.js"
 import type { Logger } from "./logger.js"
 import { clipTail } from "./messages.js"
+import { fetchProviderModels, readCodexConfig } from "./codexConfig.js"
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000
 const DEFAULT_CACHE_TTL_MS = 60_000
@@ -408,38 +406,54 @@ export class AgentModelCatalog {
   }
 
   /**
-   * Models a CLI declares in its own config file. `codex debug models` lists the vendor
-   * catalogue, which never includes a model the operator pointed at a relay — that name only
-   * exists in `~/.codex/config.toml`, so a probe alone would hide the one model in use.
+   * Codex knows its models two ways: the one named in `config.toml`, and whatever the
+   * configured provider reports on `/models`. `codex debug models` is deliberately not used —
+   * it lists the vendor catalogue, which has nothing to do with a relay setup.
    */
-  #configModels(profile: AgentCliProfile): Array<{ id: string; label: string; desc?: string }> {
-    if (profile.id !== "codex") return []
-    const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex")
-    let text: string
-    try {
-      text = readFileSync(join(home, "config.toml"), "utf8")
-    } catch {
-      return []
-    }
-    const found: Array<{ id: string; label: string; desc?: string }> = []
-    const push = (id: string, desc: string): void => {
+  async #codexModels(): Promise<AgentModelCatalogResult | undefined> {
+    const config = readCodexConfig()
+    if (!config) return undefined
+    const models: Array<{ id: string; label: string; desc?: string }> = []
+    // A name can come from the config and from several providers; keep every source so the
+    // list shows all the places that model is reachable from
+    const push = (id: string, label: string, desc: string): void => {
       const value = id.trim()
-      if (!value || found.some((entry) => entry.id === value)) return
-      found.push({ id: value, label: value, desc })
+      if (!value) return
+      const existing = models.find((entry) => entry.id === value)
+      if (existing) {
+        const sources = new Set((existing.desc ?? "").split(" · ").filter(Boolean))
+        if (!sources.has(desc)) existing.desc = [...sources, desc].join(" · ")
+        return
+      }
+      models.push({ id: value, label: label || value, desc })
     }
-    const active = /^\s*model\s*=\s*"([^"]+)"/m.exec(text)
-    if (active?.[1]) push(active[1], "来自 codex config.toml")
-    // A named profile carries its own model; those are selectable with `codex -p <name>`
-    for (const block of text.matchAll(/\[profiles\.([^\]]+)\]([\s\S]*?)(?=\n\[|$)/g)) {
-      const name = block[1]?.trim()
-      const model = /^\s*model\s*=\s*"([^"]+)"/m.exec(block[2] ?? "")
-      if (name && model?.[1]) push(model[1], `codex profile ${name}`)
+
+    // The configured model comes first: it is what the CLI actually runs with
+    if (config.model) push(config.model, config.model, "config.toml 当前模型")
+    for (const named of config.profiles) push(named.model, named.model, `profile ${named.name}`)
+
+    let remote = 0
+    for (const provider of config.providers) {
+      const ids = await fetchProviderModels(provider)
+      remote += ids.length
+      for (const id of ids) push(id, id, provider.name)
     }
-    return found
+    if (models.length === 0) return undefined
+
+    // Say where the list came from when the provider could not be asked
+    const hint = remote === 0 && config.providers.length > 0
+      ? `${config.providers.length} 个 provider 没有返回模型列表，以下来自 config.toml。`
+      : undefined
+    return { models, source: "configured", checkedAt: new Date(this.#now()).toISOString(), hint }
   }
 
   async #discover(profile: AgentCliProfile): Promise<AgentModelCatalogResult> {
     const binPath = this.#which(profile)
+    // A model list is only meaningful when the binary exists to run it with
+    if (profile.id === "codex" && binPath) {
+      const fromConfig = await this.#codexModels()
+      if (fromConfig) return fromConfig
+    }
     // A custom profile without a usable probe owns its explicit catalogue. This also
     // covers a profile that declares both while its binary is not installed on this host.
     // Built-in profiles have no such list anymore, so this never resurrects a stale builtin.
@@ -467,25 +481,12 @@ export class AgentModelCatalog {
         ? this.#run(profile, binPath, args, timeoutMs, this.#env())
         : runProbe(binPath, args, timeoutMs, this.#env()))
       const models = parseAgentModelOutput(result.stdout, profile.modelProbe.format)
-      const fromConfig = this.#configModels(profile)
-      const merged = models?.length
-        ? [...fromConfig.filter((entry) => !models.some((model) => model.id === entry.id)), ...models]
-        : models
-      if (merged?.length) {
-        this.#log?.info(`discovered ${merged.length} model(s) for ${profile.id} (${fromConfig.length} from config)`)
+      if (models?.length) {
+        this.#log?.info(`discovered ${models.length} model(s) for ${profile.id}`)
         // A full page means the CLI may have rows the panel cannot show; say so instead
         // of silently presenting a truncated list as the whole account catalogue.
-        const hint = merged.length >= MAX_MODELS ? `模型较多，仅列出前 ${MAX_MODELS} 个。` : undefined
-        return { models: merged, source: "probe", checkedAt: new Date(this.#now()).toISOString(), hint }
-      }
-      if (fromConfig.length > 0) {
-        // The probe failed but the config file named a model: that one is still usable
-        return {
-          models: fromConfig,
-          source: "configured",
-          checkedAt: new Date(this.#now()).toISOString(),
-          hint: `${profile.label} 的目录查询失败，以下模型来自其配置文件。`,
-        }
+        const hint = models.length >= MAX_MODELS ? `模型较多，仅列出前 ${MAX_MODELS} 个。` : undefined
+        return { models, source: "probe", checkedAt: new Date(this.#now()).toISOString(), hint }
       }
       const hint = models
         ? `${profile.label} 当前账号没有可用模型。`

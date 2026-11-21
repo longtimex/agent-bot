@@ -648,7 +648,7 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | --- | --- | --- | --- | --- |
 | `qoder` | Qoder CLI | `qoder` | 续接 | `qoder --list-models` |
 | `claude` | Claude Code | `claude` | 续接 | 无列表命令，模型 ID 透传 |
-| `codex` | Codex CLI | `codex` | 捕获续接 | `codex debug models` |
+| `codex` | Codex CLI | `codex` | 捕获续接 | 无列表命令，模型 ID 透传 |
 | `gemini` | Gemini CLI | `gemini` | 捕获续接 | `gemini --list-models --output-format json` |
 | `cursor` | Cursor Agent | `cursor-agent` | 捕获续接 | 无列表命令，模型 ID 透传 |
 | `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 无列表命令，模型 ID 透传 |
