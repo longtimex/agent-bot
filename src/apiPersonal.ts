@@ -710,7 +710,9 @@ export function builtinAgentView(): Record<string, unknown> {
     desc: "多模型、工具调用、附件收发",
     installed: Boolean(binPath),
     install: "npm install -g opencode-ai",
-    binPath,
+    // null rather than undefined: the App decodes this key, and a missing key fails the
+    // contract check on hosts where the binary is absent
+    binPath: binPath ?? null,
     sessionMode: "session",
     supportsModel: true,
     // OpenCode takes its provider block in opencode.json, not an env var
