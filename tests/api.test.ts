@@ -447,7 +447,8 @@ export async function withApi(
       managed.delete(engine)
       return { ok: true, message: `removed ${engine}` }
     },
-    // The built-in engine has no profile, so its removal follows its own path
+    // The built-in engine has no profile, so both directions follow their own path
+    installOpencode: async () => ({ ok: true, message: "installed opencode" }),
     uninstallOpencode: async (confirm: boolean) =>
       confirm
         ? { ok: true, message: "removed opencode" }

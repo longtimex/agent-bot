@@ -631,7 +631,11 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
       const installable = agents.find((agent) => agent.installable && !agent.installed)
       if (installable) {
         await call({ name: "agentAction install", method: "POST", path: `/agents/${installable.id}/install`, model: "AgentActionResult" })
-        await call({ name: "agentAction uninstall", method: "POST", path: `/agents/${installable.id}/uninstall`, model: "AgentActionResult" })
+        // The built-in engine refuses removal while it is the running one; api.test.ts covers
+        // that refusal, and switching engines here would change what later probes see
+        if (installable.id !== "opencode") {
+          await call({ name: "agentAction uninstall", method: "POST", path: `/agents/${installable.id}/uninstall`, model: "AgentActionResult" })
+        }
       } else {
         const updatable = agents.find((agent) => agent.updateable && agent.installed)
         if (updatable) await call({ name: "agentAction update", method: "POST", path: `/agents/${updatable.id}/update`, model: "AgentActionResult" })
