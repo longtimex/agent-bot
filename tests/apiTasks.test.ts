@@ -89,7 +89,14 @@ function makeFallbackManager(
     } as never,
     agents: {
       registry: {
-        get: (id: string) => (installed.includes(id) ? { id, label: id } : undefined),
+        // Same labels as list(): the real registry answers get() with the profile, not the id
+        get: (id: string) =>
+          installed.includes(id)
+            ? [
+                { id: "codex", label: "Codex CLI", bin: "codex" },
+                { id: "claude", label: "Claude Code", bin: "claude" },
+              ].find((profile) => profile.id === id)
+            : undefined,
         resolveModel: () => undefined,
         modelLabel: (id: string) => id,
         label: (id: string) => id,
@@ -337,7 +344,8 @@ test("an unset engine falls back from a dead OpenCode to an installed CLI", asyn
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
     assert.equal(settled.engine, "codex")
-    assert.match(settled.engineNote ?? "", /OpenCode 不可用/)
+    // The note names the engine that answers; the reason stays in the log
+    assert.match(settled.engineNote ?? "", /本次使用 Codex CLI/)
     assert.deepEqual(manager.prompted, ["codex"], "the implicit OpenCode default was skipped")
     assert.equal(manager.view(settled).engineNote, settled.engineNote)
     assert.equal(new SessionStore(join(dir, "sessions.json"), log).getExplicitEngine("api:app"), undefined, "fallback must not be persisted")
@@ -358,7 +366,8 @@ test("a saved OpenCode model alone still allows the implicit default to fall bac
     const settled = manager.get(task.id)!
     assert.equal(settled.status, "done")
     assert.equal(settled.engine, "codex")
-    assert.match(settled.engineNote ?? "", /OpenCode 不可用/)
+    // The note names the engine that answers; the reason stays in the log
+    assert.match(settled.engineNote ?? "", /本次使用 Codex CLI/)
     assert.deepEqual(manager.prompted, ["codex"], "a model preference is not an engine choice")
     assert.equal(
       new SessionStore(join(dir, "sessions.json"), log).getExplicitEngine("api:app"),

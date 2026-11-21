@@ -60,6 +60,8 @@ interface Harness {
   dataDir: string
   cleanup: () => Promise<void>
   ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }>
+  /** Swaps what OpenCode reports for /config/providers. */
+  setLiveProviders: typeof liveProviders extends never ? never : (value: Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }>) => void
   installs: string[]
   notices: NoticeStore
   ccCalls: string[]
@@ -106,8 +108,11 @@ export async function withApi(
       promptImpl(key, engine, text, onProgress, signal),
   } as unknown as AgentCliService
   const ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }> = []
+  // What OpenCode reports for itself; tests can swap it before calling /models
+  let liveProviders: Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }> = []
   const oc = {
     health: async () => true,
+    providers: async () => liveProviders,
     deleteSession: async () => {},
     createSession: async () => `sess-${Math.random().toString(36).slice(2, 8)}`,
     inputCapabilities: async () => undefined,
@@ -559,6 +564,9 @@ export async function withApi(
       dataDir: dir,
       cleanup: () => api.stop(),
       ocCalls,
+      setLiveProviders: (value) => {
+        liveProviders = value
+      },
       installs,
       notices,
       ccCalls,
@@ -1871,17 +1879,15 @@ test("api lists the built-in OpenCode engine beside the CLIs", async () => {
     const rows = ((await listed.json()) as { agents: AgentRow[] }).agents
     const builtIn = rows.find((row) => row.id === "opencode")
     assert.ok(builtIn, "GET /agents must offer the engine that POST /agent accepts")
-    assert.equal(builtIn.installed, true)
-    // Installed and updated by the setup script, but removable once nothing runs on it
-    assert.equal(builtIn.installable, false)
+    // Measured, not assumed: the binary can be removed and put back
+    assert.equal(typeof builtIn.installed, "boolean")
+    assert.equal(builtIn.installable, !builtIn.installed)
     assert.equal(builtIn.updateable, false)
     assert.equal(builtIn.uninstallable, true)
     assert.ok(new Set(rows.map((row) => row.id)).size === rows.length, "engine ids must stay unique")
 
-    // Installing it is the setup script's job, and the route says so instead of 404-ing
-    const refused = await fetch(`${h.base}/api/v1/agents/opencode/install`, { method: "POST", headers: authHeaders() })
-    assert.equal(refused.status, 400)
-    assert.match(((await refused.json()) as { error: string }).error, /install-cc-switch/)
+    // The install route is deliberately not driven here: with the binary absent it would run
+    // a real `npm install -g opencode-ai`. installable above already asserts the intent.
 
     // The point of listing it: a session on a CLI engine can be handed back
     const switchTo = async (engine: string): Promise<string> => {
@@ -4736,5 +4742,57 @@ test("api can switch to a hand-added model that discovery does not know", async 
     })
     assert.equal(switched.status, 200, "a listed model must also be switchable")
     assert.match(((await switched.json()) as { message: string }).message, /Relay Model/)
+  })
+})
+
+test("api lists the models OpenCode itself knows beside the custom ones", async () => {
+  await withApi(async () => "ok", async (h) => {
+    h.setLiveProviders([
+      { id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }] },
+    ])
+    const res = await fetch(`${h.base}/api/v1/models?engine=opencode`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    // The server nests the payload: { models: { engine, models: [...] } }
+    const body = (await res.json()) as { models: { models: Array<{ key: string; label?: string }> } }
+    const entry = body.models.models.find((model) => model.key === "anthropic/claude-sonnet-4")
+    assert.ok(entry, "a model OpenCode reports must appear in the panel")
+    assert.equal(entry?.label, "Claude Sonnet 4")
+  })
+})
+
+test("api saves the OpenCode service address and reports what is running", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const saved = await fetch(`${h.base}/api/v1/settings`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ opencodeUrl: "http://127.0.0.1:5000" }),
+    })
+    assert.equal(saved.status, 200)
+    const body = (await saved.json()) as { opencodeUrl: string | null; opencodeUrlEffective: string }
+    assert.equal(body.opencodeUrl, "http://127.0.0.1:5000")
+    // The running server keeps dialling its start-up address until the bot restarts;
+    // reporting the new value here would claim a change that has not happened yet
+    assert.equal(body.opencodeUrlEffective, "http://127.0.0.1:1")
+
+    const read = await fetch(`${h.base}/api/v1/settings`, { headers: authHeaders() })
+    assert.equal(((await read.json()) as { opencodeUrl: string | null }).opencodeUrl, "http://127.0.0.1:5000")
+
+    const cleared = await fetch(`${h.base}/api/v1/settings`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ opencodeUrl: null }),
+    })
+    assert.equal(((await cleared.json()) as { opencodeUrl: string | null }).opencodeUrl, null)
+  })
+})
+
+test("api rejects a service address that is not http", async () => {
+  await withApi(async () => "ok", async (h) => {
+    const res = await fetch(`${h.base}/api/v1/settings`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ opencodeUrl: "127.0.0.1:4096" }),
+    })
+    assert.equal(res.status, 400)
   })
 })

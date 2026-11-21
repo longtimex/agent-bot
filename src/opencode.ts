@@ -222,6 +222,33 @@ export class Opencode {
     }
   }
 
+  /**
+   * Providers and their models as OpenCode itself sees them, including the built-in ones.
+   * Returns an empty list when the server is unreachable: a model list must never fail the
+   * page it feeds.
+   */
+  async providers(): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }>> {
+    try {
+      const body = await this.#request<{
+        providers?: Array<{ id?: string; name?: string; models?: Record<string, { name?: string }> | string[] }>
+      }>("GET", "/config/providers", undefined, 8_000)
+      const list = Array.isArray(body?.providers) ? body.providers : []
+      return list.flatMap((provider) => {
+        const id = typeof provider.id === "string" ? provider.id : ""
+        if (!id) return []
+        const models = Array.isArray(provider.models)
+          ? provider.models.map((modelID) => ({ id: modelID }))
+          : Object.entries(provider.models ?? {}).map(([modelID, spec]) => ({
+              id: modelID,
+              name: typeof spec?.name === "string" ? spec.name : undefined,
+            }))
+        return [{ id, name: typeof provider.name === "string" ? provider.name : id, models }]
+      })
+    } catch {
+      return []
+    }
+  }
+
   async createSession(title: string): Promise<string> {
     const session = await this.#request<{ id?: string }>("POST", "/session", { title }, CONTROL_TIMEOUT_MS)
     if (!session?.id) throw new OpencodeError("创建会话失败：OpenCode 没有返回会话 ID")

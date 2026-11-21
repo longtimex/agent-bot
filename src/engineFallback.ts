@@ -58,7 +58,7 @@ export interface UsableEngineInput {
 
 export interface UsableEngine {
   engine: string
-  /** Set only when the engine was replaced, so callers can say so once. */
+  /** Set only when the engine was replaced; names the engine that answers, not why. */
   note?: string
 }
 
@@ -70,12 +70,14 @@ export async function resolveUsableEngine(input: UsableEngineInput): Promise<Usa
     if (await input.opencodeHealthy()) return { engine }
     const fallback = pickInstalledEngine(registry, engine)
     if (!fallback) return { engine }
-    return { engine: fallback, note: `OpenCode 不可用（未安装或未运行），本次自动使用 ${registry.label(fallback)}` }
+    // The reason belongs in the log, not in the answer: the reader only needs to know
+    // which engine is answering them. The profile label reads better than the bare id.
+    return { engine: fallback, note: `本次使用 ${registry.get(fallback)?.label ?? registry.label(fallback)}` }
   }
 
   const profile = registry.get(engine)
   if (profile && registry.binPath(profile)) return { engine }
   const fallback = pickInstalledEngine(registry, engine)
   if (!fallback) return { engine }
-  return { engine: fallback, note: `${profile?.label ?? engine} 不可用，本次自动使用 ${registry.label(fallback)}` }
+  return { engine: fallback, note: `本次使用 ${registry.get(fallback)?.label ?? registry.label(fallback)}` }
 }

@@ -677,10 +677,16 @@ test("model actions report their outcome on the model page", () => {
   }
 
   assert.match(screen, /PageErrorNotice\(\s*message = vm\.modelActionError/, "the model page needs a visible action error")
+  // Both engines record failures in their own field; the dialog must read the right one
   assert.match(
     screen,
-    /vm\.modelActionError\?\.takeIf \{ vm\.modelDraftRejected \}\?\.let \{/,
-    "the add dialog must show a validation reason where it cannot be covered",
+    /val formError = \(if \(isRegistry\) vm\.modelActionError else vm\.agentModelError\)/,
+    "the add dialog must show a validation reason for the engine it edits",
+  )
+  assert.match(
+    screen,
+    /if \(ok\) onDismiss\(\)/,
+    "only a successful add may close the dialog, otherwise the reason disappears with it",
   )
   const fullAdd = /fun addCustomModelFull\([\s\S]*?\n    \}/.exec(viewModel)?.[0]
   assert.ok(fullAdd, "the structured form needs its own action so its feedback can be checked")

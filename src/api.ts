@@ -103,6 +103,8 @@ export interface ApiServerOptions {
   accounts?: AccountStore
   notices?: NoticeStore
   settings?: SettingsStore
+  /** The OpenCode address this process dials; saved settings apply on the next start. */
+  opencodeUrlEffective?: string
   customModels: AgentCustomModelStore
   providers: AgentProviderStore
   /** Telegram access whitelist, mutated with the same lockout guards as `/access`. */
@@ -890,6 +892,8 @@ export class ApiServer {
       accounts: this.#opts.accounts,
       notices: this.#opts.notices,
       settings: this.#opts.settings,
+      opencodeUrlEffective: this.#opts.opencodeUrlEffective,
+      oc: this.#opts.oc,
       customModels: this.#opts.customModels,
       ops: this.#opts.ops,
       proxies: this.#opts.proxies,

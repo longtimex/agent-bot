@@ -1,5 +1,6 @@
 import type { AgentCliProfile, AgentCliService } from "./agentCli.js"
 import type { AgentCliInstaller } from "./agentInstaller.js"
+import { whichSync } from "./agentCli.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { redactSecrets } from "./ccswitch.js"
 import type { Logger } from "./logger.js"
@@ -33,8 +34,29 @@ export class ApiAgentActions {
     const profile = engine && engine !== "opencode" ? this.#deps.agents.registry.get(engine) : undefined
     // The built-in engine has no profile, but its npm package can still be removed
     if (engine === "opencode") {
-      if (action !== "uninstall") {
-        throw new ApiError(400, "OpenCode 由安装脚本负责：bash scripts/install-cc-switch.sh")
+      if (action !== "uninstall" && action !== "install") {
+        throw new ApiError(400, "OpenCode 只支持安装与卸载，其余由安装脚本负责：bash scripts/install-cc-switch.sh")
+      }
+      if (action === "install") {
+        const installerBin = this.#deps.installer
+        if (!installerBin) throw new ApiError(409, "当前运行环境不支持安装管理")
+        const existing = whichSync("opencode")
+        if (existing) throw new ApiError(409, `OpenCode 已安装：${existing}`)
+        if (this.#running) throw new ApiError(409, "已有安装/卸载任务在执行，请稍后再试")
+        this.#running = true
+        try {
+          const result = await installerBin.installOpencode()
+          this.#deps.log.info(`api agent install opencode: ${result.ok ? "ok" : "failed"}`)
+          this.#deps.json(ctx.res, 200, {
+            ok: result.ok,
+            message: redactSecrets(result.message),
+            output: result.output ? redactSecrets(result.output).slice(-20_000) : undefined,
+            needsConfirm: false,
+          })
+        } finally {
+          this.#running = false
+        }
+        return
       }
       if (this.#deps.store.getEngine(this.#deps.appKey) === "opencode") {
         throw new ApiError(409, "当前正在使用 OpenCode，请先切换到其他引擎再卸载")

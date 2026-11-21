@@ -11,6 +11,8 @@ import type { Logger } from "./logger.js"
 export interface Settings {
   /** Engine for a key with no explicit choice; absent means "the first one installed". */
   defaultEngine?: string
+  /** Where the OpenCode server listens; absent means "whatever OPENCODE_URL says". */
+  opencodeUrl?: string
 }
 
 export class SettingsStore {
@@ -26,6 +28,18 @@ export class SettingsStore {
     return this.#load().defaultEngine
   }
 
+  get opencodeUrl(): string | undefined {
+    return this.#load().opencodeUrl
+  }
+
+  /** Passing undefined restores the address from OPENCODE_URL. */
+  setOpencodeUrl(url: string | undefined): void {
+    const next: Settings = { ...this.#load() }
+    if (url) next.opencodeUrl = url
+    else delete next.opencodeUrl
+    writePrivateAtomic(this.#path, `${JSON.stringify(next, null, 2)}\n`)
+  }
+
   /** Passing undefined clears the choice and falls back to "first installed". */
   setDefaultEngine(engine: string | undefined): void {
     const next: Settings = { ...this.#load() }
@@ -38,6 +52,7 @@ export class SettingsStore {
     const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
     return {
       defaultEngine: typeof raw?.defaultEngine === "string" && raw.defaultEngine ? raw.defaultEngine : undefined,
+      opencodeUrl: typeof raw?.opencodeUrl === "string" && raw.opencodeUrl ? raw.opencodeUrl : undefined,
     }
   }
 }

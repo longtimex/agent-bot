@@ -13,6 +13,7 @@ import { APP_CHAT_ID, type NoticeStore } from "./appNotices.js"
 import type { SettingsStore } from "./settings.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
 import { supportsRelay } from "./agentProviders.js"
+import { whichSync } from "./agentCli.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -64,6 +65,10 @@ export interface PersonalRouteDeps {
   accounts?: AccountStore
   notices?: NoticeStore
   settings?: SettingsStore
+  /** The OpenCode address this process dials; a saved setting needs a restart. */
+  opencodeUrlEffective?: string
+  /** Only used to list the models OpenCode itself knows about. */
+  oc?: { providers(): Promise<Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }>> }
   customModels?: AgentCustomModelStore
   ops?: OpsService
   proxies?: ProxyService
@@ -697,12 +702,15 @@ export function customModelView(key: string, entry: ModelInfo): Record<string, u
 }
 
 export function builtinAgentView(): Record<string, unknown> {
+  // The binary is removable (npm uninstall -g opencode-ai), so "installed" cannot be a constant
+  const binPath = whichSync("opencode")
   return {
     id: "opencode",
     label: "OpenCode",
     desc: "多模型、工具调用、附件收发",
-    installed: true,
-    install: undefined,
+    installed: Boolean(binPath),
+    install: "npm install -g opencode-ai",
+    binPath,
     sessionMode: "session",
     supportsModel: true,
     // OpenCode takes its provider block in opencode.json, not an env var
@@ -713,7 +721,8 @@ export function builtinAgentView(): Record<string, unknown> {
     skipPermissions: false,
     safeMode: false,
     managed: false,
-    installable: false,
+    // Removed binaries can be put back from the App; updates stay the setup script's job
+    installable: !binPath,
     updateable: false,
     // Removable, but always behind a confirmation: it is the engine the bot itself runs on
     uninstallable: true,
@@ -795,7 +804,23 @@ export async function modelsView(
   if (engine === "opencode") {
     const custom = deps.models.listCustomModels()
     const models = Object.entries(custom).map(([key, info]) => ({ key, ...info }))
-    return { engine, models }
+    // OpenCode knows its own providers; listing them means "which models do I have" is
+    // answered by the panel instead of memory. A down server just contributes nothing.
+    // An older harness or a partial stub may not implement it; that must not fail the page
+    const live = typeof deps.oc?.providers === "function" ? await deps.oc.providers() : []
+    const known = new Set(Object.values(custom).map((info) => `${info.providerID}/${info.modelID}`))
+    const extra = live.flatMap((provider) =>
+      provider.models
+        .filter((model) => !known.has(`${provider.id}/${model.id}`))
+        .map((model) => ({
+          key: `${provider.id}/${model.id}`,
+          providerID: provider.id,
+          modelID: model.id,
+          label: model.name ?? model.id,
+          desc: provider.name,
+        })),
+    )
+    return { engine, models: [...models, ...extra] }
   }
   const profile = deps.registry.get(engine)
   if (!profile) throw new ApiError(400, `未知的 Agent 引擎：${engine}`)

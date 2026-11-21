@@ -111,13 +111,19 @@ async function main(): Promise<void> {
   pruneFiles()
   const pruneTimer = setInterval(pruneFiles, 24 * 60 * 60 * 1000).unref()
 
+  // Read before the supervisor so both ends agree on the address a saved setting names
+  const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
+
   // A bot that mostly answers on CLI engines should not keep a resident OpenCode server.
   // Stopping it is safe: sessions are persisted on disk, so the next task picks up where
   // the chat left off.
   configureOpencodeSupervisor(
     new OpencodeSupervisor({
       paths: runtimePaths(process.cwd(), process.env),
-      env: process.env,
+      // The supervisor launches the server, so it needs the same address the client dials
+      env: settings.opencodeUrl
+        ? { ...process.env, OPENCODE_URL: settings.opencodeUrl }
+        : process.env,
       log,
       onDemand: cfg.opencode.onDemand,
       idleStopMs: cfg.opencode.idleStopMs,
@@ -140,7 +146,12 @@ async function main(): Promise<void> {
       }, 60_000).unref()
     : undefined
 
-  const oc = new Opencode(cfg.opencode.url, cfg.opencode.username, cfg.opencode.password)
+  const effectiveOpencodeUrl = settings.opencodeUrl ?? cfg.opencode.url
+  const oc = new Opencode(
+    effectiveOpencodeUrl,
+    cfg.opencode.username,
+    cfg.opencode.password,
+  )
   if (await oc.health()) {
     log.info(`opencode server reachable at ${cfg.opencode.url}`)
   } else if (cfg.opencode.onDemand) {
@@ -152,7 +163,6 @@ async function main(): Promise<void> {
 
   const proxies = new ProxyService(resolve(cfg.dataDir, "proxies.json"), log)
   const agentRegistry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
-  const settings = new SettingsStore(resolve(cfg.dataDir, "settings.json"), log)
   const customModels = new AgentCustomModelStore(
     resolve(cfg.dataDir, "agent-custom-models.json"),
     resolve(cfg.dataDir, "accounts.key"),

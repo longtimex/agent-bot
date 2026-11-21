@@ -398,6 +398,30 @@ export class AgentCliInstaller {
   }
 
   /**
+   * The other half of [uninstallOpencode]: after a removal the App must be able to put the
+   * binary back, otherwise the only recovery is a shell command.
+   */
+  async installOpencode(): Promise<AgentActionResult> {
+    if (this.#busy) return { ok: false, message: "已有安装或卸载任务正在进行，请稍后再试。" }
+    const runner = this.#runnerFor("npm", "opencode-ai", false, [])
+    if (!runner) return { ok: false, message: "未找到 npm，无法安装。" }
+
+    this.#busy = true
+    this.#log.info(`installing opencode via ${runner.display} ${runner.args.join(" ")}`)
+    try {
+      const result = await this.#run(runner.path, runner.args, this.#env())
+      const output = this.#formatOutput(result)
+      if (result.code !== 0) {
+        const reason = result.timedOut ? "安装超时" : `安装命令退出码 ${result.code ?? "null"}`
+        return { ok: false, message: `安装 OpenCode ${reason}。`, output }
+      }
+      return { ok: true, message: "已安装 OpenCode。", output }
+    } finally {
+      this.#busy = false
+    }
+  }
+
+  /**
    * OpenCode is the built-in engine, so it has no CLI profile and never reaches [uninstall],
    * but its binary still comes from npm and an operator who switched to a CLI engine may want
    * it gone. Removal is always confirmed, and the caller checks nobody is running on it.

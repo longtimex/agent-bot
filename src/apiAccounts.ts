@@ -143,24 +143,59 @@ export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestCont
   if (!settings) throw new ApiError(409, "当前运行环境不支持该设置")
   const effective = resolveDefaultEngine(deps.registry, settings.defaultEngine, deps.cfg.defaultEngine)
   if (ctx.method === "GET") {
-    deps.json(ctx.res, 200, { defaultEngine: settings.defaultEngine ?? null, effective })
+    deps.json(ctx.res, 200, {
+      defaultEngine: settings.defaultEngine ?? null,
+      effective,
+      opencodeUrl: settings.opencodeUrl ?? null,
+      // What the running server actually dials; a saved value only lands after a restart
+      opencodeUrlEffective: deps.opencodeUrlEffective ?? deps.cfg.opencode.url,
+    })
     return
   }
   if (ctx.method === "POST") {
     const body = await deps.readJsonBody(ctx.req)
-    if (body.defaultEngine === null) {
-      settings.setDefaultEngine(undefined)
-    } else if (typeof body.defaultEngine === "string" && body.defaultEngine.trim()) {
-      const requested = body.defaultEngine.trim()
-      // opencode is built in and has no CLI profile, so it never resolves through the registry
-      const resolved = requested.toLowerCase() === "opencode" ? "opencode" : deps.registry.resolve(requested)
-      if (!resolved) throw new ApiError(400, `未知的 Agent 引擎：${requested}`)
-      settings.setDefaultEngine(resolved)
-    } else {
-      throw new ApiError(400, "缺少 defaultEngine 字段，例如：{\"defaultEngine\":\"codex\"}")
+    let touched = false
+
+    if (body.defaultEngine !== undefined) {
+      if (body.defaultEngine === null) {
+        settings.setDefaultEngine(undefined)
+      } else if (typeof body.defaultEngine === "string" && body.defaultEngine.trim()) {
+        const requested = body.defaultEngine.trim()
+        // opencode is built in and has no CLI profile, so it never resolves through the registry
+        const resolved = requested.toLowerCase() === "opencode" ? "opencode" : deps.registry.resolve(requested)
+        if (!resolved) throw new ApiError(400, `未知的 Agent 引擎：${requested}`)
+        settings.setDefaultEngine(resolved)
+      } else {
+        throw new ApiError(400, "defaultEngine 需要引擎名，或用 null 恢复自动选择")
+      }
+      touched = true
     }
+
+    if (body.opencodeUrl !== undefined) {
+      if (body.opencodeUrl === null) {
+        settings.setOpencodeUrl(undefined)
+      } else if (typeof body.opencodeUrl === "string" && body.opencodeUrl.trim()) {
+        const url = body.opencodeUrl.trim().replace(/\/+$/, "")
+        if (!/^https?:\/\/[^\s]+$/i.test(url)) throw new ApiError(400, "服务地址需要以 http:// 或 https:// 开头")
+        settings.setOpencodeUrl(url)
+      } else {
+        throw new ApiError(400, "opencodeUrl 需要地址，或用 null 恢复默认")
+      }
+      touched = true
+    }
+
+    if (!touched) throw new ApiError(400, "缺少字段，可用：defaultEngine、opencodeUrl")
+
     const next = resolveDefaultEngine(deps.registry, settings.defaultEngine, deps.cfg.defaultEngine)
-    deps.json(ctx.res, 200, { ok: true, defaultEngine: settings.defaultEngine ?? null, effective: next })
+    deps.json(ctx.res, 200, {
+      ok: true,
+      defaultEngine: settings.defaultEngine ?? null,
+      effective: next,
+      opencodeUrl: settings.opencodeUrl ?? null,
+      // A saved value only lands after a restart, so the effective address is the one the
+      // running process was built with — not what the file now says
+      opencodeUrlEffective: deps.opencodeUrlEffective ?? deps.cfg.opencode.url,
+    })
     return
   }
   throw new ApiError(404, "未知的设置 API 路径")
