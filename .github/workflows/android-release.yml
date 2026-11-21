@@ -35,7 +35,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Tests
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.log || {
+            # The job log needs admin rights to read; annotations do not. Surface the failing
+            # test names so a red build says which assertion broke.
+            grep -E "^not ok [0-9]+" test-output.log | head -8 | while IFS= read -r line; do
+              echo "::error title=failing test::$line"
+            done
+            exit 1
+          }
       - name: Build
         run: npm run build
 
