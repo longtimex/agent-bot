@@ -9,7 +9,8 @@ import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { terminateProcess } from "./childKill.js"
 import type { Logger } from "./logger.js"
 import { clipTail } from "./messages.js"
-import { fetchProviderModels, readCodexConfig } from "./codexConfig.js"
+import { readAgentConfig } from "./agentConfig.js"
+import { fetchProviderModels } from "./codexConfig.js"
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000
 const DEFAULT_CACHE_TTL_MS = 60_000
@@ -406,16 +407,17 @@ export class AgentModelCatalog {
   }
 
   /**
-   * Codex knows its models two ways: the one named in `config.toml`, and whatever the
-   * configured provider reports on `/models`. `codex debug models` is deliberately not used —
-   * it lists the vendor catalogue, which has nothing to do with a relay setup.
+   * Models the engine's own config names, plus whatever the endpoints it points at report.
+   * Every engine that keeps a config file goes through here — a CLI's "list models" command
+   * is not a substitute, because it describes the vendor, not the operator's setup.
    */
-  async #codexModels(): Promise<AgentModelCatalogResult | undefined> {
-    const config = readCodexConfig()
+  async #configModels(
+    engine: string,
+  ): Promise<{ models: Array<{ id: string; label: string; desc?: string }>; unreachable: number } | undefined> {
+    const config = readAgentConfig(engine)
     if (!config) return undefined
     const models: Array<{ id: string; label: string; desc?: string }> = []
-    // A name can come from the config and from several providers; keep every source so the
-    // list shows all the places that model is reachable from
+    // A name can come from the config and from several providers; keep every source
     const push = (id: string, label: string, desc: string): void => {
       const value = id.trim()
       if (!value) return
@@ -428,32 +430,19 @@ export class AgentModelCatalog {
       models.push({ id: value, label: label || value, desc })
     }
 
-    // The configured model comes first: it is what the CLI actually runs with
-    if (config.model) push(config.model, config.model, "config.toml 当前模型")
-    for (const named of config.profiles) push(named.model, named.model, `profile ${named.name}`)
-
-    let remote = 0
+    if (config.model) push(config.model, config.model, "配置文件当前模型")
+    for (const named of config.profiles ?? []) push(named.model, named.model, `profile ${named.name}`)
+    let unreachable = 0
     for (const provider of config.providers) {
       const ids = await fetchProviderModels(provider)
-      remote += ids.length
+      if (ids.length === 0) unreachable += 1
       for (const id of ids) push(id, id, provider.name)
     }
-    if (models.length === 0) return undefined
-
-    // Say where the list came from when the provider could not be asked
-    const hint = remote === 0 && config.providers.length > 0
-      ? `${config.providers.length} 个 provider 没有返回模型列表，以下来自 config.toml。`
-      : undefined
-    return { models, source: "configured", checkedAt: new Date(this.#now()).toISOString(), hint }
+    return models.length > 0 ? { models, unreachable } : undefined
   }
 
   async #discover(profile: AgentCliProfile): Promise<AgentModelCatalogResult> {
     const binPath = this.#which(profile)
-    // A model list is only meaningful when the binary exists to run it with
-    if (profile.id === "codex" && binPath) {
-      const fromConfig = await this.#codexModels()
-      if (fromConfig) return fromConfig
-    }
     // A custom profile without a usable probe owns its explicit catalogue. This also
     // covers a profile that declares both while its binary is not installed on this host.
     // Built-in profiles have no such list anymore, so this never resurrects a stale builtin.
@@ -474,26 +463,45 @@ export class AgentModelCatalog {
         hint: `未检测到 ${profile.bin}，安装后才能查询可用模型。`,
       }
     }
+    // The config names what this installation can actually reach, so it leads. A probe, when
+    // the profile has one, only fills in names the config does not mention.
+    const fromConfig = await this.#configModels(profile.id)
+    let fromProbe: Array<{ id: string; label: string; desc?: string }> | undefined
+    let probeFailure: string | undefined
     if (profile.modelProbe) {
       const args = profile.modelProbe.args
       const timeoutMs = profile.modelProbe.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
       const result = await (this.#run
         ? this.#run(profile, binPath, args, timeoutMs, this.#env())
         : runProbe(binPath, args, timeoutMs, this.#env()))
-      const models = parseAgentModelOutput(result.stdout, profile.modelProbe.format)
-      if (models?.length) {
-        this.#log?.info(`discovered ${models.length} model(s) for ${profile.id}`)
-        // A full page means the CLI may have rows the panel cannot show; say so instead
-        // of silently presenting a truncated list as the whole account catalogue.
-        const hint = models.length >= MAX_MODELS ? `模型较多，仅列出前 ${MAX_MODELS} 个。` : undefined
-        return { models, source: "probe", checkedAt: new Date(this.#now()).toISOString(), hint }
+      const parsed = parseAgentModelOutput(result.stdout, profile.modelProbe.format)
+      if (parsed?.length) fromProbe = parsed
+      else {
+        probeFailure = parsed ? `${profile.label} 当前账号没有可用模型。` : failureHint(result, profile.bin)
+        this.#log?.warn(`model discovery for ${profile.id} returned none: ${probeFailure}`)
       }
-      const hint = models
-        ? `${profile.label} 当前账号没有可用模型。`
-        : failureHint(result, profile.bin)
-      this.#log?.warn(`model discovery for ${profile.id} returned none: ${hint}`)
-      return { models: [], source: "probe", hint, checkedAt: new Date(this.#now()).toISOString() }
     }
+
+    const configModels = fromConfig?.models ?? []
+    const known = new Set(configModels.map((model) => model.id))
+    const models = [...configModels, ...(fromProbe ?? []).filter((model) => !known.has(model.id))]
+    if (models.length > 0) {
+      this.#log?.info(`discovered ${models.length} model(s) for ${profile.id} (${configModels.length} from config)`)
+      // Name the gap: without it a short list looks like the whole catalogue
+      const unreachable = fromConfig?.unreachable
+        ? `${fromConfig.unreachable} 个 provider 没有返回模型列表，以下来自配置文件。`
+        : undefined
+      const capped = models.length >= MAX_MODELS ? `模型较多，仅列出前 ${MAX_MODELS} 个。` : undefined
+      const hint = [unreachable, capped].filter(Boolean).join(" ") || undefined
+      return {
+        models,
+        source: configModels.length ? "configured" : "probe",
+        checkedAt: new Date(this.#now()).toISOString(),
+        hint,
+      }
+    }
+    if (probeFailure) return { models: [], source: "probe", hint: probeFailure, checkedAt: new Date(this.#now()).toISOString() }
+    if (fromConfig) return { models: [], source: "configured", hint: "配置文件里没有可用模型。" }
     return {
       models: [],
       source: "none",

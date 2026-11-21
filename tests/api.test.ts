@@ -82,6 +82,10 @@ export async function withApi(
   // without message encryption. The dedicated guard test removes the opt-in to check it.
   process.env.ALLOW_PLAINTEXT_SECRETS = "1"
   const dir = mkdtempSync(join(tmpdir(), "agent-bot-api-"))
+  // This machine's real agent configs hold live tokens and real model names. Every reader
+  // must look at the empty temp dir, otherwise a test asserts against someone's account.
+  process.env.CLAUDE_CONFIG_DIR = dir
+  process.env.GEMINI_CONFIG_DIR = dir
   const store = new SessionStore(join(dir, "sessions.json"), log)
   // The real store, keyed exactly as Telegram keys it, so per-session views are tested
   // against the shapes the App decodes rather than a stub that always answers zero.

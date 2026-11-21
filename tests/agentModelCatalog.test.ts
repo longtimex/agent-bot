@@ -183,3 +183,35 @@ test("two providers each contribute their own models, without duplicates", async
     second.close()
   }
 })
+
+test("a Claude config's model and relay are read the same way", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-claude-home-"))
+  writeFileSync(
+    join(dir, "settings.json"),
+    JSON.stringify({
+      model: "claude-sonnet-4-5",
+      env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:1/v1", ANTHROPIC_AUTH_TOKEN: "sk-claude" },
+    }),
+  )
+  const previous = process.env.CLAUDE_CONFIG_DIR
+  process.env.CLAUDE_CONFIG_DIR = dir
+  try {
+    const registry = {
+      get: (id: string) =>
+        id === "claude"
+          ? { id: "claude", label: "Claude Code", bin: "claude", supportsModel: true }
+          : undefined,
+      binPath: () => "/usr/bin/claude",
+    } as never
+    const catalog = new AgentModelCatalog(registry, { run: async () => ({ stdout: "", stderr: "", code: 1 }) })
+    const result = await catalog.list("claude")
+    assert.deepEqual(result.models.map((model) => model.id), ["claude-sonnet-4-5"])
+    assert.equal(result.source, "configured")
+    // The endpoint was unreachable, and the hint has to admit the list may be short
+    assert.match(result.hint ?? "", /provider/)
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
