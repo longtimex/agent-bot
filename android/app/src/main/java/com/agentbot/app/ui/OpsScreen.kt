@@ -48,6 +48,8 @@ fun OpsScreen(vm: AppViewModel) {
     val busyLabel = vm.opsActionBusy
 
     // `/restart`, `/update` and `/service opencode stop` typed in the chat box land here
+    LaunchedEffect(Unit) { vm.loadSettings() }
+
     LaunchedEffect(vm.opsConfirmRequested) {
         vm.opsConfirmRequested?.let {
             vm.clearOpsConfirmRequest()
@@ -158,6 +160,7 @@ fun OpsScreen(vm: AppViewModel) {
 @Composable
 private fun OpsActionsCard(vm: AppViewModel, onConfirm: (String, String) -> Unit) {
     val busy = vm.opsActionBusy != null
+    var editingUrl by remember { mutableStateOf(false) }
     AppCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             SectionHeader(title = "项目维护")
@@ -221,6 +224,13 @@ private fun ServiceCard(
                 )
             }
             InfoRow("地址", url ?: "—")
+            // Only the built-in engine is a client/server pair; a CLI runs per task
+            Text(
+                "仅 OpenCode 引擎使用该地址。Codex / Claude / Gemini / Qoder 是命令行程序，" +
+                    "每次任务启动一个进程，没有端口，也不需要启动或停止。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+            )
             InfoRow(
                 "托管",
                 when {
@@ -231,6 +241,12 @@ private fun ServiceCard(
                 },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton(
+                    text = "修改地址",
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy,
+                    onClick = { editingUrl = true },
+                )
                 if (!reachable) {
                     SecondaryButton(
                         text = "启动",
@@ -254,6 +270,22 @@ private fun ServiceCard(
                 )
             }
         }
+    }
+
+    if (editingUrl) {
+        TextPromptDialog(
+            title = "修改服务地址",
+            hint = "留空恢复默认（OPENCODE_URL）。保存后需重启 Bot 才生效；服务端与客户端会一起改。",
+            initial = vm.opencodeUrl ?: vm.opencodeUrlEffective,
+            confirmLabel = "保存",
+            placeholder = "http://127.0.0.1:4096",
+            maxLines = 1,
+            onDismiss = { editingUrl = false },
+            onConfirm = { input ->
+                vm.saveOpencodeUrl(input)
+                editingUrl = false
+            },
+        )
     }
 }
 

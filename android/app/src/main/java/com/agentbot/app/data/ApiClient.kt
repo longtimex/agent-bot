@@ -667,6 +667,15 @@ class ApiClient {
         return json.decodeFromJsonElement(ModelTestResult.serializer(), res)
     }
 
+    /** Saves the OpenCode service address; null restores the value from the environment. */
+    suspend fun setOpencodeUrl(connection: Connection, url: String?): SettingsView {
+        val body = buildJsonObject {
+            if (url == null) put("opencodeUrl", JsonNull) else put("opencodeUrl", url)
+        }
+        val res = send(connection, "POST", "/settings", body)
+        return json.decodeFromJsonElement(SettingsView.serializer(), res)
+    }
+
     // ---- per-engine relay ----
 
     suspend fun agentProvider(connection: Connection, engine: String): AgentProviderConfig? =

@@ -1202,6 +1202,8 @@ class AppViewModel(
                 val view = api.settings(conn())
                 defaultEngine = view.defaultEngine
                 effectiveDefaultEngine = view.effective
+                opencodeUrl = view.opencodeUrl
+                opencodeUrlEffective = view.opencodeUrlEffective
             } catch (_: Exception) {
                 // older server without /settings
             }
@@ -1328,13 +1330,18 @@ class AppViewModel(
         label: String,
         baseURL: String,
         apiKey: String,
+        onDone: (Boolean) -> Unit = {},
     ) {
-        if (engine == "opencode") return
+        if (engine == "opencode") {
+            onDone(false)
+            return
+        }
         guarded(
             "添加模型",
             onError = {
                 agentModelError = "添加失败：${it.message}"
                 modelDraftRejected = true
+                onDone(false)
             },
         ) {
             agentCustomModels = api.addAgentCustomModel(
@@ -1346,8 +1353,15 @@ class AppViewModel(
                 apiKey.trim().ifBlank { null },
             )
             agentModelError = null
-            toast = "已添加 $value"
+            val live = session?.engine
+            toast = if (live != null && live != engine) {
+                // Adding to another engine is legal, but it cannot answer until that engine runs
+                "已添加 $value（当前会话在 $live，切换后才能选用）"
+            } else {
+                "已添加 $value"
+            }
             refreshModels()
+            onDone(true)
         }
     }
 
@@ -1369,6 +1383,37 @@ class AppViewModel(
         guarded("删除自定义模型", onError = { agentModelError = "删除失败：${it.message}" }) {
             agentCustomModels = api.removeAgentCustomModel(conn(), engine, value)
             refreshModels(force = true)
+        }
+    }
+
+    /** Saved OpenCode service address, and what the running server actually dials. */
+    var opencodeUrl by mutableStateOf<String?>(null)
+        private set
+
+    var opencodeUrlEffective by mutableStateOf("")
+        private set
+
+    /** Reads the settings the ops card displays; failures are silent, the card falls back. */
+    fun loadSettings() {
+        viewModelScope.launch {
+            try {
+                val view = api.settings(conn())
+                defaultEngine = view.defaultEngine
+                effectiveDefaultEngine = view.effective
+                opencodeUrl = view.opencodeUrl
+                opencodeUrlEffective = view.opencodeUrlEffective
+            } catch (_: Exception) {
+                // older server without /settings
+            }
+        }
+    }
+
+    fun saveOpencodeUrl(url: String) {
+        guarded("保存服务地址", onError = { toast = "保存失败：${it.message}" }) {
+            val view = api.setOpencodeUrl(conn(), url.trim().ifBlank { null })
+            opencodeUrl = view.opencodeUrl
+            opencodeUrlEffective = view.opencodeUrlEffective
+            toast = "服务地址已保存，重启 Bot 后生效"
         }
     }
 
@@ -1413,12 +1458,14 @@ class AppViewModel(
         label: String,
         baseURL: String,
         apiKey: String,
+        onDone: (Boolean) -> Unit = {},
     ) {
         guarded(
             "添加模型",
             onError = {
                 modelActionError = it.message
                 modelDraftRejected = true
+                onDone(false)
             },
         ) {
             api.addCustomModel(
@@ -1432,7 +1479,13 @@ class AppViewModel(
             )
             modelDraftRejected = false
             refreshCustomModels()
-            toast = "已添加模型 $key"
+            val liveOpenCode = session?.engine
+            toast = if (liveOpenCode != null && liveOpenCode != "opencode") {
+                "已添加模型 $key（当前会话在 $liveOpenCode，切回 OpenCode 后才能选用）"
+            } else {
+                "已添加模型 $key"
+            }
+            onDone(true)
         }
     }
 

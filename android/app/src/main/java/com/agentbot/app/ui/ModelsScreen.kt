@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -77,6 +78,17 @@ fun ModelsScreen(vm: AppViewModel) {
         )
 
         EngineModelChips(vm)
+
+        // A model registered here is only reachable through OpenCode itself; saying so up front
+        // is the difference between "added but unusable" and knowing what to do next.
+        if (vm.agents.firstOrNull { it.id == "opencode" }?.installed == false) {
+            InlineNotice(
+                text = "OpenCode 未安装（或未运行），这里添加的模型无法使用。请先到「引擎管理」安装并启动 OpenCode。",
+                tone = MaterialTheme.colorScheme.error,
+                icon = Icons.Filled.Warning,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+        }
 
         if (vm.modelBusy || vm.customModelsBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
@@ -419,9 +431,18 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
     var label by remember { mutableStateOf("") }
     var baseURL by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { vm.resetModelTest() }
+    LaunchedEffect(Unit) {
+        vm.resetModelTest()
+        // A previous attempt must not colour this one
+        vm.modelDraftRejected = false
+        vm.modelActionError = null
+        vm.agentModelError = null
+    }
     val testing = vm.modelTesting
     val result = vm.modelTestResult
+    // Each engine records its failure in its own field; the dialog has to read the right one
+    val formError = (if (isRegistry) vm.modelActionError else vm.agentModelError)
+        ?.takeIf { vm.modelDraftRejected }
 
     AppDialog(
         onDismissRequest = onDismiss,
@@ -440,6 +461,13 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (isRegistry && vm.agents.firstOrNull { it.id == "opencode" }?.installed == false) {
+                    Text(
+                        "OpenCode 未安装：添加后不会生效，请先在引擎管理里安装并启动。",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
                 if (isRegistry) {
                     AppTextField(
                         value = providerID,
@@ -491,7 +519,7 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                     )
                 }
                 // A rejected add keeps the dialog open, so the reason belongs right here
-                vm.modelActionError?.takeIf { vm.modelDraftRejected }?.let {
+                formError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -505,9 +533,13 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                 TextButton(
                     onClick = {
                         if (isRegistry) {
-                            vm.addCustomModelFull(key, providerID, modelID, label, baseURL, apiKey)
+                            vm.addCustomModelFull(key, providerID, modelID, label, baseURL, apiKey) { ok ->
+                                if (ok) onDismiss()
+                            }
                         } else {
-                            vm.addAgentCustomModelFull(engine, modelID, label, baseURL, apiKey)
+                            vm.addAgentCustomModelFull(engine, modelID, label, baseURL, apiKey) { ok ->
+                                if (ok) onDismiss()
+                            }
                         }
                     },
                     enabled = (isRegistry && providerID.isNotBlank() || !isRegistry && modelID.isNotBlank()) &&

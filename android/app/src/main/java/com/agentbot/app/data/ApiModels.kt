@@ -122,6 +122,8 @@ data class AgentInfo(
     val supportsModel: Boolean? = null,
     /** True when this engine reads its endpoint from an env var, so a relay can be set here. */
     val relaySupported: Boolean = false,
+    /** Where the binary was found; null when it is not installed. */
+    val binPath: String? = null,
     val experimental: Boolean? = null,
     /** True when this CLI runs tools without asking; the engine list warns about it. */
     val skipPermissions: Boolean = false,
@@ -325,6 +327,10 @@ data class SettingsView(
     val defaultEngine: String? = null,
     /** The engine an unset key actually runs on. */
     val effective: String = "",
+    /** Saved OpenCode address; null means "whatever OPENCODE_URL says". */
+    val opencodeUrl: String? = null,
+    /** What the running server dials — a saved value only lands after a restart. */
+    val opencodeUrlEffective: String = "",
 )
 
 @Serializable
