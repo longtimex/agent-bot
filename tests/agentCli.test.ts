@@ -77,7 +77,9 @@ test("built-in profiles carry no hard-coded model catalogue", () => {
     assert.equal("defaultModel" in profileById(registry, id), false, `${id} still has a default model`)
   }
   assert.deepEqual(profileById(registry, "qoder").modelProbe, { args: ["--list-models"], format: "auto" })
-  assert.deepEqual(profileById(registry, "codex").modelProbe, { args: ["debug", "models"], format: "json" })
+  // Codex has no probe on purpose: `debug models` lists the vendor catalogue, which never
+  // includes a model the operator pointed at a relay. Its list comes from config.toml.
+  assert.equal(profileById(registry, "codex").modelProbe, undefined)
   assert.deepEqual(profileById(registry, "gemini").modelProbe, {
     args: ["--list-models", "--output-format", "json"],
     format: "json",
