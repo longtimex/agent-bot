@@ -23,8 +23,9 @@ test("an implicit opencode session falls back to an installed CLI", async () => 
     opencodeHealthy: down,
   })
   assert.equal(choice.engine, "codex")
-  assert.match(choice.note ?? "", /OpenCode 不可用/)
-  assert.match(choice.note ?? "", /codex/)
+  // The note names who answers; the reason stays in the log
+  assert.match(choice.note ?? "", /本次使用/)
+  assert.match(choice.note ?? "", /codex/i)
 })
 
 test("an explicit engine is never replaced, even when it cannot run", async () => {
@@ -56,7 +57,9 @@ test("an implicit CLI engine whose binary disappeared falls back to another one"
     opencodeHealthy: up,
   })
   assert.equal(choice.engine, "codex")
-  assert.match(choice.note ?? "", /qoder/)
+  // A fallback note names the replacement, not the engine that could not run
+  assert.match(choice.note ?? "", /本次使用/)
+  assert.match(choice.note ?? "", /codex/i)
 })
 
 test("an installed implicit CLI engine is left alone", async () => {
