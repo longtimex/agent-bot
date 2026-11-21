@@ -152,7 +152,15 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ env.SIGNING_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ env.SIGNING_KEY_PASSWORD }}
-        run: gradle assembleRelease --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon 2>&1 | tee gradle.log || {
+            # Kotlin errors are `e: file:///...`; without this the job log needs admin rights
+            grep -E "^e: |error: " gradle.log | head -10 | while IFS= read -r line; do
+              echo "::error title=build::$line"
+            done
+            exit 1
+          }
 
       - name: Verify APK signature
         env:
