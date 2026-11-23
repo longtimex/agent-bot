@@ -79,3 +79,25 @@ test("the vault and the relay store share one key and read each other's secrets"
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a missing key is never regenerated while encrypted data exists beside it", () => {
+  const dir = tempDir()
+  try {
+    const keyPath = join(dir, "accounts.key")
+    const vault = new AccountStore(join(dir, "accounts.json"), keyPath, log)
+    vault.add({ name: "GitHub", username: "me", password: "s3cret" })
+    // The key is lost (or a backup was restored without it)
+    rmSync(keyPath)
+
+    assert.throws(() => loadOrCreateSecretKey(keyPath), /从备份恢复 accounts\.key/)
+    const after = new AccountStore(join(dir, "accounts.json"), keyPath, log)
+    assert.throws(() => after.reveal("GitHub"), /从备份恢复/)
+    assert.throws(() => after.add({ name: "GitLab", username: "me", password: "s3cret" }), /从备份恢复/)
+    // Another store sharing the key must not create one either
+    const relays = new AgentProviderStore(join(dir, "agent-providers.json"), keyPath, log)
+    assert.throws(() => relays.set("claude", { baseURL: "https://relay.example", apiKey: "sk-x" }), /从备份恢复/)
+    assert.equal(readdirSync(dir).includes("accounts.key"), false, "no replacement key was written")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

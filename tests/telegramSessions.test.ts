@@ -50,7 +50,10 @@ test("/new parks the session and /sessions switches back to it", async () => {
     assert.equal(handled, true)
     assert.equal(h.store.getCliSession(key, "claude"), "first", "the old context is back")
     assert.match(sent[0] ?? "", /已切回会话/)
-    assert.equal(h.archive.list(key)[0]?.sessionID, "second", "the open session took its place")
+    const rows = h.archive.list(key)
+    assert.equal(rows.length, 2, "the resumed entry stays listed beside the one just left")
+    assert.ok(rows.some((r) => r.sessionID === "second"), "the open session was parked")
+    assert.match(h.commands.panel(key).text, /当前/)
   } finally {
     h.close()
   }
@@ -98,6 +101,34 @@ test("deleting an OpenCode history entry deletes its server session", async () =
     assert.equal(await h.commands.callback(`sesdel:${id}`, "tg:1", async () => {}, async () => {}, async () => {}), true)
     assert.deepEqual(h.deleted, ["ses_abc"])
     assert.equal(await h.commands.callback("snooze:abc:10", "tg:1", async () => {}, async () => {}, async () => {}), false)
+  } finally {
+    h.close()
+  }
+})
+
+test("/sessions renames by number, pins from the panel and searches titles", async () => {
+  const h = harness()
+  try {
+    const key = "tg:42"
+    h.store.setEngine(key, "claude")
+    for (const topic of ["周报", "发布计划"]) {
+      h.store.setCliSession(key, "claude", `s-${topic}`)
+      await h.commands.newSession(key, topic)
+    }
+    // Newest first: 1 is 发布计划, 2 is 周报
+    assert.match(h.commands.command(key, "rename 2 周报（终稿）").text, /已重命名为「周报（终稿）」/)
+    assert.match(h.commands.command(key, "rename 9 不存在").text, /没有第 9 个/)
+    const target = h.archive.list(key).find((entry) => entry.title === "周报（终稿）")
+    assert.ok(target)
+
+    assert.equal(await h.commands.callback(`sespin:${target.id}`, key, async () => {}, async () => {}, async () => {}), true)
+    assert.equal(h.archive.list(key)[0]?.id, target.id, "a pinned session is listed first")
+    assert.match(h.commands.panel(key).text, /📌 周报/)
+
+    const found = h.commands.command(key, "发布")
+    assert.match(found.text, /发布计划/)
+    assert.doesNotMatch(found.text, /周报/)
+    assert.match(h.commands.command(key, "不存在的词").text, /没有标题包含/)
   } finally {
     h.close()
   }

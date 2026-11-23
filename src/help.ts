@@ -44,7 +44,9 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/model\` - 查看或切换当前引擎的底层模型；\`/model default\` 取消本会话选择，之后由引擎自身配置决定
 • \`/dir\` - 查看本会话 CLI 工作目录；\`/dir <路径>\` 切换（支持 \`~\` 与相对路径），\`/dir reset\` 恢复默认
 • \`/new\` 或 \`/reset\` - 开启新会话，原会话存入历史
-• \`/sessions\` - 历史会话，切回后接着聊
+• \`/sessions\` - 历史会话，切回后接着聊；\`/sessions 关键词\` 搜索，\`/sessions rename 序号 名称\` 改名
+• \`/undo\` - 撤销上一次 CLI 任务对工作目录（git 仓库）的改动
+• \`/secrets\` - 查看 / 清除通过安全输入卡片保存的密钥（\`/secrets clear\`）；命令里的密钥写成 \`?\` 会弹出安全输入卡片
 • \`/stop\` - 立即停止当前正在执行的任务
 • \`/retry\` - 重新发送上一条任务
 • \`/queue\` - 查看或清空排队中的消息
@@ -238,7 +240,9 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "help", description: "分类帮助（/help full 查看全部）" },
   { command: "status", description: "查看运行状态" },
   { command: "new", description: "开启新会话（原会话存入历史，可切回）" },
-  { command: "sessions", description: "历史会话：切回之前的会话接着聊" },
+  { command: "sessions", description: "历史会话：切回、置顶、改名与搜索" },
+  { command: "undo", description: "撤销上一次 CLI 任务对工作目录的改动" },
+  { command: "secrets", description: "安全输入保存的密钥（/secrets clear 清除）" },
   { command: "agent", description: "查看或切换 Agent 引擎（推荐 OpenCode）" },
   { command: "model", description: "查看或切换大模型" },
   { command: "dir", description: "查看或切换本会话 CLI 工作目录" },
@@ -302,4 +306,12 @@ export function helpSections(): HelpSection[] {
     { id: "full", title: "完整说明", text: plainHelp(HELP_FULL) },
     { id: "cc", title: "cc-switch 指令", text: plainHelp(CC_HELP) },
   ]
+}
+
+/** /help, /help full|all, /help cc: one place, so the bridge keeps a single line for it. */
+export function helpFor(arg: string): string {
+  const which = arg.trim().toLowerCase()
+  if (which === "full" || which === "all") return HELP_FULL
+  if (which === "cc") return CC_HELP
+  return HELP
 }

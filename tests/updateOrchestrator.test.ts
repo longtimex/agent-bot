@@ -1,8 +1,11 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { OpsResult } from "../src/ops.js"
 import type { ReleaseManager, ReleaseRecord, ReleaseState, UpdateReport } from "../src/releaseManager.js"
-import { UpdateOrchestrator } from "../src/updateOrchestrator.js"
+import { keepEnvCopy, UpdateOrchestrator } from "../src/updateOrchestrator.js"
 
 interface Harness {
   updates: UpdateOrchestrator
@@ -145,4 +148,24 @@ test("cancel pending clears only the pending pointer and rollback swaps current/
   assert.equal(rollbackHarness.state().current?.id, "old")
   assert.equal(rollbackHarness.state().previous?.id, "pending")
   assert.equal(rollbackHarness.state().lastUpdate?.status, "rolled-back")
+})
+
+test("the pre-update backup keeps a private copy of .env beside its archive, pruned with it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-env-copy-"))
+  try {
+    writeFileSync(join(dir, ".env"), "TELEGRAM_BOT_TOKEN=123:abc\n")
+    const archive = join(dir, "backup-20260301-000000000-pre-update.tar.gz")
+    writeFileSync(archive, "tar")
+    writeFileSync(join(dir, "backup-20260101-000000000-pre-update.env"), "orphan")
+    const step = keepEnvCopy(dir, archive)
+    assert.equal(step.ok, true)
+    const copy = join(dir, "backup-20260301-000000000-pre-update.env")
+    assert.equal(readFileSync(copy, "utf8"), "TELEGRAM_BOT_TOKEN=123:abc\n")
+    if (process.platform !== "win32") assert.equal(statSync(copy).mode & 0o777, 0o600)
+    assert.equal(existsSync(join(dir, "backup-20260101-000000000-pre-update.env")), false, "a copy whose archive is gone is removed")
+    rmSync(join(dir, ".env"))
+    assert.match(keepEnvCopy(dir, archive).output, /没有 \.env/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import test from "node:test"
 import { loadConfig, StartupConfigError } from "../src/config.js"
 import { buildAttachmentSections } from "../src/attachmentInput.js"
-import { applyStt, transcribeAudio, type SttConfig } from "../src/stt.js"
+import { SttCancelled, applyStt, transcribeAudio, type SttConfig } from "../src/stt.js"
 import type { SavedAttachment } from "../src/attachments.js"
 
 const STT: SttConfig = { baseUrl: "https://stt.example/v1", apiKey: "sk-test", model: "whisper-1" }
@@ -126,4 +126,33 @@ test("loadConfig parses the STT block and rejects a bad base url", () => {
     language: "zh",
   })
   assert.throws(() => loadConfig({ ...base, STT_BASE_URL: "ftp://x" }), StartupConfigError)
+})
+
+test("a stopped task abandons transcription instead of waiting it out", async () => {
+  const controller = new AbortController()
+  let calls = 0
+  // A slow STT service: it only answers when its request is aborted
+  const slowFetch = (async (_url: unknown, init?: RequestInit) => {
+    calls += 1
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
+    })
+  }) as unknown as typeof fetch
+  const pending = applyStt([audioItem(), audioItem()], { stt: STT, modelCapabilities: { audio: false } }, {
+    fetchImpl: slowFetch,
+    openBlob: async () => new Blob([]),
+    signal: controller.signal,
+  })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  controller.abort()
+  await assert.rejects(pending, (err: unknown) => err instanceof SttCancelled && /已取消当前任务/.test((err as Error).message))
+  assert.equal(calls, 1, "the second voice note is never sent once the task is stopped")
+})
+
+test("an STT error page has secrets masked before it reaches the chat", async () => {
+  const leaky = fakeFetch("upstream said: Authorization: Bearer sk-abcdefghijklmnop", false, 502)
+  await assert.rejects(
+    transcribeAudio("/tmp/voice.ogg", STT, { fetchImpl: leaky.fetch, openBlob: async () => new Blob([]) }),
+    (err: unknown) => !/sk-abcdefghijklmnop/.test((err as Error).message),
+  )
 })

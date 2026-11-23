@@ -538,6 +538,7 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "deleteSchedule → DELETE /schedules/:id", method: "DELETE", path: `/schedules/${scheduleId}` },
         { name: "clearHistory → DELETE /history", method: "DELETE", path: "/history" },
         { name: "newSession → POST /new", method: "POST", path: "/new", body: { title: "契约探针会话" } },
+        { name: "undoChanges → POST /undo", method: "POST", path: "/undo" },
         { name: "followPeer → POST /peers/follow", method: "POST", path: "/peers/follow", body: { scope: "telegram" } },
         { name: "ccUse → POST /cc/use", method: "POST", path: "/cc/use", body: { id: "p1" }, model: "CcActionResult" },
         { name: "ccTest → POST /cc/test", method: "POST", path: "/cc/test", body: { id: "p1" }, model: "CcTestResult" },
@@ -606,6 +607,14 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
       const parkedId = ((parked?.sessions ?? []) as Array<Record<string, unknown>>)[0]?.id
       if (typeof parkedId !== "string") problems.push("archivedSessions → GET /sessions: nothing was parked by /new")
       else {
+        await call({
+          name: "updateArchivedSession → PUT /sessions/:id",
+          method: "PUT",
+          path: `/sessions/${parkedId}`,
+          body: { title: "契约改名", pinned: true },
+          model: "ArchivedSession",
+          at: "archived",
+        })
         await call({
           name: "resumeSession → POST /sessions/:id/resume",
           method: "POST",

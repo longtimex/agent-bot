@@ -14,7 +14,7 @@ import { TelegramAccountCommands } from "./telegramAccountCommands.js"
 import { MagpieCommands, type MagpieHost } from "./telegramMagpieCommands.js"
 import { MagpieService } from "./magpie.js"
 import { TaskHistoryStore } from "./history.js"
-import { BOT_MENU_COMMANDS, CC_HELP, HELP, HELP_FULL, isBotCommand } from "./help.js"
+import { BOT_MENU_COMMANDS, HELP, HELP_FULL, helpFor, isBotCommand } from "./help.js"
 import type { Logger } from "./logger.js"
 
 export { HELP_FULL }
@@ -56,7 +56,11 @@ import { TelegramModelCommands } from "./telegramModelCommands.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
 import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
 import { TelegramSessionCommands } from "./telegramSessionCommands.js"
+import { workspaceChanges } from "./workspaceChanges.js"
 import { handlePanelCallback, type PanelCallbackDeps } from "./telegramPanelCallbacks.js"
+import { handleQueueButton, TelegramJobJournal } from "./telegramJobQueue.js"
+import { TelegramSecretInput } from "./telegramSecretInput.js"
+import { maskSecretValues } from "./secretVault.js"
 import { SessionArchiveStore } from "./sessionArchive.js"
 import { formatReminderTime } from "./reminders.js"
 import { TelegramProxyCommands } from "./telegramProxyCommands.js"
@@ -137,6 +141,9 @@ export class TelegramBridge {
   readonly #outcomes: ChatTaskOutcomeRecorder
   readonly #queues = new Map<string, Promise<void>>()
   readonly #pending = new Map<string, Job[]>()
+  /** The queue on disk, so a restart resumes waiting messages instead of dropping them. */
+  readonly #jobs: TelegramJobJournal
+  readonly #secretInput: TelegramSecretInput
   readonly #generation = new Map<string, number>()
   readonly #cancels = new Map<string, AbortController>()
   readonly #runningSince = new Map<string, number>()
@@ -261,6 +268,11 @@ export class TelegramBridge {
       )
     this.#usage = new UsageStore(resolve(cfg.dataDir, "usage.json"), log, this.#timezone)
     this.#history = new TaskHistoryStore(resolve(cfg.dataDir, "history.json"), log)
+    this.#jobs = new TelegramJobJournal(resolve(cfg.dataDir, "queued-jobs.json"), log)
+    this.#secretInput = new TelegramSecretInput({
+      bot: this.#bot, log, sessionKey: (chatId) => this.#sessionKey(chatId), isFeishu: (chatId) => channelOfChatId(chatId, this.#channel) === "feishu",
+      enqueue: (job) => this.#enqueue({ ...job, generation: this.#generation.get(job.key) ?? 0 }),
+    })
     this.#outcomes = chatTaskOutcomeRecorder(log, this.#usage, this.#history, this.#store, (text) => this.#maskToken(text))
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.accountStore = new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log)
@@ -647,6 +659,12 @@ export class TelegramBridge {
       this.#coreServicesStarted = true
       this.#reminders.start()
       this.#schedules.start()
+      // Messages queued before a restart: the recent ones resume, the rest are reported
+      void this.#jobs.recover({
+        enqueue: (job) => this.#enqueue({ ...job, generation: this.#generation.get(job.key) ?? 0 }),
+        send: (chatId, text) => this.#sendTextMessage(chatId, text),
+        remember: (key, prompt) => this.#lastPrompts.set(key, prompt),
+      })
     }
     // Feishu has no owner chat until its first whitelisted private message
     // creates the identity mapping. Re-check on every transport event rather
@@ -786,11 +804,9 @@ export class TelegramBridge {
     })
 
     // Text messages
-    this.#bot.on("message:text", async (ctx) => {
-      const text = ctx.message.text.trim()
+    // A command completed by a 安全输入 card re-enters here with the key filled in
+    const onText = async (chatId: number, userId: number, text: string): Promise<void> => {
       if (!text) return
-      const chatId = ctx.chat.id
-      const userId = ctx.from.id
       const key = this.#sessionKey(chatId)
 
       // Control commands bypass the per-chat queue, otherwise they wait for the running task
@@ -809,13 +825,7 @@ export class TelegramBridge {
         return
       }
       if (command === "/help") {
-        if (arg.toLowerCase() === "full" || arg.toLowerCase() === "all") {
-          await this.#sendTextMessage(chatId, HELP_FULL, this.#menuKeyboard())
-        } else if (arg.toLowerCase() === "cc") {
-          await this.#sendTextMessage(chatId, CC_HELP, this.#menuKeyboard())
-        } else {
-          await this.#sendTextMessage(chatId, HELP, this.#menuKeyboard())
-        }
+        await this.#sendTextMessage(chatId, helpFor(arg), this.#menuKeyboard())
         return
       }
       if (command === "/status") {
@@ -847,7 +857,12 @@ export class TelegramBridge {
         return
       }
       if (command === "/sessions") {
-        await this.#sendPanel(chatId, this.#sessionCommands.panel(key))
+        await this.#sendPanel(chatId, this.#sessionCommands.command(key, arg))
+        return
+      }
+      if (command === "/undo") {
+        const busy = this.#runningSince.has(key) || this.#pending.has(key)
+        await this.#sendTextMessage(chatId, busy ? "任务执行中，请先 /stop 再撤销。" : workspaceChanges.undo(key).message)
         return
       }
       if (command === "/proxy") {
@@ -946,6 +961,12 @@ export class TelegramBridge {
         // task finishing in between would be replayed instead of the one the user meant
         retryOf: command === "/retry" ? this.#lastPrompts.get(key) : undefined,
       })
+    }
+    this.#secretInput.setRunner(onText)
+    this.#bot.on("message:text", async (ctx) => {
+      const text = ctx.message.text.trim()
+      const message = { chatId: ctx.chat.id, userId: ctx.from.id, messageId: ctx.message.message_id, text }
+      if (!(await this.#secretInput.intercept(message))) await onText(message.chatId, message.userId, text)
     })
 
     // Photos, documents, voice notes, audio and video files
@@ -1097,33 +1118,11 @@ export class TelegramBridge {
         return
       }
 
-      const queueDrop = /^qdrop:(q\d+)$/.exec(data)
-      if (queueDrop) {
-        const items = this.#pending.get(key) ?? []
-        const index = items.findIndex((job) => job.id === queueDrop[1])
-        if (index < 0) {
-          await answer("这条消息已开始执行，或已被取消")
-          await this.#editPanel(ctx, this.#queuePanel(key))
-          return
-        }
-        const [job] = items.splice(index, 1)
-        if (job) job.dropped = true
-        if (items.length === 0) this.#pending.delete(key)
-        await answer(`已取消第 ${index + 1} 条`)
-        await this.#editPanel(ctx, this.#queuePanel(key))
-        return
-      }
-
-      if (data === "qclear") {
-        const count = this.#pending.get(key)?.length ?? 0
-        if (count === 0) {
-          await answer("队列已经是空的")
-          return
-        }
-        this.#generation.set(key, (this.#generation.get(key) ?? 0) + 1)
-        this.#pending.delete(key)
-        await answer(`已清空 ${count} 条排队消息`)
-        await this.#editPanel(ctx, this.#queuePanel(key))
+      const secretAnswer = await this.#secretInput.handleCallback(data, chatId)
+      if (secretAnswer !== undefined) return void (await answer(secretAnswer))
+      const queueAction = await handleQueueButton(data, { key, answer, pending: this.#pending, generation: this.#generation, journal: this.#jobs })
+      if (queueAction) {
+        if (queueAction === "edit") await this.#editPanel(ctx, this.#queuePanel(key))
         return
       }
 
@@ -1343,6 +1342,7 @@ export class TelegramBridge {
     this.#generation.set(key, (this.#generation.get(key) ?? 0) + 1)
     const queued = this.#pending.get(key)?.length ?? 0
     if (queued > 0) this.#pending.delete(key)
+    this.#jobs.dropQueued(key)
     const controller = this.#cancels.get(key)
     if (controller) {
       this.#log.info(`cancel requested [${key}]`)
@@ -1356,7 +1356,7 @@ export class TelegramBridge {
       // abort controller: be honest instead of claiming nothing is running
       await this.#sendTextMessage(
         chatId,
-        "⏳ 当前正在执行命令类操作（如 /cc、安装任务），它无法被 /stop 中断；执行结束后队列即恢复。",
+        "🛑 已请求停止：刚开始的任务会被丢弃；若当前是命令类操作（如 /cc、安装任务）则无法中断，执行结束后队列即恢复。",
       )
     } else {
       await this.#sendTextMessage(chatId, "🛑 当前没有正在执行的任务。")
@@ -1478,8 +1478,10 @@ export class TelegramBridge {
     const pending = this.#pending.get(job.key) ?? []
     pending.push(job)
     this.#pending.set(job.key, pending)
+    this.#jobs.track(job)
     const cleanup = (): void => {
       if (this.#queues.get(job.key) === run) this.#queues.delete(job.key)
+      this.#jobs.finished(job)
       this.#dequeue(job)
     }
     run.then(cleanup, cleanup)
@@ -1507,6 +1509,7 @@ export class TelegramBridge {
 
   async #process(job: Job): Promise<void> {
     this.#dequeue(job)
+    this.#jobs.started(job)
     if (job.dropped) {
       // Removed from the queue panel: never reaches the engine and stays silent
       this.#log.debug(`dropped queued message [${job.key}] on request`)
@@ -1645,7 +1648,10 @@ export class TelegramBridge {
     }
 
     // A scheduled prompt is not something the user typed, so /retry must not replay it
-    if (!job.scheduled) this.#lastPrompts.set(job.key, { text: job.text, attachments: job.attachments })
+    if (!job.scheduled) {
+      this.#lastPrompts.set(job.key, { text: job.text, attachments: job.attachments })
+      this.#store.noteTitle(job.key, job.text)
+    }
 
     const requested = job.engine ?? this.#store.getEngine(job.key)
     // A one-off override (job.engine) or a saved choice is explicit; only the chat's
@@ -1658,6 +1664,13 @@ export class TelegramBridge {
       registry: this.#agents.registry,
       opencodeHealthy: () => this.#opencodeHealth.isHealthy(),
     })
+    // No abort controller exists yet while the health probe runs, so a /stop sent now only bumps
+    // the generation; without this check the prompt still ran after the user stopped it
+    if (job.generation !== (this.#generation.get(job.key) ?? 0)) {
+      this.#log.debug(`dropped message stopped while choosing its engine [${job.key}]`)
+      job.onOutcome?.("cancelled")
+      return
+    }
     const engine = choice.engine
     const switched = engine !== requested
     const isOpencode = engine === "opencode"
@@ -1703,7 +1716,8 @@ export class TelegramBridge {
         model: activeModel,
         cliModel,
         signal: controller.signal,
-        onProgress: (status) => tracker.update(status),
+        onProgress: (status) => tracker.update(maskSecretValues(status)),
+        onDraft: (text) => tracker.draft(maskSecretValues(text)),
       })
 
       typingActive = false
@@ -1713,7 +1727,10 @@ export class TelegramBridge {
       // Told once per chat: repeating it on every reply would bury the answer
       const note = choice.note && !this.#engineFallbackNoted.has(job.key) ? choice.note : undefined
       if (note) this.#engineFallbackNoted.add(job.key)
-      await this.#sendReply(job, note ? `ℹ️ ${note}\n\n${reply}` : reply)
+      // `[[secret: NAME]]` turns into a 安全输入 card after the reply instead of text
+      const asked = this.#secretInput.fromReply(job, note ? `ℹ️ ${note}\n\n${reply}` : reply)
+      await this.#sendReply(job, asked.text)
+      await asked.ask()
       outcome = "ok"
     } catch (err) {
       typingActive = false
@@ -2074,7 +2091,7 @@ export class TelegramBridge {
   /** redactSecrets does not know the Telegram token shape, so mask it separately. */
   #maskToken(text: string): string {
     const token = this.#cfg.telegram.token
-    return token && text.includes(token) ? text.split(token).join("***") : text
+    return maskSecretValues(token && text.includes(token) ? text.split(token).join("***") : text)
   }
 
   async #sendTextMessage(

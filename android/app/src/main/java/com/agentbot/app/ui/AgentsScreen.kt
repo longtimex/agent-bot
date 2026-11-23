@@ -214,7 +214,8 @@ fun AgentsScreen(vm: AppViewModel) {
                         }
                         // The two things Telegram explains after a switch: context and models
                         val capability = listOfNotNull(
-                            agent.sessionMode?.let { if (agent.stateless) "每次全新会话" else "保留上下文" },
+                            "实验性".takeIf { agent.experimental == true },
+                            agent.sessionMode?.let { if (agent.stateless) "每次新进程（Bot 会带上最近几轮对话）" else "保留上下文" },
                             agent.supportsModel?.let { supported ->
                                 if (supported) {
                                     "可切换模型"
@@ -230,6 +231,21 @@ fun AgentsScreen(vm: AppViewModel) {
                                 color = TextTertiary,
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                            )
+                        }
+                        // The server already flags engines that run tools without asking; the list
+                        // never said so, so picking Claude or Codex gave no hint that it edits files
+                        // and runs commands unattended
+                        if (agent.skipPermissions) {
+                            Text(
+                                if (agent.safeMode) {
+                                    "安全模式已开启：已去掉免确认参数，执行命令和改文件前会先请求确认"
+                                } else {
+                                    "⚠️ 会直接执行命令、修改文件，不逐项确认；需要更谨慎可在服务器 .env 设置 AGENT_CLI_SAFE_MODE=1"
+                                },
+                                color = if (agent.safeMode) TextTertiary else MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
                             )
                         }
                         if (agent.aliases.isNotEmpty()) {

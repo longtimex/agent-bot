@@ -91,8 +91,11 @@ export class UpdateChecker {
       output: `${result.stdout}\n${result.stderr}`.trim().slice(-1_500),
     })
 
-    const fetch = await run("git", ["fetch", "--quiet", "origin"], 60_000)
-    steps.push(step("git fetch origin", fetch))
+    // Only the branch the update follows, without tags: fetching every branch of the remote
+    // downloaded work nobody had asked to check
+    const branch = target.ref.replace(/^origin\//, "")
+    const fetch = await run("git", ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], 60_000)
+    steps.push(step(`git fetch origin ${branch}`, fetch))
     if (fetch.code !== 0) {
       return { ok: false, message: "无法连接远端仓库（网络问题或仓库不可达），请稍后再试。", steps }
     }
@@ -110,8 +113,18 @@ export class UpdateChecker {
     const behind = await run("git", ["rev-list", "--count", `${base}..${target.ref}`], 15_000)
     steps.push(step("比较提交数", behind))
     const count = Number.parseInt(stripAnsi(behind.stdout).trim(), 10)
-    if (!Number.isFinite(count)) return { ok: false, message: "无法读取远端提交数，请稍后再试。", steps }
     const label = `${target.channel} · ${target.ref}`
+    if (!Number.isFinite(count)) {
+      // A shallow install may not hold the commit the running release was built from, so the
+      // two cannot be counted apart; comparing the commits still answers the question
+      const tip = await run("git", ["rev-parse", "--verify", "--quiet", `${target.ref}^{commit}`], 15_000)
+      const remote = stripAnsi(tip.stdout).trim()
+      if (tip.code !== 0 || !remote) return { ok: false, message: "无法读取远端提交数，请稍后再试。", steps }
+      if (state.current?.commit && remote.startsWith(state.current.commit)) {
+        return { ok: true, message: `✅ 已是最新：${label} 没有新提交。`, steps }
+      }
+      return { ok: true, message: `⬇️ ${label} 有新版本（${remote.slice(0, 8)}）。点击「⬆️ 更新项目」预构建；完成后重启 Bot 应用。`, steps }
+    }
     if (count === 0) return { ok: true, message: `✅ 已是最新：${label} 没有新提交。`, steps }
     const log = await run("git", ["log", "--oneline", "-5", `${base}..${target.ref}`], 15_000)
     const sample = stripAnsi(log.stdout || log.stderr).trim()

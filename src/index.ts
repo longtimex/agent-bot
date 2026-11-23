@@ -24,6 +24,9 @@ import { SettingsStore } from "./settings.js"
 import { AgentCustomModelStore } from "./agentCustomModels.js"
 import { AgentProviderStore } from "./agentProviders.js"
 import { resolveDefaultEngine } from "./engineDefault.js"
+import { EngineHealthMonitor } from "./engineHealth.js"
+import { freezeJobJournals } from "./jobJournal.js"
+import { configureSecretVault, SecretVault } from "./secretVault.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
 import { appVersion } from "./version.js"
@@ -231,6 +234,8 @@ async function main(): Promise<void> {
     store,
   )
 
+  // 安全输入: secrets the user typed into a card, readable by tasks but never sent to a model
+  configureSecretVault(new SecretVault(cfg.dataDir, log))
   const feishuConnection = createFeishuConnection(cfg, log)
   const tgBridge = new TelegramBridge(
     cfg,
@@ -250,6 +255,40 @@ async function main(): Promise<void> {
   )
   // /timezone and the App switcher change this live; file names follow without a restart
   configureFileClock(() => tgBridge.currentTimezone)
+
+  // ENGINE_HEALTH_ALERTS=0 turns the proactive engine checks off
+  const healthMonitor =
+    process.env.ENGINE_HEALTH_ALERTS?.trim() === "0"
+      ? undefined
+      : new EngineHealthMonitor({
+          engines: () => [store.defaultEngine(), ...store.explicitEngines()],
+          label: (engine) => agentRegistry.label(engine),
+          opencodeOnDemand: cfg.opencode.onDemand,
+          opencodeHealthy: () => oc.health(),
+          cliInstalled: (engine) => {
+            const profile = agentRegistry.get(engine)
+            return profile ? Boolean(agentRegistry.binPath(profile)) : undefined
+          },
+          recentOutcomes: (engine) => {
+            const history = tgBridge.historyStore
+            return history.keys().flatMap((key) => history.list(key, 10).filter((entry) => entry.engine === engine))
+          },
+          send: async (text) => {
+            // The App mailbox and the owner's chat both hear it; either one is enough
+            let delivered = false
+            if (cfg.api.enabled) {
+              tgBridge.noticeStore.push({ kind: "system", text })
+              delivered = true
+            }
+            const owner = tgBridge.ownerChatId
+            if (owner !== undefined) {
+              await tgBridge.bot.api.sendMessage(owner, text)
+              delivered = true
+            }
+            if (!delivered) throw new Error("没有可推送的聊天，也没有启用 App")
+          },
+          log,
+        })
 
   let apiServer: ApiServer | undefined
   let apiError: string | undefined
@@ -310,10 +349,13 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string, code = 0): Promise<void> => {
     if (shuttingDown) return
     shuttingDown = true
+    // Before anything is cancelled: the queues on disk must keep what a restart should resume
+    freezeJobJournals()
     log.info(`received ${signal}, shutting down`)
     process.exitCode = code
     clearInterval(pruneTimer)
     if (logTimer) clearInterval(logTimer)
+    healthMonitor?.dispose()
     await feishu?.stop()
     await agents.dispose(1_000).catch(() => {})
     proxies.dispose()
@@ -437,6 +479,8 @@ async function main(): Promise<void> {
   } catch (err) {
     log.warn(`failed to write startup self-check: ${(err as Error).message}`)
   }
+
+  healthMonitor?.start()
 
   const onSignal = (signal: string): void => {
     shutdown(signal).catch((err: unknown) => {

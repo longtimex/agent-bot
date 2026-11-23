@@ -1,5 +1,32 @@
+import { chmodSync, copyFileSync, existsSync, readdirSync, unlinkSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
 import type { OpsResult, OpsStep } from "./ops.js"
 import type { ReleaseManager, ReleaseState } from "./releaseManager.js"
+
+/**
+ * `.env` holds the configuration and keys an update must not lose either, but it lives beside
+ * the code, not in data/, so the state archive (which restore-backup unpacks into data/) does not
+ * carry it. A copy goes next to the archive under the same name; a copy whose archive was pruned
+ * goes with it, so the two always match.
+ */
+export function keepEnvCopy(projectDir: string, archive: string): OpsStep {
+  const label = "备份 .env"
+  const env = join(projectDir, ".env")
+  if (!existsSync(env)) return { label, ok: true, code: 0, output: "没有 .env，跳过" }
+  try {
+    const copy = archive.replace(/\.tar\.gz$/, ".env")
+    copyFileSync(env, copy)
+    chmodSync(copy, 0o600)
+    const dir = dirname(archive)
+    for (const name of readdirSync(dir)) {
+      if (!/^backup-.*\.env$/.test(name)) continue
+      if (!existsSync(join(dir, name.replace(/\.env$/, ".tar.gz")))) unlinkSync(join(dir, name))
+    }
+    return { label, ok: true, code: 0, output: copy }
+  } catch (err) {
+    return { label, ok: false, code: 1, output: err instanceof Error ? err.message : String(err) }
+  }
+}
 
 export interface UpdateOrchestratorDeps {
   projectDir: string
@@ -46,6 +73,11 @@ export class UpdateOrchestrator {
       } else if (!backup.ok) {
         return { ok: false, message: `自动备份失败，已中止更新：${backup.message}`, steps }
       }
+      if (backup.file) {
+        const env = keepEnvCopy(this.#deps.projectDir, backup.file)
+        steps.push(env)
+        if (!env.ok) return { ok: false, message: `备份 .env 失败，已中止更新：${env.output}`, steps }
+      }
 
       const built = await this.#deps.releases.buildStaging(target.ref)
       steps.push(...built.steps)
@@ -70,6 +102,7 @@ export class UpdateOrchestrator {
         ok: true,
         message:
           `✅ 已预构建 ${built.release.commit.slice(0, 8)}（v${built.release.version}），发布门禁通过。\n` +
+          (backup.file ? `📦 更新前已备份数据：${basename(backup.file)}（含 .env 副本），可用 npm run backup:restore 恢复。\n` : "") +
           "当前进程仍运行旧版本；点击「重启 Bot」应用。启动失败会自动回滚，旧版本保留。",
         steps,
       }

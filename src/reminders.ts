@@ -253,7 +253,7 @@ function toDurationToken(token: string): string {
 function parseClockToken(token: string): { hour: number; minute: number } | undefined {
   const colon = /^(\d{1,2}):(\d{2})$/.exec(token)
   if (colon) return { hour: Number(colon[1]), minute: Number(colon[2]) }
-  const cn = /^(\d{1,2})\s*[点時时]\s*(半|[0-5]?\d\s*分?)?$/.exec(token)
+  const cn = /^(\d{1,2})\s*[点時时]\s*钟?\s*(半|[0-5]?\d\s*分?)?$/.exec(token)
   if (!cn) return undefined
   const hour = Number(cn[1])
   const tail = (cn[2] ?? "").replace(/\s+/g, "")
@@ -261,6 +261,14 @@ function parseClockToken(token: string): { hour: number; minute: number } | unde
   if (tail === "半") return { hour, minute: 30 }
   return { hour, minute: Number(tail.replace(/分$/, "")) }
 }
+
+/**
+ * A time written straight into the text, with no space: 30分钟后喝水, 明天8点开会, 18:30开会.
+ * That is how Chinese is normally typed, and every such message used to fail with 无法识别时间.
+ * Only tried when the whole token is not already a time, so a spaced message parses as before.
+ */
+const GLUED_TIME_RE =
+  /^((?:\d+(?:天|小时|分钟|分|秒钟|秒))+(?:以后|之后|后|内)?|(?:半小时|一刻钟)(?:以后|之后|后|内)?|(?:\d+[smhd])+(?![a-z0-9])|\d{1,2}:\d{2}|\d{1,2}[点時时]钟?(?:半|[0-5]?\d分?)?)(.+)$/i
 
 export interface ParseReminderOptions {
   maxTextLength?: number
@@ -316,9 +324,19 @@ export function parseReminder(
     if (value.length > maxTextLength) throw new Error(`${label}内容不能超过 ${maxTextLength} 字。`)
     return value
   }
+  // Split a time glued to its text; the leftover becomes the start of the reminder text
+  let glued = ""
+  if (!DURATION_TOKEN.test(toDurationToken(timeToken)) && !parseClockToken(timeToken)) {
+    const split = GLUED_TIME_RE.exec(timeToken)
+    if (split) {
+      timeToken = split[1]!
+      glued = split[2]!.trim()
+    }
+  }
+
   // Text is only required once the time expression itself parsed, so a missing time never
   // masks the usage error
-  const takeText = (): string => requireText(tokens.slice(cursor + 1).join(" "))
+  const takeText = (): string => requireText([glued, ...tokens.slice(cursor + 1)].filter(Boolean).join(" "))
 
   const durationToken = toDurationToken(timeToken)
   if (DURATION_TOKEN.test(durationToken)) {

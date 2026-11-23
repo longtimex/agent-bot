@@ -152,8 +152,10 @@ function serverResources(): string[] {
 
 function clientResources(): string[] {
   const source = readFileSync(CLIENT_SOURCE, "utf8")
+  // A suffix test such as endsWith("/events") names a path but calls nothing; drop those
+  const calls = source.replace(/\.(endsWith|startsWith|contains)\(\s*"[^"]*"\s*\)/g, "")
   // "/task", "/cc/exec", "/history?limit=$limit", "/task/$id/stop": the first segment is the resource
-  return [...source.matchAll(/"(\/[a-z][a-z0-9-]*)/g)].map((match) => match[1]!.slice(1))
+  return [...calls.matchAll(/"(\/[a-z][a-z0-9-]*)/g)].map((match) => match[1]!.slice(1))
 }
 
 test("the App calls exactly the endpoint groups the server routes", () => {
@@ -183,7 +185,11 @@ const DRIVER_SOURCE = "tests/appContract.test.ts"
 function pathHeads(source: string): string[] {
   // Comments mention endpoints the code does not call (`/id`, `/retry`), so they are dropped
   // before the scan — otherwise the gate complains about prose.
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "")
+    // A suffix test names a path without calling it (endsWith("/events"))
+    .replace(/\.(endsWith|startsWith|contains)\(\s*"[^"]*"\s*\)/g, "")
   return [...code.matchAll(/["`](\/[a-z][a-z0-9-]*(?:\/[a-z][a-z0-9-]*)*)/g)]
     .map((match) => match[1]!)
     // `/api` and `/api/v1` are the prefix every path is built on (and what normalizeBaseUrl

@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,17 +68,27 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                 item {
                     SectionLabel("引擎", modifier = Modifier.padding(bottom = 4.dp))
                 }
-                items(vm.agents, key = { "agent:" + it.id }) { agent ->
+                // Current first, then what can actually run, uninstalled last: the old order put a
+                // missing CLI among the usable ones, and switching to it made every message fail
+                val ordered = vm.agents.sortedWith(
+                    compareByDescending<com.agentbot.app.data.AgentInfo> { it.id == vm.session?.engine }
+                        .thenByDescending { it.installed },
+                )
+                items(ordered, key = { "agent:" + it.id }) { agent ->
+                    val current = agent.id == vm.session?.engine
+                    // What a switch means for the conversation, said before the tap rather than after
+                    val context = if (agent.stateless) "每次新进程，Bot 会带上最近几轮对话" else "保留上下文"
                     PickerRow(
                         primary = agent.label,
                         secondary = when {
-                            !agent.installed -> "未安装"
-                            agent.id == vm.session?.engine -> "当前引擎"
-                            else -> agent.desc ?: agent.id
+                            !agent.installed -> "未安装：切换后发消息会失败，请先到引擎管理安装"
+                            current -> "当前引擎 · $context"
+                            else -> context
                         },
-                        selected = agent.id == vm.session?.engine,
+                        selected = current,
+                        enabled = agent.installed || current,
                         onClick = {
-                            vm.switchAgent(agent.id)
+                            if (!current) vm.switchAgent(agent.id)
                         },
                     )
                 }
@@ -93,8 +104,12 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
                     PickerRow(
                         primary = model.label,
                         secondary = model.desc ?: model.detail,
-                        // session.model holds the value, not the display label
-                        selected = model.value == vm.session?.model,
+                        // The server reports the session's model by label (and OpenCode also by
+                        // provider/model), so comparing the value alone never marked the current one
+                        selected = vm.session?.let { s ->
+                            s.model != null && (model.value == s.model || model.label == s.model) ||
+                                (s.modelRef != null && model.providerID == s.modelRef.providerID && model.modelID == s.modelRef.modelID)
+                        } == true,
                         onClick = {
                             vm.setModel(model)
                         },
@@ -128,13 +143,20 @@ fun PickerDialog(title: String, onDismiss: () -> Unit, vm: AppViewModel) {
 }
 
 @Composable
-private fun PickerRow(primary: String, secondary: String?, selected: Boolean, onClick: () -> Unit) {
+private fun PickerRow(
+    primary: String,
+    secondary: String?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .clip(RoundedCornerShape(AppRadius.md))
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick)
+            .then(if (enabled) Modifier else Modifier.alpha(0.5f)),
         shape = RoundedCornerShape(AppRadius.md),
         color = if (selected) SurfaceHigh.copy(alpha = 0.55f) else androidx.compose.ui.graphics.Color.Transparent,
     ) {
@@ -155,7 +177,7 @@ private fun PickerRow(primary: String, secondary: String?, selected: Boolean, on
                         secondary,
                         style = MaterialTheme.typography.labelSmall,
                         color = TextTertiary,
-                        maxLines = 1,
+                        maxLines = 2,
                     )
                 }
             }

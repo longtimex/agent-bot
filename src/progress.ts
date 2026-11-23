@@ -33,7 +33,25 @@ function floodBackoffMs(err: unknown): number {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 + 500 : DEFAULT_FLOOD_BACKOFF_MS
 }
 
+/**
+ * What the card shows of a reply OpenCode is still writing (E1). Media and secret directives are
+ * dropped, including one cut off mid-stream, so the card never flashes `[[image:outbox/…` at the
+ * user; a long answer shows its tail, which is the part that is moving.
+ */
+export const DRAFT_PREVIEW_CHARS = 1_500
+
+export function draftPreview(raw: string): string {
+  const text = raw
+    .replace(/\[\[\s*(?:image|voice|video|file|secret)\s*:[^\]\r\n]*\]\]/gi, "")
+    .replace(/\[\[[^\]\r\n]*$/, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+  return text.length > DRAFT_PREVIEW_CHARS ? `…${text.slice(-DRAFT_PREVIEW_CHARS).trimStart()}` : text
+}
+
 const RENDER_INTERVAL_MS = 2_000
+/** A streaming draft changes every tick; editing that often is what trips Telegram's flood limit. */
+const DRAFT_REFRESH_MS = 3_000
 /** The elapsed counter is cosmetic; re-sending the card for it alone wastes the edit budget. */
 const TICK_REFRESH_MS = 30_000
 const DEFAULT_FLOOD_BACKOFF_MS = 15_000
@@ -45,6 +63,7 @@ export class ProgressTracker {
   #statusMessageId: number | null = null
   #currentStatus = "正在初始化环境..."
   #recentSteps: string[] = []
+  #draft = ""
   #timer: NodeJS.Timeout | null = null
   #lastSentBody = ""
   #lastSentAt = 0
@@ -70,6 +89,12 @@ export class ProgressTracker {
     }
   }
 
+  /** The answer so far; once there is one, the card shows it instead of the step list. */
+  draft(text: string): void {
+    if (this.#disposed) return
+    this.#draft = draftPreview(text)
+  }
+
   async #render(): Promise<void> {
     // Skip when disposed, and never overlap renders (two sends would leave an orphan card)
     if (this.#disposed || this.#rendering) return
@@ -85,32 +110,35 @@ export class ProgressTracker {
       return `${m > 0 ? `${m}m ` : ""}${s}s`
     }
 
+    // A draft is the model's own Markdown, often half a code block: it goes out as plain text,
+    // since one unbalanced `*` would make Telegram reject the whole edit
+    const drafting = this.#draft.length > 0
     const stepsText = this.#recentSteps.map((s) => `• \`${this.#escape(s)}\``).join("\n")
-    const body = `${stepsText ? `${stepsText}\n\n` : ""}🔄 当前状态：_${this.#escape(this.#currentStatus)}_`
-    const text = `⏳ *正在处理任务...* (已耗时 ${formatTime(elapsedSec)})\n\n${body}\n\n_系统后台正在全自动执行中，请稍候..._`
+    const body = drafting
+      ? this.#draft
+      : `${stepsText ? `${stepsText}\n\n` : ""}🔄 当前状态：_${this.#escape(this.#currentStatus)}_`
+    const text = drafting
+      ? `✍️ 正在生成回复…（已耗时 ${formatTime(elapsedSec)}，完成后发送完整回复）\n\n${body}`
+      : `⏳ *正在处理任务...* (已耗时 ${formatTime(elapsedSec)})\n\n${body}\n\n_系统后台正在全自动执行中，请稍候..._`
 
     // Re-sending identical text only to move the elapsed counter would spend the
     // chat's edit budget on nothing and is what triggers the flood limit
     if (body === this.#lastSentBody && now - this.#lastSentAt < TICK_REFRESH_MS) return
+    if (drafting && this.#statusMessageId !== null && now - this.#lastSentAt < DRAFT_REFRESH_MS) return
+    const options = drafting ? {} : { parse_mode: "Markdown" as const }
 
     this.#rendering = true
     try {
       const keyboard = new InlineKeyboard().text("🛑 停止任务", "task:stop")
       if (this.#statusMessageId === null) {
-        const msg = await this.#bot.api.sendMessage(this.#chatId, text, {
-          parse_mode: "Markdown",
-          reply_markup: keyboard,
-        })
+        const msg = await this.#bot.api.sendMessage(this.#chatId, text, { ...options, reply_markup: keyboard })
         if (this.#disposed) {
           await this.#bot.api.deleteMessage(this.#chatId, msg.message_id).catch(() => {})
           return
         }
         this.#statusMessageId = msg.message_id
       } else {
-        await this.#bot.api.editMessageText(this.#chatId, this.#statusMessageId, text, {
-          parse_mode: "Markdown",
-          reply_markup: keyboard,
-        })
+        await this.#bot.api.editMessageText(this.#chatId, this.#statusMessageId, text, { ...options, reply_markup: keyboard })
       }
       this.#lastSentBody = body
       this.#lastSentAt = now

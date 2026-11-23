@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, existsSync, renameSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
 import process from "node:process"
 import { AccountStore } from "./accounts.js"
@@ -39,9 +39,12 @@ function loadStore(): AccountStore {
 function audit(dataDir: string, action: string, subject: string): void {
   const path = join(dataDir, "account-access.log")
   try {
-    if (existsSync(path) && readFileSync(path).length > MAX_LOG_BYTES) writeFileSync(path, "")
+    // Rotated to .1 rather than emptied: wiping it erased the very trail the log exists to keep
+    if (existsSync(path) && statSync(path).size > MAX_LOG_BYTES) renameSync(path, `${path}.1`)
     const at = new Date().toISOString()
-    appendFileSync(path, `${at}\t${action}\t${subject}\tpid=${process.ppid}\tcwd=${process.cwd()}\n`)
+    // Names which credential was read, when and from where: private like the vault itself
+    appendFileSync(path, `${at}\t${action}\t${subject}\tpid=${process.ppid}\tcwd=${process.cwd()}\n`, { mode: 0o600 })
+    chmodSync(path, 0o600)
   } catch {
     // An audit failure must not hide the credential the caller asked for
   }

@@ -14,6 +14,7 @@ import { safeModeEnabled, stripPermissionBypass } from "./agentPermissions.js"
 import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
 import type { SessionStore } from "./store.js"
+import { withRecentTurns } from "./statelessContext.js"
 
 const DEFAULT_TIMEOUT_MS = 600_000
 const MAX_OUTPUT_CHARS = 8 * 1024 * 1024
@@ -108,6 +109,7 @@ interface ProfileFile {
 
 export { BUILTIN_AGENT_PROFILES } from "./agentProfiles.js"
 import { BUILTIN_AGENT_PROFILES } from "./agentProfiles.js"
+import { secretEnvFor } from "./secretVault.js"
 
 /** Default lookup PATH also covers the per-user global bin directories where the Bot installs CLIs. */
 export function whichSync(bin: string, envPath = extendedPath()): string | undefined {
@@ -883,7 +885,12 @@ export class AgentCliService {
       ? (modelOverride ?? this.#store.getCliModel(key, profile.id))
       : undefined
     const workDir = this.#resolveWorkDir(key)
-    const args = buildCliArgs(profile, { workDir, sessionId, model, prompt: query }, isNew, {
+    // A stateless CLI remembers nothing between runs: replay the last turns so a follow-up has
+    // something to refer to. Dropped rather than failing when it would overflow argv.
+    const stateless = profile.sessionMode === "stateless"
+    const recalled = stateless ? withRecentTurns(this.#store.getRecentTurns(key, profile.id), query) : query
+    const prompt = argvBudgetError(profile.label, [recalled]) ? query : recalled
+    const args = buildCliArgs(profile, { workDir, sessionId, model, prompt }, isNew, {
       safeMode: safeModeEnabled(),
     })
     const budget = argvBudgetError(profile.label, args)
@@ -899,6 +906,7 @@ export class AgentCliService {
           ...process.env,
           ...profile.env,
           ...this.#proxyEnv?.(),
+          ...secretEnvFor(key),
           // A relay configured for this engine wins over the ambient values
           ...this.#providerEnv?.(profile.id, model),
         }),
@@ -1041,6 +1049,7 @@ export class AgentCliService {
             else this.#log.warn(`${profile.id} reported an unusable session id; it was not persisted`)
           }
           const reply = parsed.text.trim()
+          if (stateless && reply) this.#store.pushRecentTurn(key, profile.id, query, reply)
           resolve(reply || `${profile.label} 已执行完毕，无文本返回。`)
           return
         }

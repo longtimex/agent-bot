@@ -9,6 +9,8 @@ export interface ApiTaskView {
   engine: string
   model?: string
   progress?: string
+  /** The answer so far while OpenCode writes it; dropped once the task settles. */
+  partial?: string
   reply?: string
   error?: string
   /** Stable machine-readable failure class, also present for cancelled tasks. */
@@ -22,6 +24,14 @@ export interface ApiTaskView {
   attachmentCount?: number
   /** Media produced by the task, mirroring what Telegram receives. */
   media?: ApiTaskMediaView[]
+  /** Secrets the Agent asked for with `[[secret: NAME | 用途]]`; the App shows a card for each. */
+  secretRequests?: ApiSecretRequest[]
+}
+
+export interface ApiSecretRequest {
+  name: string
+  purpose?: string
+  provided: boolean
 }
 
 export type ApiTaskErrorCode =

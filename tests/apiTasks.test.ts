@@ -293,7 +293,8 @@ test("task media re-checks its local file before serving it", async () => {
 })
 
 test("attachment parsing accepts every file and no longer enforces an aggregate byte cap", () => {
-  const manager = new ApiTaskManager({ cfg: {} } as never)
+  // The constructor reads cfg.dataDir for the job journal; a bare {} throws before the parse
+  const manager = new ApiTaskManager({ cfg: { dataDir: tmpdir() } } as never)
   const size = 4 * 1024 * 1024
   const attachments = Array.from({ length: 4 }, (_, index) => ({
     name: `part-${index}.bin`,
@@ -309,7 +310,8 @@ test("attachment parsing accepts every file and no longer enforces an aggregate 
 })
 
 test("attachment parsing still caps a message at four files", () => {
-  const manager = new ApiTaskManager({ cfg: {} } as never)
+  // The constructor reads cfg.dataDir for the job journal; a bare {} throws before the parse
+  const manager = new ApiTaskManager({ cfg: { dataDir: tmpdir() } } as never)
   const attachments = Array.from({ length: 5 }, (_, index) => ({
     name: `part-${index}.bin`,
     mime: "application/octet-stream",
@@ -319,7 +321,8 @@ test("attachment parsing still caps a message at four files", () => {
 })
 
 test("attachment parsing rejects malformed base64 instead of silently dropping bytes", () => {
-  const manager = new ApiTaskManager({ cfg: {} } as never)
+  // The constructor reads cfg.dataDir for the job journal; a bare {} throws before the parse
+  const manager = new ApiTaskManager({ cfg: { dataDir: tmpdir() } } as never)
   for (const data of ["A", "abcde", "AQ=", "====", "AA=A"]) {
     assert.throws(
       () => manager.parseAttachments([{ name: "bad.bin", mime: "application/octet-stream", data }]),

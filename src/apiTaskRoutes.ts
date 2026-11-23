@@ -3,6 +3,7 @@ import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { clampLimit } from "./apiHttp.js"
 import { MAX_TASK_RECORDS, type ApiTaskManager } from "./apiTasks.js"
 import { multipartBoundary } from "./multipart.js"
+import { clearSecrets, listSecrets, provideTaskSecret } from "./apiSecrets.js"
 
 export interface TaskRouteDeps {
   tasks: ApiTaskManager
@@ -106,6 +107,22 @@ export async function routeTasks(
       const note = unreadable > 0 ? `${failed.text}\n\n[附件处理失败]\n${unreadable} 个附件已从收件目录清理，本次重试无法读取` : failed.text
       const task = await deps.tasks.submitSaved(note, failed.engine, failed.model, readable.length > 0 ? readable : undefined)
       deps.json(ctx.res, 202, { ok: true, retriedFrom: id, task: deps.tasks.view(task) })
+      return true
+    }
+
+  if (resource === "task" && id && method === "POST" && action === "secret") {
+      const task = deps.tasks.get(id)
+      if (!task || task.key !== deps.appKey) throw new ApiError(404, "任务不存在或已被清理")
+      const body = await deps.readJsonBody(ctx.req)
+      const name = typeof body.name === "string" ? body.name : ""
+      const value = typeof body.value === "string" ? body.value : ""
+      deps.json(ctx.res, 200, await provideTaskSecret(deps.tasks, task, name, value))
+      return true
+    }
+
+  // Before GET /tasks, which would otherwise answer /tasks/secrets with the task list
+  if (resource === "tasks" && id === "secrets" && (method === "GET" || method === "DELETE")) {
+      deps.json(ctx.res, 200, method === "GET" ? listSecrets(deps.appKey) : clearSecrets(deps.appKey))
       return true
     }
 

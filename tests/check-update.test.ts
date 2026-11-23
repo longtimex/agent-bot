@@ -206,3 +206,34 @@ test("checkUpdate fetches before comparing and never pulls", async () => {
     cleanup(ops)
   }
 })
+
+test("checkUpdate fetches only the followed branch, without tags", async () => {
+  const { ops, calls } = makeService((command, args) => {
+    if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "origin/main\n", stderr: "" }
+    if (command === "git" && args[0] === "rev-list") return { code: 0, stdout: "0\n", stderr: "" }
+    return undefined
+  })
+  try {
+    await ops.checkUpdate()
+    const fetch = calls.find((call) => call.args[0] === "fetch")
+    assert.deepEqual(fetch?.args, ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+  } finally {
+    cleanup(ops)
+  }
+})
+
+test("checkUpdate still answers when a shallow checkout cannot count the commits", async () => {
+  const remoteTip = "1111111111111111111111111111111111111111"
+  const { ops } = makeService((command, args) => {
+    if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${remoteTip}\n`, stderr: "" }
+    if (command === "git" && args[0] === "rev-list") return { code: 128, stdout: "", stderr: "fatal: bad revision" }
+    return undefined
+  })
+  try {
+    const result = await ops.checkUpdate()
+    assert.equal(result.ok, true)
+    assert.match(result.message, /有新版本（11111111）/)
+  } finally {
+    cleanup(ops)
+  }
+})

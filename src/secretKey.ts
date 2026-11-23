@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 
 /**
  * The data directory's one local secret (`accounts.key`): 32 random bytes, hex-encoded.
@@ -24,6 +24,26 @@ export interface SecretKeyOptions {
 
 const KEY_RE = /^[0-9a-f]{64}$/i
 
+/** The stores that keep ciphertext under this key, all in the key's own directory. */
+const ENCRYPTED_STORES = ["accounts.json", "agent-providers.json", "agent-custom-models.json"]
+
+/**
+ * Which of those stores already hold ciphertext. A missing key beside them is not a fresh
+ * install: it was lost, or a backup was restored without it. Generating a new one then made the
+ * old secrets permanently undecryptable and mixed a second key into the same files, so a later
+ * restore of the right key could no longer recover everything either.
+ */
+function storesWithCiphertext(keyPath: string): string[] {
+  const dir = dirname(keyPath)
+  return ENCRYPTED_STORES.filter((name) => {
+    try {
+      return /"secret"\s*:\s*"[^"]+"/.test(readFileSync(join(dir, name), "utf8"))
+    } catch {
+      return false
+    }
+  })
+}
+
 function readKey(path: string): Buffer {
   const raw = readFileSync(path, "utf8").trim()
   if (!KEY_RE.test(raw)) throw new Error(`账号密钥 ${path} 格式无效，请从备份恢复该文件。`)
@@ -32,6 +52,13 @@ function readKey(path: string): Buffer {
 
 export function loadOrCreateSecretKey(path: string, options: SecretKeyOptions = {}): Buffer {
   if (existsSync(path)) return readKey(path)
+  const orphaned = storesWithCiphertext(path)
+  if (orphaned.length > 0) {
+    throw new Error(
+      `账号密钥 ${path} 不存在，但 ${orphaned.join("、")} 里已有加密数据：请从备份恢复 accounts.key。` +
+        "不会自动生成新密钥，否则这些数据将永久无法解密。",
+    )
+  }
   mkdirSync(dirname(path), { recursive: true })
   const key = randomBytes(32)
   const staging = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`

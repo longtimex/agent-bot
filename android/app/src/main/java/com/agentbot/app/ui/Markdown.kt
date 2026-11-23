@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agentbot.app.ui.theme.Accent
@@ -217,23 +218,86 @@ private fun AnnotatedString.Builder.styled(style: SpanStyle, text: String) {
     pop()
 }
 
-/** Renders parsed markdown; assistant replies route through this. */
+/** Replies longer than this many characters start folded. */
+private const val FOLD_ABOVE_CHARS = 2_500
+
+/** How much of a folded reply stays visible. */
+private const val FOLD_SHOW_CHARS = 1_200
+
+/** Code blocks longer than this many lines start folded to [CODE_SHOW_LINES]. */
+private const val CODE_FOLD_ABOVE_LINES = 30
+private const val CODE_SHOW_LINES = 20
+
+private fun MdSegment.size(): Int = when (this) {
+    is MdSegment.Text -> spans.length
+    is MdSegment.Code -> code.length
+    is MdSegment.Bullet -> spans.length
+    is MdSegment.Quote -> spans.length
+}
+
+/**
+ * Renders parsed markdown; assistant replies route through this.
+ *
+ * With [collapsible], a long reply opens folded: an Agent dumping a whole file pushed every earlier
+ * message off screen and had to be scrolled past on a phone. The first [FOLD_SHOW_CHARS] stay
+ * visible with a toggle below; the full text is always what gets copied.
+ */
 @Composable
-fun MarkdownText(source: String, modifier: Modifier = Modifier) {
+fun MarkdownText(source: String, modifier: Modifier = Modifier, collapsible: Boolean = false) {
+    val segments = remember(source) { parseMarkdown(source) }
+    val foldable = collapsible && source.length > FOLD_ABOVE_CHARS
+    var expanded by remember(source) { mutableStateOf(false) }
     Column(modifier = modifier) {
-        for (segment in parseMarkdown(source)) {
-            when (segment) {
-                is MdSegment.Text -> Text(
-                    segment.spans,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                is MdSegment.Code -> CodeBlock(segment)
-                is MdSegment.Bullet -> ListRow(segment)
-                is MdSegment.Quote -> QuoteBlock(segment)
+        var shown = 0
+        var cut = false
+        for (segment in segments) {
+            // The segment that crosses the budget is shown clipped; nothing after it renders
+            val last = foldable && !expanded && shown + segment.size() > FOLD_SHOW_CHARS
+            MdBlock(segment, clipped = last)
+            shown += segment.size()
+            if (last) {
+                cut = true
+                break
             }
         }
+        if (foldable && (cut || expanded)) {
+            FoldToggle(
+                text = if (expanded) "收起" else "展开全文（共 ${source.length} 字）",
+                onClick = { expanded = !expanded },
+            )
+        }
     }
+}
+
+@Composable
+private fun MdBlock(segment: MdSegment, clipped: Boolean) {
+    val lines = if (clipped) 8 else Int.MAX_VALUE
+    when (segment) {
+        is MdSegment.Text -> Text(
+            segment.spans,
+            color = MaterialTheme.colorScheme.onBackground,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = lines,
+            overflow = TextOverflow.Ellipsis,
+        )
+        is MdSegment.Code -> CodeBlock(segment)
+        is MdSegment.Bullet -> ListRow(segment)
+        is MdSegment.Quote -> QuoteBlock(segment)
+    }
+}
+
+@Composable
+private fun FoldToggle(text: String, onClick: () -> Unit) {
+    Text(
+        text,
+        color = Accent,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .padding(top = 6.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+    )
 }
 
 @Composable
@@ -285,6 +349,13 @@ private fun QuoteBlock(quote: MdSegment.Quote) {
 private fun CodeBlock(segment: MdSegment.Code) {
     val clipboard = LocalClipboardManager.current
     var copied by remember(segment.code) { mutableStateOf(false) }
+    // A whole file in one fence is folded to its head; 复制 still takes every line
+    val lineCount = remember(segment.code) { segment.code.count { it == '\n' } + 1 }
+    val foldable = lineCount > CODE_FOLD_ABOVE_LINES
+    var expanded by remember(segment.code) { mutableStateOf(false) }
+    val visible = remember(segment.code, expanded) {
+        if (!foldable || expanded) segment.code else segment.code.lineSequence().take(CODE_SHOW_LINES).joinToString("\n")
+    }
     LaunchedEffect(copied) {
         if (copied) {
             delay(1_500)
@@ -332,7 +403,7 @@ private fun CodeBlock(segment: MdSegment.Code) {
             }
         }
         Text(
-            segment.code,
+            visible,
             fontFamily = FontFamily.Monospace,
             fontSize = 13.sp,
             lineHeight = 19.sp,
@@ -342,5 +413,13 @@ private fun CodeBlock(segment: MdSegment.Code) {
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         )
+        if (foldable) {
+            Box(modifier = Modifier.padding(start = 6.dp, bottom = 4.dp)) {
+                FoldToggle(
+                    text = if (expanded) "收起代码" else "展开剩余 ${lineCount - CODE_SHOW_LINES} 行",
+                    onClick = { expanded = !expanded },
+                )
+            }
+        }
     }
 }

@@ -728,3 +728,42 @@ test("ScheduleService.runNow returns the updated snapshot, not the pre-run copy"
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a manual run of an overdue one-shot consumes it instead of leaving it to fire again", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-scheduler-"))
+  try {
+    let outcome: UsageOutcome = "failed"
+    const ran: string[] = []
+    const service = new ScheduleService(
+      join(dir, "schedules.json"),
+      async (task) => {
+        ran.push(task.prompt)
+        return outcome
+      },
+      log,
+      "Asia/Shanghai",
+    )
+    // Due a minute ago and paused, as a one-shot is after /stop cancelled its run
+    const task = service.add(42, 7, "10s 交周报", defaults, Date.now() - 60_000)
+    service.pause(42, task.id)
+
+    // A failed manual run keeps it, so the user can try again
+    service.runNow(42, task.id)
+    await service.idle()
+    assert.equal(service.list(42).length, 1)
+
+    outcome = "ok"
+    service.runNow(42, task.id)
+    await service.idle()
+    assert.deepEqual(ran, ["交周报", "交周报"])
+    assert.equal(service.list(42).length, 0, "the run it stood in for is done; resume must not fire it again")
+
+    // A one-shot still in the future keeps its slot after a manual run
+    const later = service.add(42, 7, "2h 开会", defaults, Date.now())
+    service.runNow(42, later.id)
+    await service.idle()
+    assert.equal(service.list(42)[0]?.id, later.id)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

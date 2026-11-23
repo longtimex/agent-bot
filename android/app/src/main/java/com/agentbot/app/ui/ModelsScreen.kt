@@ -503,11 +503,10 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                     placeholder = if (isRegistry) "baseURL（留空 = Provider 已存在）" else "baseURL（留空 = 用引擎默认）",
                     singleLine = true,
                 )
-                AppTextField(
+                SecretTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
                     placeholder = "API Key（可选）",
-                    singleLine = true,
                 )
                 result?.let {
                     Text(
@@ -585,11 +584,10 @@ private fun RelayCard(vm: AppViewModel, engineLabel: String) {
             singleLine = true,
             modifier = Modifier.padding(top = 8.dp),
         )
-        AppTextField(
+        SecretTextField(
             value = apiKey,
             onValueChange = { apiKey = it },
             placeholder = "API Key（可选）",
-            singleLine = true,
             modifier = Modifier.padding(top = 6.dp),
         )
         result?.let {

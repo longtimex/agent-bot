@@ -876,6 +876,9 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
 - `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL` / `STT_LANGUAGE`：可选的语音转写服务（OpenAI 兼容 `/audio/transcriptions`，如 OpenAI、Groq 或本地 whisper）。`STT_BASE_URL` 留空关闭；配置后，当前模型不支持音频输入时，发来的语音自动转写为文字交给模型（`STT_API_KEY` 属密钥，只能写 `.env`，不能经 `/env` 查看或修改）。
 - `USAGE_DAILY_REPORT` / `USAGE_DAILY_REPORT_TIME`：每日用量报告开关（默认 `0`）与推送时间（默认 `21:00`，24 小时制，按 `REMINDER_TIMEZONE` 解析）；到点向白名单第一位用户推送一次，重启当天会补发、不会重复发。也可用 `/env` 修改。
+- `ENGINE_HEALTH_ALERTS`：引擎故障主动提醒（默认开启，设为 `0` 关闭）。每 5 分钟检查聊天里用到的引擎：OpenCode 服务能否连接（按需启动模式下不检查）、CLI 可执行文件是否还在、最近 3 次任务是否都因同一原因失败（认证、模型、参数不兼容等）；发现问题和恢复时各推送一次到白名单第一位用户与 App。
+- 排队消息落盘：Telegram / 飞书与 App 排队中的消息写入 `data/queued-jobs.json`、`data/app-queued-tasks.json`（权限 600）。重启（含更新、崩溃）后，30 分钟内排队的消息按原顺序继续执行；重启时正在执行的任务**不会自动重跑**（可能已改过文件或产生费用），会提示用 `/retry` 或 App 的「重试」重新执行；排队超过 30 分钟的消息只提示、不执行。
+- 安全输入卡片：命令需要密钥时把密钥写成 `?`（或直接省略），如 `/magpie provider add openai`、`/cc provider add 名称 key=?`、`/account add 名称 | 账号 | ? | 分类`、`/env set XXX_API_KEY`，Bot 会弹出卡片，你下一条消息作为密钥收下并**立即删除**；直接写在命令里的密钥也会在执行后删除原消息（飞书无法删除用户消息，会提示手动撤回）。AI 执行中需要密钥时会在回复里写 `[[secret: NAME | 用途]]`，Telegram/飞书弹卡片、App 在回复下方显示带遮挡的输入框；值加密保存在 `data/task-secrets.json`（用 `accounts.key` 加密，24 小时后清除），**不会发给模型**，只在该会话任务执行期间以 `data/secrets/<会话>/NAME` 文件（600）和同名环境变量（CLI 引擎）提供，所有回复、进度和错误里出现的值都会替换成 `***`。`/secrets` 查看、`/secrets clear` 清除。目前只有 OpenCode 的 assistant 智能体（`.opencode/agent/assistant.md`）内置了这条指令说明，其他 CLI 引擎需要在各自的 AGENTS.md / CLAUDE.md 中加上同样说明。
 - `STARTUP_NOTICE`：默认 `1`，每次 Bot 上线后向白名单第一位用户推送一条「Bot 已上线」通知；设为 `0` 关闭。也可用 `/env set STARTUP_NOTICE 0` 修改。
 - `OPENCODE_AGENT`：默认 `assistant`，对应 `.opencode/agent/assistant.md`。
 - `AGENT_CLI_CONFIG`：自定义 Agent CLI 档案路径，默认 `data/agents.json`；文件不存在时只使用内置档案。
@@ -1007,7 +1010,8 @@ npm run bot -- update --apply
 - **systemd 部署**：使用 `npm run bot -- install --systemd` 或 `--user-systemd` 生成的 unit 时，`npm run bot -- update --apply` 会先激活 release，再重启 unit 并检查健康；不要直接 `systemctl restart` 一个旧的手工 unit 来替代这一步。
 - **旧 unit / 手工进程**：如果 unit 仍执行 `scripts/run-current.sh` 或直接执行 checkout 里的 `dist/index.js`，它不会自动激活 pending。先用新安装器迁移 unit，之后统一用 `npm run bot -- restart`；旧的 `scripts/restart.sh`、`scripts/apply-release.sh` 只保留兼容入口。
 - **Docker 部署**：容器内没有 `.git` 和 systemd，`/update`、隔离 release 与自动回滚不可用。请在宿主机拉取代码后执行 `docker compose up -d --build`，用新镜像重启；`data/` 与 `.env` 仍由挂载卷保留。
-- **更新前备份**：`update` 会先备份可解析的 `data/*.json` 状态；涉及自定义脚本、`opencode.json`、`.opencode/agent/` 或 `bin/` 的改动仍需单独备份。`.env` 与 `data/` 不进入新 release 的 Git 工作区，但复制或修改它们的自定义脚本仍应事前留档。
+- **只下载需要的代码**：安装（`install.sh`）只克隆目标分支的最新一次提交（`--depth 1 --single-branch --no-tags`），不下载历史、其他分支和标签；`/update`、App「更新项目」与 `npm run bot -- update` 同样只浅克隆目标分支到临时构建目录（服务器不支持浅克隆时退回单分支克隆）；「检查更新」只拉取所跟随的分支。对已有安装再次运行 `install.sh` 时，浅克隆的 checkout 直接切到新提交并清理旧对象，完整 clone（开发用）则保留历史快进。
+- **更新前备份**：无论从 Telegram / 飞书 `/update`、App「更新项目」、`npm run bot -- update` 还是再次运行 `install.sh` 更新，都会**先**把 `data/*.json` 状态和 `accounts.key` 打包到 `data/backups/backup-<时间>-pre-update.tar.gz`，并在旁边保存一份 `.env` 副本（`.env`，权限 600）；备份失败则中止更新。更新前备份与手动备份各自保留最近 5 份，互不挤占。恢复：先 `npm run bot -- stop`，再 `npm run backup:restore -- --list` 查看，`npm run backup:restore -- --file backup-…-pre-update.tar.gz --with-env` 连同 `.env` 一起恢复。涉及自定义脚本、`opencode.json`、`.opencode/agent/` 或 `bin/` 的改动仍需单独备份。
 
 ### 从旧版手动部署迁移
 

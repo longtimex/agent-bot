@@ -257,7 +257,8 @@ test("ops update builds an isolated release and leaves it pending", async () => 
     const commands = calls.map((call) => `${call.command} ${call.args.join(" ")}`)
     const clone = calls.find((call) => call.command.endsWith("git") && call.args[0] === "clone")
     assert.ok(clone)
-    assert.equal(clone.args[3], "https://github.com/longtimex/agent-bot.git")
+    assert.equal(clone.args.at(-2), "https://github.com/longtimex/agent-bot.git")
+    assert.ok(clone.args.includes("--depth"), "an update downloads only the newest commit")
     assert.ok(commands.some((entry) => entry.endsWith(" ci --no-audit --no-fund")))
     assert.ok(commands.some((entry) => entry.endsWith(" run check:release")))
     assert.ok(commands.some((entry) => entry.endsWith(" run build")))
@@ -863,8 +864,42 @@ test("ops env editing waits for a live writer instead of racing it", () => {
     // A live owner (this very process) holds the lock, as the setup wizard would
     writeFileSync(`${envPath}.lock`, String(process.pid))
     const { ops } = makeService(dir, () => undefined)
-    assert.throws(() => ops.envSet("LOG_LEVEL", "debug"), /正被另一个进程写入/)
+    // A refusal every caller can show, not an exception that crashes /env or turns into a 500
+    const refused = ops.envSet("LOG_LEVEL", "debug")
+    assert.equal(refused.ok, false)
+    assert.match(refused.message, /另一个进程/)
+    const unset = ops.envUnset("LOG_LEVEL")
+    assert.equal(unset.ok, false)
+    assert.match(unset.message, /另一个进程/)
     assert.equal(readFileSync(envPath, "utf8"), "LOG_LEVEL=info\n", "nothing is written without the lock")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an update backs up first, under its own name, without pushing out manual backups", async () => {
+  const dir = tempDir()
+  const dataDir = join(dir, "data")
+  mkdirSync(join(dataDir, "backups"), { recursive: true })
+  writeFileSync(join(dataDir, "usage.json"), "{}")
+  const { ops } = makeService(
+    dir,
+    (_command, args) => {
+      if (args[0] === "-czf" && args[1]) writeFileSync(args[1], "tarball-bytes")
+      return { code: 0, stdout: "", stderr: "" }
+    },
+    { dataDir },
+  )
+  try {
+    for (let i = 0; i < 5; i++) writeFileSync(join(dataDir, "backups", `backup-2026010${i}-000000000.tar.gz`), "manual")
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(join(dataDir, "backups", `backup-2026020${i}-000000000-pre-update.tar.gz`), "update")
+    }
+    const result = await ops.backupData("pre-update")
+    assert.match(result.file!, /backup-\d{8}-\d{9}-pre-update\.tar\.gz$/)
+    const names = readdirSync(join(dataDir, "backups"))
+    assert.equal(names.filter((name) => !name.includes("-pre-update")).length, 5, "manual backups are all kept")
+    assert.equal(names.filter((name) => name.includes("-pre-update")).length, 5)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

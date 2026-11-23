@@ -33,6 +33,9 @@ import com.agentbot.app.data.ApiException
 import com.agentbot.app.data.AttachmentLimits
 import com.agentbot.app.data.Diagnostics
 import com.agentbot.app.data.LocalStore
+import com.agentbot.app.data.OutboxEntry
+import com.agentbot.app.widget.QuickEntry
+import com.agentbot.app.widget.WidgetStateStore
 import com.agentbot.app.data.LogTail
 import com.agentbot.app.data.MagpieSpec
 import com.agentbot.app.data.MagpieOverview
@@ -63,6 +66,7 @@ import com.agentbot.app.data.NotConfiguredException
 import com.agentbot.app.data.OpsResult
 import com.agentbot.app.data.Reminder
 import com.agentbot.app.data.Schedule
+import com.agentbot.app.data.SecretRequest
 import com.agentbot.app.data.SentAttachment
 import com.agentbot.app.data.ShareIntents
 import com.agentbot.app.data.ServerInfo
@@ -84,6 +88,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonObject
@@ -109,6 +114,8 @@ data class ChatMessage(
     val engineNote: String? = null,
     /** Live progress line reported by the server while the task runs. */
     val progress: String? = null,
+    /** The answer so far while it is being written; never persisted, the reply replaces it. */
+    val partial: String? = null,
     /** Server-side start time, used to tick the elapsed label while running. */
     val startedAt: Long? = null,
     val at: Long = System.currentTimeMillis(),
@@ -116,6 +123,10 @@ data class ChatMessage(
     val media: List<TaskMedia> = emptyList(),
     /** Attachments sent with this user message (names/sizes only). */
     val attachments: List<SentAttachment> = emptyList(),
+    /** Set while this user message is waiting in the offline outbox. */
+    val outboxId: String? = null,
+    /** Secrets the Agent asked for in this reply; each shows a 安全输入 card. */
+    val secretRequests: List<SecretRequest> = emptyList(),
 ) {
     enum class Role { USER, ASSISTANT }
 }
@@ -512,6 +523,72 @@ class AppViewModel(
     var archivedBusyId by mutableStateOf<String?>(null)
         private set
 
+    /** 历史会话 search: titles, engines and models match here; the stored chat text is searched off Main. */
+    var archivedQuery by mutableStateOf("")
+        private set
+
+    private var archivedTextHits by mutableStateOf<Set<String>>(emptySet())
+    private var archivedSearch: Job? = null
+
+    val visibleArchivedSessions: List<ArchivedSession>
+        get() {
+            val q = archivedQuery.trim()
+            if (q.isEmpty()) return archivedSessions
+            return archivedSessions.filter { entry ->
+                listOfNotNull(entry.title, entry.engineLabel, entry.engine, entry.model).any { it.contains(q, ignoreCase = true) } ||
+                    entry.id in archivedTextHits
+            }
+        }
+
+    fun updateArchivedQuery(query: String) {
+        archivedQuery = query
+        archivedSearch?.cancel()
+        val q = query.trim()
+        if (q.isEmpty()) {
+            archivedTextHits = emptySet()
+            return
+        }
+        val ids = archivedSessions.map { it.id }
+        archivedSearch = viewModelScope.launch {
+            // Typing is a burst: search once it pauses
+            delay(250)
+            val hits = withContext(Dispatchers.IO) { LocalStore.transcriptsMatching(appContext, ids, q) }
+            if (archivedQuery.trim() == q) archivedTextHits = hits
+        }
+    }
+
+    fun renameArchivedSession(id: String, title: String) {
+        val name = title.trim()
+        if (name.isEmpty()) return
+        updateArchived(id, "重命名") { api.updateArchivedSession(conn(), id, title = name) }
+    }
+
+    fun toggleArchivedPin(entry: ArchivedSession) {
+        updateArchived(entry.id, if (entry.pinned) "取消置顶" else "置顶") {
+            api.updateArchivedSession(conn(), entry.id, pinned = !entry.pinned)
+        }
+    }
+
+    private fun updateArchived(id: String, what: String, request: suspend () -> ArchivedSession) {
+        if (archivedBusyId != null) return
+        archivedBusyId = id
+        archivedError = null
+        viewModelScope.launch {
+            try {
+                request()
+                // Reloaded rather than patched: a pin moves the entry, and the server owns the order
+                archivedSessions = api.archivedSessions(conn())
+                toast = "已$what"
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                archivedError = if (err is NotConfiguredException) err.message else "${what}失败：${err.message}"
+            } finally {
+                archivedBusyId = null
+            }
+        }
+    }
+
     /** Where the working-directory picker is standing; null while it is closed. */
     var dirBrowse by mutableStateOf<DirListing?>(null)
         private set
@@ -837,6 +914,30 @@ class AppViewModel(
     var draft by mutableStateOf("")
         private set
 
+    /** The reply the next message follows up on; it travels ahead of the text as a quote. */
+    var quotedReply by mutableStateOf<String?>(null)
+        private set
+
+    fun quoteReply(text: String) {
+        quotedReply = text.trim().takeIf { it.isNotEmpty() }
+    }
+
+    fun clearQuote() {
+        quotedReply = null
+    }
+
+    /**
+     * The quoted reply as Markdown `>` lines, then the follow-up. Long replies keep their head
+     * and tail: what is being asked about is usually a passage the user can point at, not the
+     * whole answer, and a full file would crowd the question out of a CLI's argv.
+     */
+    private fun withQuote(quote: String, text: String): String {
+        val clipped = if (quote.length <= MAX_QUOTE_CHARS) quote else
+            quote.take(MAX_QUOTE_CHARS * 2 / 3) + "\n…\n" + quote.takeLast(MAX_QUOTE_CHARS / 3)
+        val quoted = clipped.lines().joinToString("\n") { "> $it" }
+        return "$quoted\n\n$text"
+    }
+
     fun updateDraft(text: String) {
         draft = text
         // Every keystroke lands here, and one preferences commit serializes the whole file —
@@ -862,8 +963,24 @@ class AppViewModel(
     private val historyWrites = Channel<List<ChatMessage>>(Channel.CONFLATED)
     private val draftWrites = Channel<String>(Channel.CONFLATED)
 
+    // Declared before init on purpose: Kotlin runs property initializers and init blocks in source
+    // order, so a state the init block writes must already exist, and a field declared below it
+    // would be reset to its initializer afterwards (the network callback reference was, so it was
+    // never unregistered).
+    /** Text messages written while the bot was unreachable, oldest first. */
+    var outbox by mutableStateOf<List<OutboxEntry>>(emptyList())
+        private set
+
+    private var outboxJob: Job? = null
+
+    /** Wakes the sender out of its backoff: the network came back or the App returned to the foreground. */
+    private val outboxWake = Channel<Unit>(Channel.CONFLATED)
+
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
     init {
         messages = LocalStore.loadMessages(appContext)
+        outbox = LocalStore.loadOutbox(appContext)
         draft = LocalStore.loadDraft(appContext)
         // The app opens straight on Chat, so navigate() never runs on a cold start
         pollNotices()
@@ -872,9 +989,12 @@ class AppViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             for (snapshot in historyWrites) {
                 LocalStore.writeHistory(appContext, snapshot)
+                // The widget and the tile follow the stored chat; publish skips unchanged states
+                publishWidget(snapshot)
                 delay(HISTORY_WRITE_DELAY_MS)
             }
         }
+        viewModelScope.launch(Dispatchers.IO) { publishWidget(messages) }
         viewModelScope.launch(Dispatchers.IO) {
             for (text in draftWrites) {
                 LocalStore.saveDraft(appContext, text)
@@ -882,8 +1002,10 @@ class AppViewModel(
             }
         }
         TaskNotifier.ensureChannel(appContext)
+        watchNetwork()
         // A task may still be running after the process was killed: resume polling it
         if (settings.connection() != null) {
+            startOutbox()
             messages.filter { it.taskId != null && (it.status == "queued" || it.status == "running") }
                 .forEach { message -> message.taskId?.let { pollTask(it) } }
             // The release check runs once here and then on a timer: opening the App should be
@@ -984,6 +1106,39 @@ class AppViewModel(
     }
 
     /** Jumps to the chat and asks it to reveal this task's message (notification tap). */
+    private fun publishWidget(snapshot: List<ChatMessage>) {
+        runCatching { WidgetStateStore.publish(appContext, WidgetStateStore.summarize(snapshot, outbox.size, configured)) }
+    }
+
+    /** Set by the widget / tile / launcher shortcut; the composer consumes it once it is on screen. */
+    var composeRequested by mutableStateOf(false)
+        private set
+
+    /** Start recording as soon as the composer appears; only an entry the App built can ask for it. */
+    var voiceRequested by mutableStateOf(false)
+        private set
+
+    fun openEntry(entry: String, trusted: Boolean) {
+        when (entry) {
+            QuickEntry.SESSIONS -> navigate(Screen.Sessions)
+            QuickEntry.QUEUE -> navigate(Screen.Queue)
+            else -> {
+                navigate(Screen.Chat)
+                // Not paired yet: the request would fire much later, after pairing, out of nowhere
+                if (!configured) return
+                if (entry == QuickEntry.VOICE && trusted) voiceRequested = true else composeRequested = true
+            }
+        }
+    }
+
+    fun consumeComposeRequest() {
+        composeRequested = false
+    }
+
+    fun consumeVoiceRequest() {
+        voiceRequested = false
+    }
+
     fun focusTask(taskId: String) {
         focusTaskId = taskId
         navigate(Screen.Chat)
@@ -1153,6 +1308,8 @@ class AppViewModel(
     fun onForeground() {
         resumePendingInstall()
         refreshConnectionQuietly()
+        startOutbox()
+        outboxWake.trySend(Unit)
         when (screen) {
             Screen.History -> refreshHistoryQuietly()
             Screen.Reminders -> refreshRemindersQuietly()
@@ -3758,6 +3915,11 @@ class AppViewModel(
     }
 
     fun newChat() {
+        // Queued messages belong to this conversation; a new one would send them into the wrong context
+        if (outbox.isNotEmpty()) {
+            toast = "还有 ${outbox.size} 条离线消息等待发送，发出后再开启新会话"
+            return
+        }
         // The server refuses a reset while a task runs (409, like Telegram's button); checking
         // here avoids a pointless request and gives the user the same actionable message.
         if (hasLiveTask) {
@@ -3795,6 +3957,86 @@ class AppViewModel(
 
     fun hasArchivedTranscript(id: String): Boolean = LocalStore.hasTranscript(appContext, id)
 
+    /** `/undo`: the server restores the files the last CLI task changed, when it safely can. */
+    // ---- 安全输入 ----
+
+    /** `taskId/NAME` of the cards being submitted, so one tap cannot send a value twice. */
+    var secretBusy by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** Plain http:// without the pairing key: the value would cross the network readable. */
+    val secretTransportExposed: Boolean
+        get() = settings.baseUrl.trim().startsWith("http://", ignoreCase = true) && settings.encKey.isBlank()
+
+    /**
+     * Sends one value straight to the server's vault. It is never kept here: the card clears its
+     * field through [onSent], and only the request's provided flag is stored with the bubble.
+     * Once the last one is in, the server queues the Agent's continuation and it is followed
+     * like any other task.
+     */
+    fun provideSecret(taskId: String, name: String, value: String, onSent: () -> Unit) {
+        val busyKey = "$taskId/$name"
+        if (value.isEmpty() || busyKey in secretBusy) return
+        secretBusy = secretBusy + busyKey
+        viewModelScope.launch {
+            try {
+                val result = api.provideSecret(conn(), taskId, name, value)
+                onSent()
+                val names = messages.firstOrNull { it.taskId == taskId }?.secretRequests?.map { it.name }.orEmpty()
+                updateMessage(taskId) { message ->
+                    message.copy(secretRequests = message.secretRequests.map { if (it.name == name) it.copy(provided = true) else it })
+                }
+                val next = result.task
+                if (next != null) {
+                    messages = messages +
+                        ChatMessage(ChatMessage.Role.USER, "🔐 已通过安全输入提供：${names.ifEmpty { listOf(name) }.joinToString("、")}") +
+                        ChatMessage(ChatMessage.Role.ASSISTANT, "", taskId = next.id, status = next.status)
+                    persistMessages()
+                    pollTask(next.id)
+                } else {
+                    toast = "已安全保存 $name，还需要：${result.remaining.joinToString("、")}"
+                }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                connectionError = "提交密钥失败：${err.message}"
+            } finally {
+                secretBusy = secretBusy - busyKey
+            }
+        }
+    }
+
+    /** 忽略: the card goes away here; the Agent simply does not get the value. */
+    fun dismissSecret(taskId: String, name: String) {
+        updateMessage(taskId) { message -> message.copy(secretRequests = message.secretRequests.filterNot { it.name == name }) }
+    }
+
+    fun showSecrets() {
+        guarded("查看密钥") {
+            val saved = api.listSecrets(conn())
+            toast = if (saved.isEmpty()) {
+                "本会话没有通过安全输入保存的密钥"
+            } else {
+                "已保存（值不显示，24 小时后清除）：" + saved.joinToString("、") { it.name } + "。发送 /secrets clear 清除"
+            }
+        }
+    }
+
+    fun clearSecrets() {
+        guarded("清除密钥") {
+            val cleared = api.clearSecrets(conn())
+            toast = if (cleared > 0) "已清除 $cleared 个保存的密钥" else "本会话没有保存密钥"
+        }
+    }
+
+    fun undoChanges() {
+        if (hasLiveTask) {
+            toast = "任务执行中，请先停止当前任务再撤销"
+            return
+        }
+        guarded("撤销改动") { toast = api.undoChanges(conn()) }
+    }
+
     fun refreshArchivedSessions() {
         if (archivedLoading) return
         archivedLoading = true
@@ -3803,6 +4045,8 @@ class AppViewModel(
             try {
                 val loaded = api.archivedSessions(conn())
                 archivedSessions = loaded
+                // A search typed before the list arrived ran over no entries: run it again
+                if (archivedQuery.isNotBlank()) updateArchivedQuery(archivedQuery)
                 // The server keeps 20; transcripts of the ones it evicted can never be resumed
                 withContext(Dispatchers.IO) { LocalStore.pruneTranscripts(appContext, loaded.map { it.id }.toSet()) }
             } catch (err: CancellationException) {
@@ -3820,6 +4064,10 @@ class AppViewModel(
      * the current one is parked in its place, so nothing is lost either way.
      */
     fun resumeArchivedSession(id: String) {
+        if (outbox.isNotEmpty()) {
+            archivedError = "还有 ${outbox.size} 条离线消息等待发送，发出后再切换会话"
+            return
+        }
         if (hasLiveTask) {
             archivedError = "任务执行中，请先停止当前任务再切换会话"
             return
@@ -3831,7 +4079,14 @@ class AppViewModel(
             try {
                 val current = messages
                 val result = api.resumeSession(conn(), id)
+                // Nothing to do when it was already the open conversation
+                if (result.archived == null && archivedSessions.firstOrNull { it.id == id }?.current == true) {
+                    toast = result.message ?: "这就是当前会话"
+                    navigate(Screen.Chat)
+                    return@launch
+                }
                 val restored = withContext(Dispatchers.IO) {
+                    // The conversation being left keeps its bubbles under its own entry
                     result.archived?.let { LocalStore.archiveTranscript(appContext, it.id, current) }
                     LocalStore.takeTranscript(appContext, id)
                 }
@@ -3919,12 +4174,26 @@ class AppViewModel(
         val engine = oneOffEngine ?: oneOffModel?.let { session?.engine }
         val model = oneOffModel
         if (raw.isEmpty() && attachments.isEmpty()) return false
+        // A quote needs a question to go with it; on its own it stays pinned to the composer
+        val quote = quotedReply?.takeIf { raw.isNotEmpty() }
+        val prompt = if (quote != null) withQuote(quote, raw) else raw
+        // While messages wait offline, a new one joins the end of the line so the order holds
+        if (outbox.isNotEmpty()) {
+            if (attachments.isNotEmpty()) {
+                toast = "还有离线消息等待发送，附件请等它们发出后再发"
+                return false
+            }
+            enqueueOffline(prompt, engine, model)
+            return true
+        }
         // busy 在 launch 外置位:协程要等调度才跑,窗口内快速连发会双双通过检查
         busy = true
         viewModelScope.launch {
             try {
                 // `/name` shortcuts expand server-side with the bot's 3-hop rule, so submit as typed.
-                val task = api.submitTask(conn(), raw, attachments, engine, model)
+                val task = api.submitTask(conn(), prompt, attachments, engine, model)
+                // Cleared only once the server took it: a failed send keeps both text and quote
+                if (quote != null) quotedReply = null
                 oneOffEngine = null
                 oneOffModel = null
                 oneOffChoices = ModelChoices()
@@ -3934,10 +4203,25 @@ class AppViewModel(
                 attachments.forEach { LocalStore.discard(it) }
                 val sentAt = System.currentTimeMillis()
                 val sent = attachments.map { SentAttachment(it.name, it.mime, it.sizeBytes) }
-                messages = messages + ChatMessage(ChatMessage.Role.USER, raw, at = sentAt, attachments = sent) +
+                messages = messages + ChatMessage(ChatMessage.Role.USER, prompt, at = sentAt, attachments = sent) +
                     ChatMessage(ChatMessage.Role.ASSISTANT, "", taskId = task.id, status = task.status, at = sentAt)
                 persistMessages()
                 pollTask(task.id)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: IOException) {
+                // The bot could not be reached at all, so it never saw this message: keep it on the
+                // phone and send it when the connection is back. A failure after the request may
+                // have arrived (a timeout) is not queued, because a resend could run it twice.
+                if (attachments.isEmpty() && neverReachedServer(err)) {
+                    enqueueOffline(prompt, engine, model)
+                    toast = "暂时连不上服务器，消息已暂存，恢复后自动发送"
+                } else {
+                    connectionError = "发送失败：${err.message}"
+                    if (draft.isBlank()) updateDraft(raw)
+                    oneOffEngine = engine
+                    oneOffModel = model
+                }
             } catch (err: Exception) {
                 connectionError = "发送失败：${err.message}"
                 // Give the text back so a dropped connection never eats the prompt.
@@ -3950,6 +4234,116 @@ class AppViewModel(
             }
         }
         return true
+    }
+
+    // ---- offline outbox ----
+
+    /** Connection refused, unknown host, no route: the request never left the phone. */
+    private fun neverReachedServer(err: Throwable): Boolean {
+        var cause: Throwable? = err
+        while (cause != null) {
+            if (cause is java.net.ConnectException || cause is java.net.UnknownHostException || cause is java.net.NoRouteToHostException) {
+                return true
+            }
+            cause = cause.cause
+        }
+        return false
+    }
+
+    private fun enqueueOffline(prompt: String, engine: String?, model: String?) {
+        val entry = OutboxEntry(id = java.util.UUID.randomUUID().toString(), prompt = prompt, engine = engine, model = model, at = System.currentTimeMillis())
+        outbox = outbox + entry
+        LocalStore.saveOutbox(appContext, outbox)
+        messages = messages + ChatMessage(ChatMessage.Role.USER, prompt, at = entry.at, outboxId = entry.id)
+        persistMessages()
+        // The quote and the one-off pins went into the queued message
+        quotedReply = null
+        oneOffEngine = null
+        oneOffModel = null
+        oneOffChoices = ModelChoices()
+        startOutbox()
+    }
+
+    /** Puts every queued message back into the composer and forgets the queue. */
+    fun cancelOutbox() {
+        if (outbox.isEmpty()) return
+        val texts = outbox.map { it.prompt }
+        val ids = outbox.map { it.id }.toSet()
+        outbox = emptyList()
+        LocalStore.saveOutbox(appContext, outbox)
+        messages = messages.filterNot { it.outboxId in ids }
+        persistMessages()
+        updateDraft(listOf(draft, *texts.toTypedArray()).filter { it.isNotBlank() }.joinToString("\n\n"))
+        toast = "已取消待发送消息，内容放回了输入框"
+    }
+
+    private fun startOutbox() {
+        if (outbox.isEmpty() || outboxJob?.isActive == true || settings.connection() == null) return
+        outboxJob = viewModelScope.launch {
+            var failures = 0
+            while (outbox.isNotEmpty()) {
+                val entry = outbox.first()
+                val retry = try {
+                    val task = api.submitTask(conn(), entry.prompt, emptyList(), entry.engine, entry.model)
+                    sentFromOutbox(entry, task.id, task.status)
+                    failures = 0
+                    false
+                } catch (err: CancellationException) {
+                    throw err
+                } catch (err: IOException) {
+                    if (neverReachedServer(err)) {
+                        true
+                    } else {
+                        // It may have arrived: do not risk a second Agent run, let the user decide
+                        dropFromOutbox(entry, "离线消息发送结果不确定（${err.message}），已放回输入框，请确认后再发")
+                        false
+                    }
+                } catch (err: ApiException) {
+                    // Busy (409), restarting behind a proxy (5xx), rate-limited or re-pairing: try again later
+                    if (err.code == 409 || err.code == 401 || err.code == 408 || err.code == 429 || err.code >= 500) {
+                        true
+                    } else {
+                        dropFromOutbox(entry, "离线消息发送失败：${err.message}，已放回输入框")
+                        false
+                    }
+                } catch (err: NotConfiguredException) {
+                    // Kept for when the connection is set up again
+                    return@launch
+                }
+                if (retry) {
+                    failures++
+                    // Woken early by a network change or the App coming back to the foreground
+                    withTimeoutOrNull(minOf(5_000L shl minOf(failures, 4), 60_000L)) { outboxWake.receive() }
+                }
+            }
+        }
+    }
+
+    /** The queued bubble becomes a sent one, with its answer right below it. */
+    private fun sentFromOutbox(entry: OutboxEntry, taskId: String, status: String) {
+        outbox = outbox.filterNot { it.id == entry.id }
+        LocalStore.saveOutbox(appContext, outbox)
+        val reply = ChatMessage(ChatMessage.Role.ASSISTANT, "", taskId = taskId, status = status)
+        val index = messages.indexOfFirst { it.outboxId == entry.id }
+        messages = if (index < 0) {
+            messages + ChatMessage(ChatMessage.Role.USER, entry.prompt, at = entry.at) + reply
+        } else {
+            messages.toMutableList().also { list ->
+                list[index] = list[index].copy(outboxId = null)
+                list.add(index + 1, reply)
+            }
+        }
+        persistMessages()
+        pollTask(taskId)
+    }
+
+    private fun dropFromOutbox(entry: OutboxEntry, reason: String) {
+        outbox = outbox.filterNot { it.id == entry.id }
+        LocalStore.saveOutbox(appContext, outbox)
+        messages = messages.filterNot { it.outboxId == entry.id }
+        persistMessages()
+        if (draft.isBlank()) updateDraft(entry.prompt)
+        connectionError = reason
     }
 
     /**
@@ -4001,23 +4395,95 @@ class AppViewModel(
         }
     }
 
+    /**
+     * A Wi-Fi/cellular handover kills every open socket. Without this the stream waited out its
+     * read timeout and the poll loop its backoff (up to 15s) before noticing the network was back.
+     * When a network becomes available, live tasks reattach immediately and the status refreshes.
+     */
+    private fun watchNetwork() {
+        val manager = appContext.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            // Both fields are only touched on ConnectivityManager's callback thread
+            private var current: android.net.Network? = null
+            private var dropped = false
+
+            override fun onAvailable(network: android.net.Network) {
+                // registerDefaultNetworkCallback reports the network already in use right away.
+                // Treating that as "the network came back" cancelled and restarted every live
+                // stream on each launch, just after init had opened them, and ran a second health
+                // check on top of refreshSession. Only a real change or a recovery after a loss counts.
+                val changed = (current != null && current != network) || dropped
+                current = network
+                dropped = false
+                if (changed) viewModelScope.launch(Dispatchers.Main) { onNetworkBack() }
+            }
+
+            override fun onLost(network: android.net.Network) {
+                if (network == current) {
+                    current = null
+                    dropped = true
+                }
+            }
+        }
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+            .onSuccess { networkCallback = callback }
+    }
+
+    private fun onNetworkBack() {
+        if (settings.connection() == null) return
+        refreshConnectionQuietly()
+        outboxWake.trySend(Unit)
+        // Restart the watchers of tasks still running: their sockets died with the old network
+        val live = messages.mapNotNull { m -> m.taskId?.takeIf { m.status == "queued" || m.status == "running" } }
+        for (id in live) {
+            polls.remove(id)?.cancel()
+            pollTask(id)
+        }
+    }
+
+    override fun onCleared() {
+        networkCallback?.let { callback ->
+            runCatching {
+                appContext.getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+            }
+        }
+        networkCallback = null
+        super.onCleared()
+    }
+
     private fun pollTask(id: String) {
         if (polls.containsKey(id)) return
-        polls[id] = viewModelScope.launch {
+        // Started lazily: under Main.immediate the body could otherwise reach `self` before it exists
+        lateinit var self: Job
+        self = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
-                try {
-                    // Preferred path: the SSE stream pushes every progress line and
-                    // the terminal snapshot with no polling delay. Frames arrive on OkHttp's
-                    // reader thread, so every chat write hops back to Main first.
-                    api.streamTask(conn(), id) { task ->
-                        withContext(Dispatchers.Main) { applyTaskSnapshot(id, task) }
+                // Preferred path: the SSE stream pushes every progress line and the terminal
+                // snapshot with no polling delay. A dropped stream used to end streaming for the
+                // rest of the task, leaving a 1.5s poll for minutes; it is now reopened a few times
+                // (a handover usually heals in seconds) before polling takes over for good.
+                var settled = false
+                for (attempt in 0 until STREAM_RECONNECTS) {
+                    try {
+                        api.streamTask(conn(), id) { task ->
+                            withContext(Dispatchers.Main) {
+                                applyTaskSnapshot(id, task)
+                                if (!task.isRunning) settled = true
+                            }
+                        }
+                        // The stream only ends cleanly on a terminal snapshot
+                        settled = true
+                    } catch (err: CancellationException) {
+                        throw err
+                    } catch (err: ApiException) {
+                        // A real server answer (404 after a restart, 401): polling words it properly
+                        break
+                    } catch (err: Exception) {
+                        if (attempt < STREAM_RECONNECTS - 1) {
+                            updateMessage(id) { it.copy(progress = "连接中断，正在重连…") }
+                            delay(STREAM_RECONNECT_DELAYS_MS[attempt])
+                        }
                     }
-                    return@launch
-                } catch (err: CancellationException) {
-                    throw err
-                } catch (err: Exception) {
-                    // Missing endpoint, broken stream or auth hiccup: polling is the
-                    // authoritative fallback and produces the real error messages
+                    if (settled) return@launch
                 }
                 pollTaskLoop(id)
             } catch (err: CancellationException) {
@@ -4030,10 +4496,13 @@ class AppViewModel(
                 val reason = if (err is ApiException) "任务查询失败：${err.message}" else "任务查询中断：${err.message}"
                 updateMessage(id) { it.copy(status = "failed", text = it.text.ifEmpty { reason }) }
             } finally {
-                polls.remove(id)
+                // A network change replaces this watcher with a new one; only drop our own entry
+                if (polls[id] === self) polls.remove(id)
                 if (screen == Screen.Queue) refreshQueue()
             }
         }
+        polls[id] = self
+        self.start()
     }
 
     private fun applyTaskSnapshot(id: String, task: com.agentbot.app.data.Task) {
@@ -4044,8 +4513,10 @@ class AppViewModel(
                 errorCode = task.errorCode,
                 engineNote = task.engineNote,
                 progress = task.progress,
+                partial = task.partial?.takeIf { task.isRunning },
                 startedAt = task.startedAt ?: it.startedAt,
                 media = task.media.ifEmpty { it.media },
+                secretRequests = task.secretRequests.ifEmpty { it.secretRequests },
             )
         }
         if (!task.isRunning && !AppVisibility.foreground) TaskNotifier.taskSettled(appContext, task)
@@ -4438,6 +4909,13 @@ class AppViewModel(
 
         /** How long a live task keeps being asked about after replies this phone cannot read. */
         private const val MAX_LOCAL_POLL_RETRIES = 8
+
+        /** Longest quoted reply carried into a follow-up. */
+        private const val MAX_QUOTE_CHARS = 1_500
+
+        /** Stream reopen attempts before a task falls back to polling. */
+        private const val STREAM_RECONNECTS = 4
+        private val STREAM_RECONNECT_DELAYS_MS = longArrayOf(1_000L, 3_000L, 6_000L)
 
         fun formatTime(ms: Long): String =
             SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(ms))

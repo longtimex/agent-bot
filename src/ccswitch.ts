@@ -5,6 +5,7 @@ import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { childEnv, extendedPath } from "./binPath.js"
 import { clip, clipTail } from "./messages.js"
+import { maskSecretValues } from "./secretVault.js"
 
 export const CC_SWITCH_APPS = [
   "claude",
@@ -126,7 +127,7 @@ export function stripAnsi(text: string): string {
 }
 
 export function redactSecrets(text: string): string {
-  return text
+  return maskSecretValues(text)
     .replace(
       /("(?:[^"\\]*(?:api[\s_-]?key|token|secret|password|authorization|credential)[^"\\]*)"\s*:\s*")([^"]*)(")/gi,
       "$1***$3",

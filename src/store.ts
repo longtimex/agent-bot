@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path"
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { withFileLock } from "./lock.js"
 import type { Logger } from "./logger.js"
+import { MAX_CONTEXT_TURNS, clipTurn, sanitizeTurns, type RecentTurn } from "./statelessContext.js"
 
 /** Engine ids are dynamic: `opencode`, `qoder`, `claude`, or any custom profile. */
 export type BackendEngine = string
@@ -19,6 +20,12 @@ export interface SessionRecord {
   cliModels?: Record<string, string>
   /** Per-chat working directory for CLI engines; absent means the Bot's own cwd. */
   dir?: string
+  /** First line of the conversation's first prompt: what 历史会话 lists it as. */
+  title?: string
+  /** The 历史会话 entry this conversation was resumed from, so parking it updates that entry. */
+  archiveId?: string
+  /** Recent turns per stateless engine, replayed as context because the CLI keeps none. */
+  recentTurns?: Record<string, RecentTurn[]>
   /** Legacy fields kept only for one-time migration from the Qoder-only version. */
   qoderSessionID?: string
   qoderModel?: string
@@ -44,6 +51,16 @@ function sanitizeMap(value: unknown): Record<string, string> | undefined {
     if (typeof raw === "string" && raw) map[key] = raw
   }
   return map
+}
+
+function readTurns(value: unknown): { recentTurns?: Record<string, RecentTurn[]> } {
+  if (!value || typeof value !== "object") return {}
+  const map = emptyMap<RecentTurn[]>()
+  for (const [engine, raw] of Object.entries(value as Record<string, unknown>)) {
+    const turns = sanitizeTurns(raw)
+    if (turns) map[engine] = turns
+  }
+  return Object.keys(map).length > 0 ? { recentTurns: map } : {}
 }
 
 const MAX_DIR_CHARS = 512
@@ -118,6 +135,85 @@ export class SessionStore {
     })
   }
 
+  getTitle(key: string): string | undefined {
+    return this.#data[key]?.title
+  }
+
+  getArchiveId(key: string): string | undefined {
+    return this.#data[key]?.archiveId
+  }
+
+  /** Records the conversation's title from its first prompt; later prompts leave it alone. */
+  noteTitle(key: string, prompt: string): void {
+    if (this.#data[key]?.title) return
+    const line = prompt.split("\n").map((part) => part.trim()).find(Boolean)
+    if (!line) return
+    const title = line.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 60)
+    this.#change((data) => {
+      const existing = data[key] ?? { sessionID: "", updatedAt: "" }
+      if (existing.title) return { changed: false, result: undefined }
+      data[key] = { ...existing, title, updatedAt: new Date().toISOString() }
+      return { changed: true, result: undefined }
+    })
+  }
+
+  getRecentTurns(key: string, engine: string): RecentTurn[] {
+    const map = this.#data[key]?.recentTurns
+    return map && Object.hasOwn(map, engine) ? [...map[engine]!] : []
+  }
+
+  /** Appends one exchange for a stateless engine, keeping only the newest few. */
+  pushRecentTurn(key: string, engine: string, question: string, answer: string): void {
+    this.#change((data) => {
+      const existing = data[key] ?? { sessionID: "", updatedAt: "" }
+      const map = Object.assign(emptyMap<RecentTurn[]>(), existing.recentTurns ?? {})
+      const list = Object.hasOwn(map, engine) ? map[engine]! : []
+      map[engine] = [...list, clipTurn(question, answer)].slice(-MAX_CONTEXT_TURNS)
+      data[key] = { ...existing, recentTurns: map, updatedAt: new Date().toISOString() }
+      return { changed: true, result: undefined }
+    })
+  }
+
+  /** A user-chosen name for the open conversation; unlike noteTitle it replaces an existing one. */
+  setTitle(key: string, title: string | undefined): void {
+    this.#change((data) => {
+      const existing = data[key]
+      if (!existing && !title) return { changed: false, result: undefined }
+      const next: SessionRecord = { ...(existing ?? { sessionID: "" }), updatedAt: new Date().toISOString() }
+      if (title) next.title = title
+      else delete next.title
+      data[key] = next
+      return { changed: true, result: undefined }
+    })
+  }
+
+  /** Replaces the conversation's 历史会话 identity: a new chat clears it, a resume sets it. */
+  setConversation(key: string, meta: { title?: string; archiveId?: string }): void {
+    this.#change((data) => {
+      const existing = data[key]
+      if (!existing && !meta.title && !meta.archiveId) return { changed: false, result: undefined }
+      const next: SessionRecord = { ...(existing ?? { sessionID: "" }), updatedAt: new Date().toISOString() }
+      if (meta.title) next.title = meta.title
+      else delete next.title
+      if (meta.archiveId) next.archiveId = meta.archiveId
+      else delete next.archiveId
+      // A different conversation must not inherit the last one's replayed turns
+      delete next.recentTurns
+      data[key] = next
+      return { changed: true, result: undefined }
+    })
+  }
+
+  /** The engine a chat with no choice of its own runs on. */
+  defaultEngine(): BackendEngine {
+    return this.fallback()
+  }
+
+  /** Every engine a chat has explicitly picked. */
+  explicitEngines(): BackendEngine[] {
+    return [...new Set(Object.values(this.#data).map((record) => record?.engine?.trim()).filter((id): id is string => Boolean(id)))]
+  }
+
   getEngine(key: string): BackendEngine {
     return this.#data[key]?.engine || this.fallback()
   }
@@ -150,6 +246,12 @@ export class SessionStore {
       const cliSessions = cloneMap(existing.cliSessions)
       if (sessionID) cliSessions[engine] = sessionID
       else delete cliSessions[engine]
+      // Clearing an engine's session (a model switch, a reset) also forgets its replayed turns
+      if (!sessionID && existing.recentTurns && Object.hasOwn(existing.recentTurns, engine)) {
+        const turns = Object.assign(emptyMap<RecentTurn[]>(), existing.recentTurns)
+        delete turns[engine]
+        existing.recentTurns = Object.keys(turns).length > 0 ? turns : undefined
+      }
       data[key] = {
         ...existing,
         cliSessions,
@@ -284,6 +386,11 @@ export class SessionStore {
           updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
           model: sanitizeModel(value.model),
           dir: sanitizeDir(value.dir),
+          ...(typeof value.title === "string" && value.title ? { title: value.title.slice(0, 60) } : {}),
+          ...(typeof value.archiveId === "string" && /^[0-9a-f]{12}$/.test(value.archiveId)
+            ? { archiveId: value.archiveId }
+            : {}),
+          ...readTurns(value.recentTurns),
           cliSessions: Object.keys(cliSessions).length > 0 ? cliSessions : undefined,
           cliModels: Object.keys(cliModels).length > 0 ? cliModels : undefined,
         }
@@ -292,6 +399,9 @@ export class SessionStore {
           !record.engine &&
           !record.model &&
           !record.dir &&
+          !record.title &&
+          !record.archiveId &&
+          !record.recentTurns &&
           !record.cliSessions &&
           !record.cliModels
         if (!isShell) data[key] = record

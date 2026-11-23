@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Image
@@ -73,6 +74,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -112,6 +114,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -585,7 +588,10 @@ private fun snippet(text: String, query: String, radius: Int = 36): String {
 @Composable
 private fun ModelChip(vm: AppViewModel) {
     var showPicker by remember { mutableStateOf(false) }
-    val label = vm.session?.model ?: vm.session?.engineLabel ?: "未连接"
+    // Engine and model together: the model name alone ("deepseek-v4.1-flash") did not say whether
+    // Codex, Claude or OpenCode would answer the next message
+    val session = vm.session
+    val label = if (session == null) "未连接" else listOfNotNull(session.engineLabel ?: session.engine, session.model).joinToString(" · ")
     Surface(
         modifier = Modifier
             .widthIn(max = 270.dp)
@@ -819,6 +825,17 @@ private fun ChatBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> U
                             Text(message.text, color = MaterialTheme.colorScheme.onBackground)
                         }
                     }
+                    if (message.outboxId != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                            Icon(Icons.Filled.Schedule, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(12.dp))
+                            Text(
+                                "待发送 · 连上服务器后自动发出",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(start = 4.dp),
+                            )
+                        }
+                    }
                     if (message.attachments.isNotEmpty()) {
                         Column(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -864,13 +881,29 @@ private fun ChatBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> U
                 }
             }
         } else {
-            AssistantBubble(vm, message, onRetry)
+            AssistantBubble(vm, message, onRetry, highlight)
         }
     }
 }
 
+/**
+ * What a failure class means and the one screen that fixes it. The bubble used to show only the
+ * raw code ("错误码：ENGINE_UNAVAILABLE"), which told the user nothing about what to do next.
+ */
+private class FailureHint(val text: String, val action: String? = null, val run: ((AppViewModel) -> Unit)? = null)
+
+private fun failureHint(code: String): FailureHint? = when (code) {
+    "ENGINE_UNAVAILABLE" -> FailureHint("引擎不可用：CLI 未安装，或 OpenCode 服务没有运行", "临时换个引擎") { it.requestPinPicker() }
+    "AUTH_FAILED" -> FailureHint("认证失败：API Key、账号登录或中转站配置有误", "检查模型与中转站") { it.navigate(Screen.Models) }
+    "MODEL_UNAVAILABLE" -> FailureHint("当前模型不可用或名称有误", "切换模型") { it.navigate(Screen.Session) }
+    "CLI_ARGUMENT_INVALID" -> FailureHint("CLI 不认识 Bot 传的参数，通常是 CLI 版本不兼容", "去引擎管理更新") { it.navigate(Screen.Agents) }
+    "TASK_TIMEOUT" -> FailureHint("任务超时：可以拆小任务，或调大 TASK_TIMEOUT_MS", "调整超时设置") { it.navigate(Screen.Config) }
+    "ATTACHMENT_FAILED" -> FailureHint("附件处理失败，可以换个格式或重新发送")
+    else -> null
+}
+
 @Composable
-private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> Unit)?) {
+private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (() -> Unit)?, highlight: Boolean = false) {
     val status = message.status
     val clipboard = LocalClipboardManager.current
     var copied by remember(message.text) { mutableStateOf(false) }
@@ -939,12 +972,20 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                                         style = MaterialTheme.typography.bodyMedium,
                                     )
                                     message.errorCode?.takeIf { it.isNotBlank() && it != "UNKNOWN" }?.let { code ->
+                                        val hint = failureHint(code)
                                         Text(
-                                            "错误码：$code",
+                                            hint?.let { "${it.text}（$code）" } ?: "错误码：$code",
                                             color = TextSecondary,
                                             style = MaterialTheme.typography.labelSmall,
                                             modifier = Modifier.padding(top = 4.dp),
                                         )
+                                        if (hint?.action != null && hint.run != null) {
+                                            QuietButton(
+                                                text = hint.action,
+                                                onClick = { hint.run.invoke(vm) },
+                                                modifier = Modifier.padding(top = 2.dp),
+                                            )
+                                        }
                                     }
                                 }
                                 status == "cancelled" -> Text(
@@ -952,7 +993,8 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
-                                else -> MarkdownText(message.text)
+                                // A search hit lands on a highlighted bubble: show it whole so the match is visible
+                                else -> MarkdownText(message.text, collapsible = !highlight)
                             }
                             message.engineNote?.takeIf { it.isNotBlank() }?.let { note ->
                                 Text(
@@ -966,6 +1008,9 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                     }
                     if (message.media.isNotEmpty() && message.taskId != null) {
                         AssistantMedia(vm, message.taskId, message.media)
+                    }
+                    if (message.taskId != null) {
+                        message.secretRequests.forEach { request -> SecretRequestCard(vm, message.taskId, request) }
                     }
                 }
             }
@@ -1004,6 +1049,30 @@ private fun AssistantBubble(vm: AppViewModel, message: ChatMessage, onRetry: (()
                         )
                     }
                 }
+                // Follow up on this answer without copying it into the composer by hand
+                if (message.text.isNotBlank() && status != "queued" && status != "running" && status != "failed") {
+                    Row(
+                        modifier = Modifier
+                            .padding(start = 2.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .clickable { vm.quoteReply(message.text) }
+                            .padding(horizontal = 5.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.FormatQuote,
+                            contentDescription = "引用这条回复",
+                            tint = TextSecondary.copy(alpha = 0.78f),
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            "引用",
+                            color = TextSecondary.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 3.dp),
+                        )
+                    }
+                }
                 if (onRetry != null && (status == "failed" || status == "cancelled")) {
                     QuietButton(
                         text = if (status == "cancelled") "重新执行" else "重试",
@@ -1031,9 +1100,19 @@ private fun RunningLine(vm: AppViewModel, message: ChatMessage) {
         if (message.status == "queued") "排队中…" else "思考中…"
     }
     val elapsed = message.startedAt?.let { " · 已运行 ${AppViewModel.formatDuration(now - it)}" } ?: ""
+    // The answer as it is being written, above the status line, so a long reply is readable
+    // while the Agent is still working instead of only after it finishes
+    message.partial?.takeIf { it.isNotBlank() }?.let { draft ->
+        MarkdownText(draft)
+        androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(6.dp))
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("● ", color = MaterialTheme.colorScheme.primary)
-        Text(label + elapsed, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            label + elapsed,
+            color = TextSecondary,
+            style = if (message.partial.isNullOrBlank()) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
@@ -1597,6 +1676,13 @@ private fun ChatInputBar(
             if (vm.oneOffEngine == null) vm.refreshModels(force = true)
         }
     }
+    // The widget's 语音 button: start the recorder the way the mic button would
+    LaunchedEffect(vm.voiceRequested) {
+        if (vm.voiceRequested) {
+            vm.consumeVoiceRequest()
+            onMicClick()
+        }
+    }
     // A bare `/engine` or `/model!` typed into the box asks for this picker
     LaunchedEffect(vm.pinPickerRequested) {
         if (vm.pinPickerRequested) {
@@ -1744,6 +1830,18 @@ private fun ChatInputBar(
                 else -> null
             }
             val composerFocus = remember { MutableInteractionSource() }
+            // The widget, the Quick Settings tile and the 提问 shortcut open the chat ready to type
+            val composerRequester = remember { FocusRequester() }
+            val keyboard = LocalSoftwareKeyboardController.current
+            LaunchedEffect(vm.composeRequested) {
+                if (vm.composeRequested) {
+                    vm.consumeComposeRequest()
+                    // The text field has to be laid out before it can take focus
+                    delay(150)
+                    runCatching { composerRequester.requestFocus() }
+                    keyboard?.show()
+                }
+            }
             val composerFocused by composerFocus.collectIsFocusedAsState()
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -1778,6 +1876,24 @@ private fun ChatInputBar(
                             onClear = vm::clearOneOffPin,
                         )
                     }
+                    if (vm.outbox.isNotEmpty()) {
+                        ComposerNotice(
+                            icon = Icons.Filled.Schedule,
+                            tint = MaterialTheme.colorScheme.primary,
+                            text = "${vm.outbox.size} 条消息等待发送，连上服务器后按顺序发出",
+                            onClear = vm::cancelOutbox,
+                            clearLabel = "取消待发送消息",
+                        )
+                    }
+                    vm.quotedReply?.let { quote ->
+                        ComposerNotice(
+                            icon = Icons.Filled.FormatQuote,
+                            tint = MaterialTheme.colorScheme.primary,
+                            text = "引用：" + quote.replace(Regex("\\s+"), " "),
+                            onClear = vm::clearQuote,
+                            clearLabel = "取消引用",
+                        )
+                    }
 
                     BasicTextField(
                         value = draft,
@@ -1785,6 +1901,7 @@ private fun ChatInputBar(
                         enabled = !recording,
                         interactionSource = composerFocus,
                         modifier = Modifier
+                            .focusRequester(composerRequester)
                             .fillMaxWidth()
                             .heightIn(min = 54.dp)
                             .padding(horizontal = 18.dp, vertical = 14.dp),
@@ -2049,6 +2166,7 @@ private fun ComposerNotice(
     tint: Color,
     text: String,
     onClear: (() -> Unit)? = null,
+    clearLabel: String = "取消本条引擎指定",
 ) {
     Row(
         modifier = Modifier
@@ -2069,7 +2187,7 @@ private fun ComposerNotice(
             IconButton(onClick = onClear, modifier = Modifier.size(30.dp)) {
                 Icon(
                     Icons.Filled.Close,
-                    contentDescription = "取消本条引擎指定",
+                    contentDescription = clearLabel,
                     tint = TextSecondary,
                     modifier = Modifier.size(14.dp),
                 )

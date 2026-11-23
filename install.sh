@@ -162,6 +162,70 @@ run() {
   "$@"
 }
 
+# An update never writes to data/ or .env itself, but the new version's data migration could:
+# keep a copy first, in the format `npm run backup:restore` lists (pairing secrets excluded,
+# exactly like the chat /ops backup).
+backup_before_update() {
+  bdir="$1"
+  bdata="$bdir/data"
+  bbackups="$bdata/backups"
+  bstamp="$(date +%Y%m%d-%H%M%S)000"
+  set --
+  if [ -d "$bdata" ]; then
+    for bfile in "$bdata"/*.json "$bdata/accounts.key"; do
+      [ -f "$bfile" ] || continue
+      bname="$(basename "$bfile")"
+      case "$bname" in api-token.json|api-enc-key.json) continue ;; esac
+      set -- "$@" "$bname"
+    done
+  fi
+  if [ "$#" -eq 0 ] && [ ! -f "$bdir/.env" ]; then
+    ok "Nothing to back up yet"
+    return 0
+  fi
+  run mkdir -p "$bbackups"
+  run chmod 700 "$bbackups"
+  if [ "$#" -gt 0 ]; then
+    command -v tar >/dev/null 2>&1 || fail "tar is required to back up data/ before updating"
+    run tar -czf "$bbackups/backup-${bstamp}-pre-update.tar.gz" -C "$bdata" "$@" \
+      || fail "could not back up data/; the checkout was not updated"
+    run chmod 600 "$bbackups/backup-${bstamp}-pre-update.tar.gz"
+  fi
+  if [ -f "$bdir/.env" ]; then
+    run cp "$bdir/.env" "$bbackups/backup-${bstamp}-pre-update.env" || fail "could not back up .env; the checkout was not updated"
+    run chmod 600 "$bbackups/backup-${bstamp}-pre-update.env"
+  fi
+  ok "Backed up data/ and .env to data/backups/backup-${bstamp}-pre-update.*"
+}
+
+# Only the newest commit of the branch is fetched. A shallow checkout cannot fast-forward
+# through history it never downloaded (`git pull` then fetched all of it, or refused), so it
+# moves to the fetched commit; the clean worktree checked before guarantees nothing is lost.
+update_checkout() {
+  udir="$1"
+  uref="refs/remotes/origin/$branch"
+  if [ -f "$udir/.git/shallow" ]; then
+    uhead="$(git -C "$udir" rev-parse HEAD)"
+    utracked="$(git -C "$udir" rev-parse --verify --quiet "$uref" 2>/dev/null || true)"
+    if [ -n "$utracked" ] && [ "$uhead" != "$utracked" ]; then
+      printf '  %s\n' "The checkout has commits that are not on origin/$branch; leaving it untouched." >&2
+      return 0
+    fi
+    run git -C "$udir" fetch --depth 1 --no-tags origin "+refs/heads/$branch:$uref" \
+      || fail "could not fetch origin/$branch"
+    run git -C "$udir" checkout -B "$branch" "$uref"
+    run git -C "$udir" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null
+    # The replaced commit's objects are not needed any more; keep the checkout one commit deep
+    run git -C "$udir" reflog expire --expire=now --all || true
+    run git -C "$udir" gc --prune=now --quiet || true
+  else
+    # A full clone (a development checkout) keeps its history: fetch this branch, fast-forward
+    run git -C "$udir" fetch --no-tags origin "+refs/heads/$branch:$uref" || fail "could not fetch origin/$branch"
+    run git -C "$udir" checkout "$branch"
+    run git -C "$udir" merge --ff-only "$uref"
+  fi
+}
+
 # Asks before the long npm steps so the answer is not buried under build output.
 # Only reached for AGENT_BOT_OPENCODE=auto on a real terminal; an explicit
 # --opencode / --no-opencode (or AGENT_BOT_OPENCODE=1|0) answers it up front.
@@ -264,15 +328,15 @@ elif [ -d "$install_dir/.git" ]; then
   if [ -n "$(git -C "$install_dir" status --porcelain 2>/dev/null)" ]; then
     printf '  %s\n' "Working tree has local changes; leaving it untouched." >&2
   else
-    run git -C "$install_dir" fetch --depth 1 origin "$branch"
-    run git -C "$install_dir" checkout "$branch"
-    run git -C "$install_dir" pull --ff-only
+    backup_before_update "$install_dir"
+    update_checkout "$install_dir"
   fi
 elif [ -e "$install_dir" ] && [ -n "$(ls -A "$install_dir" 2>/dev/null)" ]; then
   fail "${install_dir} exists and is not an agent-bot checkout"
 else
   run mkdir -p "$(dirname "$install_dir")"
-  run git clone --depth 1 --branch "$branch" "$repo" "$install_dir"
+  # Newest commit of one branch, no tags: the runtime needs no history
+  run git clone --depth 1 --single-branch --no-tags --branch "$branch" "$repo" "$install_dir"
 fi
 
 cd "$install_dir" || fail "cannot enter ${install_dir}"

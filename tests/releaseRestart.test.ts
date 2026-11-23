@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { restartSystemdRelease } from "../src/release-restart.js"
+import { releaseHealthTiming, restartSystemdRelease } from "../src/release-restart.js"
 import { runtimePaths, type RuntimeState } from "../src/runtime.js"
 
 function tempDir(): string {
@@ -130,4 +130,20 @@ test("systemd restart refuses to touch an unowned unit without a manifest", asyn
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("an unusable health timing falls back to the defaults instead of rolling back at once", () => {
+  assert.deepEqual(releaseHealthTiming({}), { timeoutMs: 45_000, intervalMs: 1_000 })
+  // `60s`, `1m` and an empty value used to make the wait NaN or zero: every update rolled back
+  for (const bad of ["60s", "1m", "", "  ", "-5", "0", "abc"]) {
+    assert.equal(releaseHealthTiming({ RELEASE_HEALTH_TIMEOUT: bad }).timeoutMs, 45_000, `timeout ${JSON.stringify(bad)}`)
+    assert.equal(releaseHealthTiming({ RELEASE_HEALTH_INTERVAL: bad }).intervalMs, 1_000, `interval ${JSON.stringify(bad)}`)
+  }
+  assert.deepEqual(releaseHealthTiming({ RELEASE_HEALTH_TIMEOUT: "120", RELEASE_HEALTH_INTERVAL: "2" }), {
+    timeoutMs: 120_000,
+    intervalMs: 2_000,
+  })
+  // Floors keep a too-small value from being a window nothing can pass
+  assert.equal(releaseHealthTiming({ RELEASE_HEALTH_TIMEOUT: "1" }).timeoutMs, 5_000)
+  assert.equal(releaseHealthTiming({ RELEASE_HEALTH_INTERVAL: "0.01" }).intervalMs, 100)
 })

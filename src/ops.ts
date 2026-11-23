@@ -242,6 +242,7 @@ const ENV_RULES: Record<string, EnvRule> = {
   LOG_LEVEL: enumRule(["debug", "info", "warn", "error"]),
   STARTUP_NOTICE: boolRule,
   USAGE_DAILY_REPORT: boolRule,
+  ENGINE_HEALTH_ALERTS: boolRule,
   USAGE_DAILY_REPORT_TIME: {
     hint: "HH:MM（24 小时制，按 REMINDER_TIMEZONE）",
     validate: (value) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? undefined : "时间格式无效，应为 HH:MM"),
@@ -411,7 +412,7 @@ export class OpsService {
       projectDir: this.#projectDir,
       releases: this.#releases,
       releaseState: () => this.releaseState(),
-      backup: () => this.backupData(),
+      backup: () => this.backupData("pre-update"),
       updateTarget: () => this.updateTarget(),
       releaseVersion: () => this.#gitVersionFallback(),
       hasGit: () => Boolean(this.#which("git")),
@@ -502,7 +503,7 @@ export class OpsService {
    * or safekeeping. The pairing token is deliberately excluded: it is a secret,
    * and a fresh machine regenerates one on first start anyway.
    */
-  async backupData(): Promise<OpsResult & { file?: string }> {
+  async backupData(label?: "pre-update"): Promise<OpsResult & { file?: string }> {
     if (!this.#which("tar")) return { ok: false, message: "未找到 tar，无法打包备份。", steps: [] }
     const steps: OpsStep[] = []
 
@@ -527,7 +528,7 @@ export class OpsService {
     mkdirSync(backupDir, { recursive: true, mode: 0o700 })
     chmodSync(backupDir, 0o700)
     // Milliseconds in the name: two backups in the same second must not overwrite each other
-    const out = join(backupDir, `backup-${fileStamp(Date.now(), { millis: true })}.tar.gz`)
+    const out = join(backupDir, `backup-${fileStamp(Date.now(), { millis: true })}${label ? `-${label}` : ""}.tar.gz`)
     const tar = await this.#runCommand("tar", ["-czf", out, "-C", this.#dataDir, ...files], 60_000)
     steps.push(this.#step("打包状态文件", tar))
     if (tar.code !== 0) {
@@ -535,9 +536,9 @@ export class OpsService {
     }
     chmodSync(out, 0o600)
 
-    // Keep the newest 5 archives so long-running bots do not fill the disk
+    // Newest 5 of each kind: frequent updates must not push the user's own backups out
     const archives = readdirSync(backupDir)
-      .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz"))
+      .filter((name) => name.startsWith("backup-") && name.endsWith(".tar.gz") && name.includes("-pre-update") === Boolean(label))
       .sort()
     const cutoff = Math.max(0, archives.length - 5)
     for (const stale of archives.slice(0, cutoff)) unlinkSync(join(backupDir, stale))
@@ -899,7 +900,7 @@ export class OpsService {
     // `npm run setup` is a separate process that rewrites the same file. Reading outside a lock
     // let whichever saved second revert the other's change, so the whole read-modify-write runs
     // under the lock setup.ts takes too.
-    withFileLock(this.#envPath, () => {
+    const busy = this.#withEnvLock(() => {
       const content = existsSync(this.#envPath) ? readFileSync(this.#envPath, "utf8") : ""
       const rows = content ? content.split(/\r?\n/) : []
       const index = rows.findIndex((row) => lineMatchesKey(row, key))
@@ -909,6 +910,7 @@ export class OpsService {
       while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
       this.#writeEnv(`${filtered.join("\n")}\n`)
     })
+    if (busy) return busy
     this.#log?.info(`updated .env key ${key}`)
     return {
       ok: true,
@@ -927,18 +929,36 @@ export class OpsService {
       return { ok: false, message: `${key} 请使用 /access del <ID> 逐项删除：清空白名单会让所有人都无法使用 Bot。` }
     }
     if (!existsSync(this.#envPath)) return { ok: false, message: "未找到 .env 文件。" }
-    const removed = withFileLock(this.#envPath, () => {
+    let removed = false
+    const busy = this.#withEnvLock(() => {
       const content = existsSync(this.#envPath) ? readFileSync(this.#envPath, "utf8") : ""
       const rows = content.split(/\r?\n/)
-      if (!rows.some((row) => lineMatchesKey(row, key))) return false
+      if (!rows.some((row) => lineMatchesKey(row, key))) return
       const filtered = rows.filter((row) => !lineMatchesKey(row, key))
       while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
       this.#writeEnv(`${filtered.join("\n")}\n`)
-      return true
+      removed = true
     })
+    if (busy) return busy
     if (!removed) return { ok: false, message: `.env 中没有设置 ${key}。` }
     this.#log?.info(`removed .env key ${key}`)
     return { ok: true, message: `已删除 ${key}，将使用默认值。重启 Bot 后生效。` }
+  }
+
+  /**
+   * Runs an .env edit under the lock shared with `npm run setup`. A lock held by the wizard
+   * surfaces as a normal refusal: every caller (/env, /access, /timezone, the App's config
+   * page) reads `{ ok, message }`, and a thrown lock timeout became a crashed command or a 500.
+   */
+  #withEnvLock(fn: () => void): OpsEnvResult | undefined {
+    try {
+      withFileLock(this.#envPath, fn)
+      return undefined
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (!/正被另一个进程写入/.test(message)) throw err
+      return { ok: false, message: ".env 正被另一个进程修改（可能是 npm run setup），请稍后重试。" }
+    }
   }
 
   #writeEnv(content: string): void {

@@ -3,6 +3,8 @@ import type { Logger } from "./logger.js"
 import { Opencode, OpencodeError, type PromptFile } from "./opencode.js"
 import { activeOpencodeSupervisor } from "./opencodeSupervisor.js"
 import type { SessionStore } from "./store.js"
+import { snapshotWorkspace, workspaceChanges } from "./workspaceChanges.js"
+import { activeSecretVault } from "./secretVault.js"
 
 export interface ResolvedModel {
   providerID: string
@@ -32,6 +34,8 @@ export interface EngineCallOptions {
   cliModel?: string
   signal?: AbortSignal
   onProgress?: (summary: string) => void
+  /** OpenCode only: the answer so far, for clients that render it while it is written. */
+  onDraft?: (text: string) => void
 }
 
 /**
@@ -39,9 +43,24 @@ export interface EngineCallOptions {
  * spawn through AgentCliService, OpenCode reuses the stored session and
  * transparently recovers when the server lost it (404).
  */
-export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {  if (opts.engine !== "opencode") {
+export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {
+  // Secrets given through a 安全输入 card exist as files only while this chat's task runs
+  const removeSecrets = activeSecretVault()?.materialize(opts.key)
+  try {
+    return await runEngine(deps, opts)
+  } finally {
+    removeSecrets?.()
+  }
+}
+
+async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {
+  if (opts.engine !== "opencode") {
     const notice = cliAttachmentNotice(opts.files)
-    return deps.agents.prompt(
+    // The CLI edits files where it runs: snapshot the repository so the reply can list what
+    // changed and /undo can take it back. Outside a git repository this is a no-op.
+    const workDir = deps.agents.workDir?.(opts.key)
+    const snapshot = workDir ? snapshotWorkspace(workDir) : undefined
+    const reply = await deps.agents.prompt(
       opts.key,
       opts.engine,
       notice ? `${opts.text}\n\n${notice}` : opts.text,
@@ -49,6 +68,8 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
       opts.onProgress,
       opts.signal,
     )
+    const changes = snapshot ? workspaceChanges.finish(opts.key, snapshot) : undefined
+    return changes ? `${reply}\n\n${changes}` : reply
   }
 
   // The server may be stopped between tasks; bring it back before the first request and keep
@@ -79,10 +100,19 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
         files: opts.files,
       })
     const listen = (): void => {
-      unsubscribe = deps.oc.subscribeSession(sessionID, (status) => {
-        touch?.()
-        opts.onProgress?.(status)
-      })
+      unsubscribe = deps.oc.subscribeSession(
+        sessionID,
+        (status) => {
+          touch?.()
+          opts.onProgress?.(status)
+        },
+        opts.onDraft
+          ? (text) => {
+              touch?.()
+              opts.onDraft?.(text)
+            }
+          : undefined,
+      )
     }
 
     try {

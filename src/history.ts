@@ -135,6 +135,11 @@ export class TaskHistoryStore {
     return this.#entries(key).slice(from, from + size).map((entry) => ({ ...entry }))
   }
 
+  /** Every chat with recorded runs, for checks that look across chats. */
+  keys(): string[] {
+    return Object.keys(this.#chats)
+  }
+
   count(key: string): number {
     return this.#entries(key).length
   }

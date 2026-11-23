@@ -81,8 +81,15 @@ test("release build runs in a staging clone and leaves the checkout untouched", 
     const clone = calls.find((call) => call.args[0] === "clone")
     assert.ok(clone)
     assert.equal(clone.args[1], "--no-hardlinks", "clone must not bake a hardlink to the running checkout")
-    assert.equal(clone.args[3], "https://github.com/longtimex/agent-bot.git")
-    assert.notEqual(clone.args[3], dir, "staging must come from origin, not the local checkout's stale refs")
+    assert.equal(clone.args.at(-2), "https://github.com/longtimex/agent-bot.git")
+    assert.notEqual(clone.args.at(-2), dir, "staging must come from origin, not the local checkout's stale refs")
+    // One commit of one branch, no tags: an update must not download the whole repository
+    const flags = clone.args.join(" ")
+    assert.match(flags, /--depth 1/)
+    assert.match(flags, /--single-branch/)
+    assert.match(flags, /--no-tags/)
+    assert.match(flags, /--branch main/, "origin/main is cloned as the branch main")
+    assert.equal(calls.some((call) => call.args[0] === "fetch"), false, "the shallow clone already holds the target")
     assert.ok(calls.some((call) => call.args[0] === "ci"))
     assert.ok(calls.some((call) => call.args[0] === "run" && call.args[1] === "check:release"))
     const npmCalls = calls.filter((call) => call.command.endsWith("npm"))
@@ -199,6 +206,67 @@ test("the first managed activation keeps the checkout as its rollback target", (
     assert.equal(release.rollback().ok, true)
     assert.equal(release.readState().current?.id, "checkout")
     assert.equal(release.readState().current?.path, dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a server that cannot serve a shallow clone falls back to a single-branch clone", async () => {
+  const dir = tempDir()
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.3.0" }))
+    const { release, calls } = service(dir, (command, args, cwd) => {
+      if (command.endsWith("git") && args[0] === "remote") return { code: 0, stdout: "https://example.com/bot.git\n", stderr: "" }
+      if (command.endsWith("git") && args[0] === "rev-parse" && args.includes("--abbrev-ref")) {
+        return { code: 0, stdout: "origin/beta\n", stderr: "" }
+      }
+      if (command.endsWith("git") && args[0] === "status") return { code: 0, stdout: "", stderr: "" }
+      if (command.endsWith("git") && args[0] === "clone") {
+        if (args.includes("--depth")) return { code: 128, stdout: "", stderr: "dumb http transport does not support shallow capabilities\n" }
+        mkdirSync(args.at(-1)!, { recursive: true })
+        writeFileSync(join(args.at(-1)!, "package-lock.json"), "{}")
+        writeFileSync(join(args.at(-1)!, "package.json"), JSON.stringify({ version: "0.4.0" }))
+        return { code: 0, stdout: "", stderr: "" }
+      }
+      if (command.endsWith("git") && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "cafebabe\n", stderr: "" }
+      if (command.endsWith("npm") && args[0] === "ci") {
+        mkdirSync(join(cwd, "node_modules"), { recursive: true })
+        return { code: 0, stdout: "", stderr: "" }
+      }
+      if (command.endsWith("npm") && args[0] === "run" && args[1] === "build") {
+        mkdirSync(join(cwd, "dist"), { recursive: true })
+        writeFileSync(join(cwd, "dist", "index.js"), "// built\n")
+      }
+      return { code: 0, stdout: "", stderr: "" }
+    })
+    const result = await release.buildStaging()
+    assert.equal(result.ok, true, result.message)
+    const clones = calls.filter((call) => call.args[0] === "clone").map((call) => call.args.join(" "))
+    assert.equal(clones.length, 2)
+    assert.match(clones[1]!, /--single-branch --no-tags --branch beta/)
+    assert.doesNotMatch(clones[1]!, /--depth/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an unreachable remote stops the update before anything is built", async () => {
+  const dir = tempDir()
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.3.0" }))
+    const { release, calls } = service(dir, (command, args) => {
+      if (command.endsWith("git") && args[0] === "remote") return { code: 0, stdout: "https://example.com/bot.git\n", stderr: "" }
+      if (command.endsWith("git") && args[0] === "rev-parse" && args.includes("--abbrev-ref")) {
+        return { code: 0, stdout: "origin/main\n", stderr: "" }
+      }
+      if (command.endsWith("git") && args[0] === "status") return { code: 0, stdout: "", stderr: "" }
+      if (command.endsWith("git") && args[0] === "clone") return { code: 128, stdout: "", stderr: "Could not resolve host\n" }
+      return undefined
+    })
+    const result = await release.buildStaging()
+    assert.equal(result.ok, false)
+    assert.match(result.message, /无法从远端获取 main/)
+    assert.equal(calls.some((call) => call.command.endsWith("npm")), false)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

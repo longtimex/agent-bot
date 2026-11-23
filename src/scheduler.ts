@@ -488,7 +488,17 @@ export class ScheduleService {
     } catch (err) {
       this.#log.error(`scheduled task #${task.id} manual run failed:`, (err as Error).message)
     }
-    this.#store.updateById(task.id, { runningAt: undefined, lastRunAt: Date.now(), lastStatus: outcome })
+    const finishedAt = Date.now()
+    // A one-shot whose time has already passed (typically one paused after /stop, whose notice
+    // says 立即执行：/schedule run N) has nothing left to wait for: this run is the run. Kept, it
+    // stayed paused in the list forever, and a later resume fired it a second time at once.
+    // A failed run is kept so it can be retried; a future one-shot keeps its own slot.
+    if (!task.repeat && task.dueAt <= finishedAt && outcome === "ok") {
+      this.#store.removeById(task.id)
+      this.#log.info(`scheduled task #${task.id} done by its manual run; removed`)
+      return
+    }
+    this.#store.updateById(task.id, { runningAt: undefined, lastRunAt: finishedAt, lastStatus: outcome })
   }
 
   start(): void {

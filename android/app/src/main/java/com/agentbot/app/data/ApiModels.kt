@@ -10,6 +10,8 @@ data class Task(
     val engine: String? = null,
     val model: String? = null,
     val progress: String? = null,
+    /** The answer so far while OpenCode is still writing it. */
+    val partial: String? = null,
     val reply: String? = null,
     val error: String? = null,
     /** Stable server-side failure class, e.g. ENGINE_UNAVAILABLE. */
@@ -22,9 +24,33 @@ data class Task(
     val attachmentCount: Int? = null,
     /** Files the agent produced, mirroring what Telegram receives. */
     val media: List<TaskMedia> = emptyList(),
+    /** Secrets the Agent asked for; each becomes a 安全输入 card under the reply. */
+    val secretRequests: List<SecretRequest> = emptyList(),
 ) {
     val isRunning: Boolean get() = status == "queued" || status == "running"
 }
+
+/** One `[[secret: NAME | 用途]]` request. The value itself never comes back from the server. */
+@Serializable
+data class SecretRequest(
+    val name: String,
+    val purpose: String? = null,
+    val provided: Boolean = false,
+)
+
+/** What `POST /task/:id/secret` answers: the names still missing, and the continuation once none are. */
+@Serializable
+data class SecretProvideResult(
+    val remaining: List<String> = emptyList(),
+    val task: Task? = null,
+)
+
+@Serializable
+data class SecretInfo(
+    val name: String,
+    val purpose: String? = null,
+    val expiresAt: Long = 0,
+)
 
 /** One media item attached to a task reply; bytes are fetched from /task/:id/media/:index. */
 @Serializable
@@ -79,6 +105,12 @@ data class ArchivedSession(
     val title: String? = null,
     val model: String? = null,
     val archivedAt: Long = 0,
+    /** The conversation open right now; it stays listed instead of vanishing on resume. */
+    val current: Boolean = false,
+    /** No engine context was saved: resuming brings the bubbles back, the Agent starts fresh. */
+    val stateless: Boolean = false,
+    /** Listed first and never evicted by the server's 20-entry cap. */
+    val pinned: Boolean = false,
 )
 
 /** `POST /sessions/:id/resume`: the restored session, plus the entry the old one became. */

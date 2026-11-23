@@ -31,6 +31,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.agentbot.app.data.SettingsRepository
 import com.agentbot.app.data.TaskNotifier
+import com.agentbot.app.widget.QuickEntry
 import com.agentbot.app.ui.AccessScreen
 import com.agentbot.app.ui.AgentsScreen
 import com.agentbot.app.ui.AccountsScreen
@@ -91,6 +92,15 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         openChatFromIntent(intent)
         handleShareIntent(intent)
+        handleQuickEntry(intent)
+    }
+
+    /** Widget, Quick Settings tile and launcher shortcuts all arrive here. */
+    private fun handleQuickEntry(intent: Intent?) {
+        val entry = intent?.getStringExtra(QuickEntry.EXTRA_ENTRY) ?: return
+        val trusted = QuickEntry.trusted(this, intent)
+        QuickEntry.consume(intent)
+        vm.openEntry(entry, trusted)
     }
 
     private fun openChatFromIntent(intent: Intent?) {
@@ -130,6 +140,9 @@ class MainActivity : ComponentActivity() {
         )
         openChatFromIntent(intent)
         handleShareIntent(intent)
+        // A restored activity gets its original intent again; the entry was already handled then
+        if (savedInstanceState == null) handleQuickEntry(intent)
+        QuickEntry.publishShortcuts(applicationContext)
         setContent {
             AgentBotTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {

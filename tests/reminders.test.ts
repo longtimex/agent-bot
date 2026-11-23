@@ -794,3 +794,30 @@ test("a refused reminder send is still retried", async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("parseReminder reads a time typed straight into the text", () => {
+  const tz = "Asia/Shanghai"
+  // 2026-01-01 08:00 in Shanghai
+  const now = Date.UTC(2026, 0, 1, 0, 0)
+  assert.deepEqual(parseReminder("30分钟后喝水", now, tz), { dueAt: now + 30 * 60_000, text: "喝水" })
+  assert.deepEqual(parseReminder("1小时30分钟后站会", now, tz), { dueAt: now + 90 * 60_000, text: "站会" })
+  assert.deepEqual(parseReminder("半小时后休息", now, tz), { dueAt: now + 30 * 60_000, text: "休息" })
+  assert.deepEqual(parseReminder("30m喝水", now, tz), { dueAt: now + 30 * 60_000, text: "喝水" })
+  assert.deepEqual(parseReminder("明天8点开会", now, tz), { dueAt: Date.UTC(2026, 0, 2, 0, 0), text: "开会" })
+  assert.deepEqual(parseReminder("下午3点开会 带电脑", now, tz), { dueAt: Date.UTC(2026, 0, 1, 7, 0), text: "开会 带电脑" })
+  assert.deepEqual(parseReminder("18:30开会", now, tz), { dueAt: Date.UTC(2026, 0, 1, 10, 30), text: "开会" })
+  assert.deepEqual(parseReminder("今晚8点半看电影", now, tz), { dueAt: Date.UTC(2026, 0, 1, 12, 30), text: "看电影" })
+  assert.deepEqual(parseReminder("下午3点钟 开会", now, tz), { dueAt: Date.UTC(2026, 0, 1, 7, 0), text: "开会" })
+
+  const daily = parseReminder("每天8点半打卡", now, tz)
+  assert.equal(daily.text, "打卡")
+  assert.deepEqual(daily.repeat, { type: "daily", hour: 8, minute: 30 })
+  const every = parseReminder("每30分钟喝水", now, tz)
+  assert.equal(every.text, "喝水")
+  assert.deepEqual(every.repeat, { type: "interval", ms: 30 * 60_000 })
+
+  // Spaced messages and genuine errors behave as before
+  assert.deepEqual(parseReminder("30m 喝水", now, tz), { dueAt: now + 30 * 60_000, text: "喝水" })
+  assert.throws(() => parseReminder("每天打卡", now, tz), /每日提醒的格式/)
+  assert.throws(() => parseReminder("soon喝水", now, tz), /无法识别/)
+})

@@ -1,4 +1,5 @@
 import { readFileSync, unlinkSync } from "node:fs"
+import { resolve } from "node:path"
 import type { IncomingMessage } from "node:http"
 import type { ApiRequestContext } from "./apiCore.js"
 import { ApiError } from "./apiCore.js"
@@ -31,6 +32,10 @@ import { mimeForName } from "./apiHttp.js"
 import type { ApiAttachment, ApiTask, ApiTaskMedia, ApiTaskView } from "./apiTaskTypes.js"
 import { classifyTaskError } from "./taskErrors.js"
 import { logApiTaskTerminal } from "./taskTerminalLog.js"
+import { JobJournal } from "./jobJournal.js"
+import { extractSecretRequests } from "./secretRequests.js"
+import { activeSecretVault, maskSecretValues } from "./secretVault.js"
+import { recoveredTasks, storedTask, type StoredApiTask } from "./apiTaskJournal.js"
 
 const MAX_API_ATTACHMENTS = 4
 const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
@@ -64,11 +69,30 @@ export class ApiTaskManager {
   readonly #taskListeners = new Map<string, Set<(payload: string) => void>>()
   readonly #lastEmit = new Map<string, number>()
   readonly #opencodeHealth: OpencodeHealth
+  /** The queue on disk; see jobJournal.ts. */
+  readonly #journal: JobJournal<StoredApiTask>
 
   constructor(deps: TaskManagerDeps) {
     this.#deps = deps
     this.#appKey = deps.appKey
     this.#opencodeHealth = new OpencodeHealth(() => deps.oc.health())
+    this.#journal = new JobJournal<StoredApiTask>(resolve(deps.cfg.dataDir, "app-queued-tasks.json"), deps.log)
+    this.#recover()
+  }
+
+  /**
+   * Restores what the previous process left. The records keep their ids, so a phone that was
+   * following a task finds it again: a recent queued task simply runs now, an interrupted or stale
+   * one is shown as ended with the reason and can be retried from its bubble.
+   */
+  #recover(): void {
+    const { resume, ended, summary } = recoveredTasks(this.#journal.takeRecovery())
+    for (const task of ended) this.#tasks.set(task.id, task)
+    for (const task of resume) {
+      this.#tasks.set(task.id, task)
+      this.#chain(task)
+    }
+    if (summary) this.#deps.log.info(`app queue journal: ${summary}`)
   }
 
   hasActiveTask(): boolean {
@@ -341,6 +365,8 @@ export class ApiTaskManager {
     selection: { engine: string; autoEngine: boolean; cliModel?: string; modelRef?: ResolvedModel },
   ): ApiTask {
     const id = `t${Date.now().toString(36)}${++this.#sequence}`
+    // 历史会话 lists a conversation by its first prompt, whichever path later parks it
+    if (text.trim()) this.#deps.store.noteTitle(this.#appKey, text)
     const task: ApiTask = {
       id,
       key: this.#appKey,
@@ -355,14 +381,21 @@ export class ApiTaskManager {
     }
     this.#tasks.set(id, task)
     this.#pruneTasks()
+    this.#chain(task)
+    return task
+  }
+
+  /** Puts a task at the end of its session's line, recorded on disk until it ends. */
+  #chain(task: ApiTask): void {
+    this.#journal.track(task.id, storedTask(task), task.createdAt)
     const previous = this.#queues.get(task.key) ?? Promise.resolve()
     const run = previous.then(() => this.#runTask(task), () => this.#runTask(task))
     this.#queues.set(task.key, run)
     const cleanup = (): void => {
       if (this.#queues.get(task.key) === run) this.#queues.delete(task.key)
+      this.#journal.finished(task.id)
     }
     run.then(cleanup, cleanup)
-    return task
   }
 
   async #runTask(task: ApiTask): Promise<void> {
@@ -383,9 +416,13 @@ export class ApiTaskManager {
         task.engine = choice.engine
         task.engineNote = choice.note
       }
+      // The health probe above can take seconds, and /stop or 清空排队 during it marks the task
+      // cancelled. Going on would flip it back to running and spend an Agent run nobody wants.
+      if (this.#isCancelled(task)) return
     }
     task.status = "running"
     task.startedAt = Date.now()
+    this.#journal.started(task.id)
     this.#emitTask(task, true)
     const controller = new AbortController()
     task.controller = controller
@@ -412,10 +449,11 @@ export class ApiTaskManager {
       let input: { text: string; files: PromptFile[] } = { text: task.text, files: [] }
       if (task.savedAttachments?.length) {
         const caps = isOpencode ? await this.#deps.oc.inputCapabilities(opencodeModel) : undefined
-        const stt = await applyStt(task.savedAttachments, {
-          stt: this.#deps.cfg.stt,
-          modelCapabilities: caps,
-        })
+        const stt = await applyStt(
+          task.savedAttachments,
+          { stt: this.#deps.cfg.stt, modelCapabilities: caps },
+          { signal: controller.signal },
+        )
         input = buildAttachmentSections(task.text, { saved: stt.saved, failed: stt.errors, modelCapabilities: caps })
       }
 
@@ -431,8 +469,20 @@ export class ApiTaskManager {
           task.progress = summary
           this.#emitTask(task)
         },
+        // Pushed through the same throttled SSE frames as progress, so a fast stream costs at
+        // most four frames a second
+        onDraft: (text) => {
+          task.partial = text
+          this.#emitTask(task)
+        },
       })
-      const settled = this.#settleReply(reply)
+      // `[[secret: NAME]]` becomes a card in the App instead of text the user has to decode
+      const asked = extractSecretRequests(reply)
+      const settled = this.#settleReply(asked.text)
+      const vault = activeSecretVault()
+      if (asked.requests.length > 0) {
+        task.secretRequests = asked.requests.map((request) => ({ ...request, provided: vault?.has(task.key, request.name) ?? false }))
+      }
       task.reply = settled.text
       task.media = settled.media
       task.status = "done"
@@ -453,6 +503,8 @@ export class ApiTaskManager {
     } finally {
       task.finishedAt = Date.now()
       task.controller = undefined
+      // The preview has done its job: the reply (or the error) is what the bubble shows now
+      task.partial = undefined
       this.#deps.usage.record(task.key, { engine, model: modelLabel, ms: Date.now() - started, outcome })
       this.#deps.history.record(task.key, {
         prompt: task.text || this.#attachmentSummary(task.savedAttachments),
@@ -502,7 +554,13 @@ export class ApiTaskManager {
    * Record both here: otherwise the App shows a bare "已停止" with no diagnosis and an
    * operator grepping bot.log sees nothing at all for the message the user just cancelled.
    */
+  /** A call, not an inline comparison: TypeScript keeps an earlier status check narrowed across an await. */
+  #isCancelled(task: ApiTask): boolean {
+    return task.status === "cancelled"
+  }
+
   #cancelQueued(task: ApiTask): void {
+    this.#journal.finished(task.id)
     task.status = "cancelled"
     task.errorCode = "TASK_CANCELLED"
     task.finishedAt = Date.now()
@@ -673,8 +731,14 @@ export class ApiTaskManager {
 
   view(task: ApiTask): ApiTaskView {
     const { controller: _controller, key: _key, autoEngine: _autoEngine, savedAttachments, media, ...view } = task
+    // A value given through 安全输入 never goes back out, whatever the Agent echoed
+    const mask = (text?: string): string | undefined => (text === undefined ? undefined : maskSecretValues(text))
     return {
       ...view,
+      reply: mask(view.reply),
+      partial: mask(view.partial),
+      progress: mask(view.progress),
+      error: mask(view.error),
       ...(savedAttachments?.length ? { attachmentCount: savedAttachments.length } : {}),
       ...(media?.length
         ? {

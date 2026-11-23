@@ -163,8 +163,19 @@ export function writeEnvFile(path: string, content: string): void {
   chmodSync(path, 0o600)
 }
 
+/**
+ * Quotes a value the way Node's own .env parser (process.loadEnvFile) reads it back, matching
+ * OpsService.envSet. JSON.stringify was wrong for that parser: it does not undo `\\` or `\"`,
+ * and a double-quoted value ends at the first `"`, so a backslash came back doubled and a quote
+ * cut the value short, on the next start, after the wizard had reported success. Single quotes
+ * keep content verbatim; a value no quoting style can carry is refused instead of corrupted.
+ */
 function formatEnvValue(value: string): string {
-  return /[\s#"'\\]/.test(value) ? JSON.stringify(value) : value
+  if (/[\r\n\0]/.test(value)) throw new Error("配置值不能包含换行或空字符")
+  if (!value || /^[A-Za-z0-9_./:@%+,~-]+$/.test(value)) return value
+  if (!value.includes("'")) return `'${value}'`
+  if (!/["\\]/.test(value)) return `"${value}"`
+  throw new Error("配置值同时含有单引号与双引号或反斜杠，无法安全写入 .env，请换一个值")
 }
 
 function readEnvValues(content: string): Record<string, string> {

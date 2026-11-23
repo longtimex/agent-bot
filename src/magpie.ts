@@ -381,9 +381,21 @@ export class MagpieService {
   }
 
   async addProvider(preset: string, key: string): Promise<string> {
-    // The key is the one argument a chat must never see echoed back.
-    const result = await this.run(["provider", "add", assertPreset(preset), assertToken(key, "API Key", 500)])
-    return redactSecrets(clean(result.stdout || result.stderr))
+    // The key is the one argument a chat must never see echoed back. redactSecrets only knows
+    // labelled shapes (sk-…, api_key=…); a relay key without a known prefix, echoed by a
+    // failing `provider add`, reached the chat and the App verbatim. Mask the exact value too,
+    // on the error path as well, the way cc-switch's addProvider does.
+    const secret = assertToken(key, "API Key", 500)
+    if (secret.startsWith("-")) throw new MagpieError("API Key 不能以 - 开头。")
+    const mask = (text: string): string => text.split(secret).join("***")
+    try {
+      const result = await this.run(["provider", "add", assertPreset(preset), secret])
+      return mask(redactSecrets(clean(result.stdout || result.stderr)))
+    } catch (err) {
+      if (err instanceof MagpieRunError) throw new MagpieRunError(mask(err.message))
+      if (err instanceof MagpieError) throw new MagpieError(mask(err.message))
+      throw err
+    }
   }
 
   async providerAction(action: "test" | "models" | "rm", id: string): Promise<string> {

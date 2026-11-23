@@ -208,25 +208,26 @@ export class ReleaseManager {
         return { ok: false, steps, message: `上游分支名称无效：${target}` }
       }
 
-      const clone = await this.#run(git, ["clone", "--no-hardlinks", "--quiet", remoteUrl, workDir], {
-        cwd: this.#paths.root,
-        env,
-        timeoutMs: GIT_TIMEOUT_MS,
-      })
-      steps.push(outputStep("复制当前 checkout", clone))
-      if (clone.code !== 0) throw new Error("无法创建临时构建目录，已中止更新。")
-
-      const fetch = await this.#run(git, ["fetch", "--quiet", "origin"], { cwd: workDir, env, timeoutMs: GIT_TIMEOUT_MS })
-      steps.push(outputStep("git fetch origin", fetch))
-      if (fetch.code !== 0) throw new Error("无法连接远端仓库（网络问题或仓库不可达），请稍后再试。")
-
-      const checkout = await this.#run(git, ["checkout", "--detach", target], {
-        cwd: workDir,
-        env,
-        timeoutMs: GIT_TIMEOUT_MS,
-      })
-      steps.push(outputStep(`git checkout ${target}`, checkout))
-      if (checkout.code !== 0) throw new Error(`无法切换到 ${target}，已中止更新。`)
+      // Only the newest commit of the target branch is downloaded. A plain clone pulled every
+      // branch, every tag and the whole history (tens of MB, more with each release) on every
+      // update, just to build one commit. The clone's HEAD is that commit, so no checkout follows.
+      const branchName = target.startsWith("origin/") ? target.slice("origin/".length) : target
+      const only = ["--single-branch", "--no-tags", "--branch", branchName]
+      const cloneArgs = (shallow: boolean): string[] => [
+        "clone", "--no-hardlinks", "--quiet", ...(shallow ? ["--depth", "1"] : []), ...only, remoteUrl, workDir,
+      ]
+      const runOptions = { cwd: this.#paths.root, env, timeoutMs: GIT_TIMEOUT_MS }
+      let clone = await this.#run(git, cloneArgs(true), runOptions)
+      steps.push(outputStep(`获取 ${branchName} 最新代码（浅克隆）`, clone))
+      if (clone.code !== 0) {
+        // A dumb-HTTP mirror or an old git daemon cannot serve a shallow clone; still one branch
+        rmSync(workDir, { recursive: true, force: true })
+        clone = await this.#run(git, cloneArgs(false), runOptions)
+        steps.push(outputStep(`获取 ${branchName}（服务器不支持浅克隆，改为单分支克隆）`, clone))
+        if (clone.code !== 0) {
+          throw new Error(`无法从远端获取 ${branchName}（网络问题、仓库不可达或分支不存在），已中止更新，旧版本仍在运行。`)
+        }
+      }
 
       const head = await this.#run(git, ["rev-parse", "HEAD"], { cwd: workDir, env, timeoutMs: 30_000 })
       steps.push(outputStep("读取目标提交", head))

@@ -43,7 +43,7 @@ import {
   type RuntimeState,
   type Supervisor,
 } from "./runtime.js"
-import { restartSystemdRelease } from "./release-restart.js"
+import { releaseHealthTiming, restartSystemdRelease } from "./release-restart.js"
 
 const USAGE = `Agent Bot lifecycle
 
@@ -765,9 +765,8 @@ function wait(ms: number): Promise<void> {
 }
 
 async function waitForHealth(state: RuntimeState, pid: number, startedAt: string): Promise<boolean> {
-  const timeoutMs = Number(process.env.RELEASE_HEALTH_TIMEOUT ?? "45") * 1_000
-  const intervalMs = Number(process.env.RELEASE_HEALTH_INTERVAL ?? "1") * 1_000
-  const deadline = Date.now() + Math.max(1_000, timeoutMs)
+  const { timeoutMs, intervalMs } = releaseHealthTiming()
+  const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (!isAlive(pid)) return false
     if (

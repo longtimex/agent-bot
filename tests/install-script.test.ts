@@ -153,3 +153,18 @@ test("install.sh installs systemd units even without --start", () => {
   assert.ok(units > 0 && start > units, "unit installation must be its own step before --start")
   assert.match(source, /npm run bot -- install --skip-deps --skip-build "\$opencode_args" "\$systemd_args"/)
 })
+
+test("install.sh fetches one commit of one branch and backs up data before an update", () => {
+  const source = execFileSync("sh", ["-c", "cat install.sh"], { encoding: "utf8" })
+  assert.match(source, /git clone --depth 1 --single-branch --no-tags --branch "\$branch"/)
+  // A shallow checkout cannot fast-forward through history it never downloaded
+  assert.doesNotMatch(source, /pull --ff-only/)
+  assert.match(source, /fetch --depth 1 --no-tags origin "\+refs\/heads\/\$branch:\$uref"/)
+  assert.match(source, /checkout -B "\$branch" "\$uref"/)
+  // A development checkout keeps its history instead of being made shallow
+  assert.match(source, /merge --ff-only "\$uref"/)
+  const update = source.slice(source.indexOf('step "Updating the existing checkout..."'))
+  assert.ok(update.indexOf("backup_before_update") < update.indexOf("update_checkout"), "data is backed up before the code moves")
+  assert.match(source, /backup-\$\{bstamp\}-pre-update\.tar\.gz/)
+  assert.match(source, /api-token\.json\|api-enc-key\.json\) continue/, "pairing secrets stay out, as in /ops backup")
+})

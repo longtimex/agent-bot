@@ -764,3 +764,29 @@ test("the shared stream stops with the last subscriber and restarts for the next
   )
 })
 
+test("subscribeSession rebuilds the assistant's draft and never echoes the user's prompt", async () => {
+  const drafts: string[] = []
+  const frame = (body: Record<string, unknown>): string => `data: ${JSON.stringify(body)}\n\n`
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" })
+      // The user's own prompt is a text part of a user message
+      res.write(frame({ type: "message.updated", properties: { info: { id: "m_user", sessionID: "ses_test", role: "user" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "p0", messageID: "m_user", sessionID: "ses_test", type: "text", text: "帮我写诗" } } }))
+      res.write(frame({ type: "message.updated", properties: { info: { id: "m_bot", sessionID: "ses_test", role: "assistant" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "p1", messageID: "m_bot", sessionID: "ses_test", type: "text", text: "春风" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "p1", messageID: "m_bot", sessionID: "ses_test", type: "text", text: "春风十里" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "p2", messageID: "m_bot", sessionID: "ses_test", type: "tool", tool: "read" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "p3", messageID: "m_bot", sessionID: "ses_test", type: "text", text: "不如你" } } }))
+      // Another session's answer must not leak in
+      res.write(frame({ type: "message.updated", properties: { info: { id: "m_x", sessionID: "ses_other", role: "assistant" } } }))
+      res.write(frame({ type: "message.part.updated", properties: { part: { id: "px", messageID: "m_x", sessionID: "ses_other", type: "text", text: "别人的" } } }))
+    },
+    async (oc) => {
+      const stop = oc.subscribeSession("ses_test", () => {}, (text) => drafts.push(text))
+      await delay(150)
+      stop()
+      assert.deepEqual(drafts, ["春风", "春风十里", "春风十里\n\n不如你"])
+    },
+  )
+})

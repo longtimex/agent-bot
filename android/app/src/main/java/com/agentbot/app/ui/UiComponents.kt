@@ -28,10 +28,13 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -40,12 +43,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -494,6 +504,7 @@ fun AppTextField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     enabled: Boolean = true,
+    trailingIcon: (@Composable () -> Unit)? = null,
 ) {
     OutlinedTextField(
         value = value,
@@ -507,6 +518,7 @@ fun AppTextField(
         maxLines = maxLines,
         visualTransformation = visualTransformation,
         keyboardOptions = keyboardOptions,
+        trailingIcon = trailingIcon,
         shape = RoundedCornerShape(AppRadius.md),
         textStyle = if (monospace) {
             MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
@@ -526,6 +538,43 @@ fun AppTextField(
             unfocusedLabelColor = TextTertiary,
             cursorColor = MaterialTheme.colorScheme.primary,
         ),
+    )
+}
+
+/**
+ * An API key, token or password. Hidden until the eye is tapped, and typed on the password
+ * keyboard, which keeps IMEs from suggesting it or learning it into their dictionary.
+ * Callers hold the value in `remember`, never `rememberSaveable`: a saved instance state is
+ * written to disk by the system.
+ */
+@Composable
+fun SecretTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String? = null,
+    enabled: Boolean = true,
+) {
+    var visible by remember { mutableStateOf(false) }
+    AppTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        placeholder = placeholder,
+        singleLine = true,
+        monospace = visible,
+        visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+        enabled = enabled,
+        trailingIcon = {
+            IconButton(onClick = { visible = !visible }) {
+                Icon(
+                    if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (visible) "隐藏" else "显示",
+                    tint = TextTertiary,
+                )
+            }
+        },
     )
 }
 

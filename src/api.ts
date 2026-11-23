@@ -61,6 +61,7 @@ import { routeAgentModels, routeAgentProvider, routeCustomModels, routeModelTest
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 import { archiveCurrentSession, routeSessions, type SessionRouteDeps } from "./apiSessions.js"
 import { SessionArchiveStore } from "./sessionArchive.js"
+import { workspaceChanges } from "./workspaceChanges.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
 // fixed application-level ceiling: the JSON body is still bounded by available
@@ -496,6 +497,12 @@ export class ApiServer {
       return
     }
 
+    if (resource === "undo" && method === "POST") {
+      this.#requireIdle("撤销改动")
+      this.#json(ctx.res, 200, workspaceChanges.undo(this.appKey))
+      return
+    }
+
     if (resource === "task" || resource === "tasks" || resource === "stop" || resource === "queue") {
       if (await routeTasks(this.#taskRouteDeps(), ctx, resource, id, action, segments)) return
     }
@@ -871,6 +878,7 @@ export class ApiServer {
       modelLabel: (engine, model) => this.#opts.agents.registry.modelLabel(engine, model),
       requireIdle: (what) => this.#requireIdle(what),
       sessionView: () => this.#sessionView(),
+      readJsonBody: (req) => this.#readJsonBody(req),
       json: (res, status, body) => this.#json(res, status, body),
     }
   }

@@ -73,13 +73,32 @@ export function recordReleaseRollback(
   )
 }
 
+/**
+ * RELEASE_HEALTH_TIMEOUT / RELEASE_HEALTH_INTERVAL in seconds. Both callers used to multiply the
+ * raw value: a typo such as `60s` or `1m` became NaN, the deadline NaN, the wait loop never ran,
+ * and every update was rolled back as unhealthy with nothing saying why. An empty value meant a
+ * 0–1s window, which rolls back a healthy release on any slow machine. Anything unusable now
+ * falls back to the default instead.
+ */
+export function releaseHealthTiming(env: NodeJS.ProcessEnv = process.env): { timeoutMs: number; intervalMs: number } {
+  const seconds = (raw: string | undefined, fallback: number, min: number): number => {
+    const value = Number(raw?.trim())
+    return raw?.trim() && Number.isFinite(value) && value > 0 ? Math.max(min, value) : fallback
+  }
+  return {
+    timeoutMs: seconds(env.RELEASE_HEALTH_TIMEOUT, 45, 5) * 1_000,
+    intervalMs: seconds(env.RELEASE_HEALTH_INTERVAL, 1, 0.1) * 1_000,
+  }
+}
+
 async function waitForServiceHealth(
   projectDir: string,
   startedAt: string,
   deps: SystemdRestartDeps,
 ): Promise<RuntimeState | undefined> {
-  const timeoutMs = deps.healthTimeoutMs ?? Math.max(100, Number(process.env.RELEASE_HEALTH_TIMEOUT ?? "45") * 1_000)
-  const intervalMs = deps.healthIntervalMs ?? Math.max(10, Number(process.env.RELEASE_HEALTH_INTERVAL ?? "1") * 1_000)
+  const timing = releaseHealthTiming()
+  const timeoutMs = deps.healthTimeoutMs ?? timing.timeoutMs
+  const intervalMs = deps.healthIntervalMs ?? timing.intervalMs
   const deadline = Date.now() + timeoutMs
   const sleep = deps.sleep ?? defaultSleep
   const readState = deps.readState ?? readRuntimeState

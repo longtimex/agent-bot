@@ -463,3 +463,21 @@ test("runFeishuSetup retries an invalid app id before writing", async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("upsertEnv quotes values so Node's .env parser reads them back unchanged", async () => {
+  const { parseEnv } = await import("node:util")
+  const values = {
+    CLIENT_LABELS: "Telegram, 飞书",
+    API_PUBLIC_URL: "https://bot.example.com/api#frag",
+    FEISHU_APP_SECRET: 'se"cr\\et',
+    TELEGRAM_ALLOW_USERS: "42,43",
+    API_TOKEN: "it's-a-token",
+  }
+  const written = upsertEnv("", values)
+  const parsed = parseEnv(written)
+  for (const [key, value] of Object.entries(values)) {
+    assert.equal(parsed[key], value, `${key} must survive the round trip (${written.split("\n").find((l) => l.startsWith(key))})`)
+  }
+  assert.throws(() => upsertEnv("", { API_TOKEN: `a'b"c` }), /无法安全写入/)
+  assert.throws(() => upsertEnv("", { API_TOKEN: "a\nb" }), /换行/)
+})

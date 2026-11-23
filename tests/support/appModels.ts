@@ -139,7 +139,11 @@ export function appModelShape(name: string): ModelField[] {
     // A default is whatever follows the first top-level `=`; it never nests one of its own here.
     const [type = "", rawDefault = ""] = match[2]!.split(/\s*=\s*(.*)/s)
     const defaultValue = rawDefault.trim().replace(/,$/, "")
-    const emptyDefault = ["null", "emptyList()", "emptyMap()", '""'].includes(defaultValue)
+    // A Kotlin default that cannot throw is as good as a nullable one: the server may omit
+    // the key, and the App still decodes. false/0 are the common cases for flags and counts.
+    const emptyDefault = ["null", "emptyList()", "emptyMap()", '""', "false", "true", "0", "0L", "0.0"].includes(
+      defaultValue,
+    )
     return [{
       name: match[1]!,
       type: type.trim().replace(/,$/, ""),

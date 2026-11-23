@@ -6,6 +6,10 @@
  *
  *   node scripts/restore-backup.mjs --list
  *   node scripts/restore-backup.mjs --file backup-20261116-101500123.tar.gz [--data data] [--force]
+ *   node scripts/restore-backup.mjs --file backup-20261116-101500123-pre-update.tar.gz --with-env [--env .env]
+ *
+ * An update backs up first (`-pre-update`) and keeps a copy of .env beside the archive; `--with-env`
+ * puts that copy back too, after saving the current .env next to the snapshot.
  *
  * Stop the bot first: a running bot writes its in-memory state back over the restored files.
  *
@@ -17,7 +21,8 @@ import { join, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 import process from "node:process"
 
-const NAME_RE = /^backup-\d{8}-\d{9}\.tar\.gz$/
+// `-pre-update` marks the archive an update takes before it builds
+const NAME_RE = /^backup-\d{8}-\d{9}(?:-pre-update)?\.tar\.gz$/
 const SECRET_FILES = new Set(["api-token.json", "api-enc-key.json"])
 // Ciphertext under accounts.key; restoring them without a matching key restores nothing usable
 const KEY_FILE = "accounts.key"
@@ -77,7 +82,8 @@ if (process.argv.includes("--list") || process.argv.length === 2) {
     process.exit(0)
   }
   for (const backup of backups) {
-    console.log(`${backup.name}  ${(backup.bytes / 1024).toFixed(1)}KB  ${backup.at.toISOString()}`)
+    const env = existsSync(join(backupDir, backup.name.replace(/\.tar\.gz$/, ".env"))) ? "  (+ .env)" : ""
+    console.log(`${backup.name}  ${(backup.bytes / 1024).toFixed(1)}KB  ${backup.at.toISOString()}${env}`)
   }
   process.exit(0)
 }
@@ -166,4 +172,22 @@ if (extract.status !== 0) fail(`解压失败：${(extract.stderr ?? "").trim()}`
 console.log(`已恢复 ${entries.length} 个文件到 ${dataDir}`)
 console.log(`恢复前的状态已快照到 ${snapshotDir}（${copied} 个文件）`)
 if (archiveHasKey) chmodSync(join(dataDir, KEY_FILE), 0o600)
+
+const envCopy = join(backupDir, name.replace(/\.tar\.gz$/, ".env"))
+if (process.argv.includes("--with-env")) {
+  if (!existsSync(envCopy)) {
+    console.warn(`注意：这个备份没有 .env 副本，.env 保持不变。`)
+  } else {
+    const envPath = resolve(argValue("--env") ?? join(dataDir, "..", ".env"))
+    if (existsSync(envPath)) {
+      cpSync(envPath, join(snapshotDir, ".env"))
+      chmodSync(join(snapshotDir, ".env"), 0o600)
+    }
+    cpSync(envCopy, envPath)
+    chmodSync(envPath, 0o600)
+    console.log(`已恢复 .env 到 ${envPath}（原 .env 已存入快照）`)
+  }
+} else if (existsSync(envCopy)) {
+  console.log(`这个备份带有 .env 副本，需要时加 --with-env 一并恢复。`)
+}
 console.log("请重启 Bot 使恢复立即生效：/restart 或 systemctl restart telegram-bot")

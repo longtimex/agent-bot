@@ -1114,3 +1114,39 @@ test("DeepSeek Harness and Pi produce the argv their docs describe", () => {
   )
   assert.deepEqual(buildCliArgs(pi, { workDir: "/tmp", prompt: "review this" }, true), ["-p", "review this"])
 })
+
+test("a stateless engine is given the recent turns of its conversation", async () => {
+  const dir = tempDir("agent-cli-recall-")
+  try {
+    const bin = join(dir, "fake-echo.js")
+    // Replies with exactly the prompt it was given, so the test can read what the CLI saw
+    writeExecutable(bin, `process.stdout.write("收到:" + (process.argv[2] ?? ""))`)
+    const registryPath = join(dir, "agents.json")
+    writeFileSync(
+      registryPath,
+      JSON.stringify({ agents: { echo: { bin, sessionMode: "stateless", parse: "text", args: { prompt: ["{prompt}"] } } } }),
+    )
+    const registry = new AgentCliRegistry({ path: registryPath, log })
+    const store = new SessionStore(join(dir, "sessions.json"), log)
+    const service = new AgentCliService(dir, store, log, 10_000, 10_000, undefined, registry)
+
+    const first = await service.prompt("chat", "echo", "写一首关于海的诗")
+    assert.equal(first, "收到:写一首关于海的诗", "the first message goes alone")
+
+    const second = await service.prompt("chat", "echo", "再短一点")
+    assert.match(second, /用户：写一首关于海的诗/, "the follow-up carries the previous question")
+    assert.match(second, /\[新消息\]\n再短一点$/, "and ends with the new message")
+
+    // Another chat starts clean, and a new conversation forgets the old turns
+    assert.equal(await service.prompt("other", "echo", "你好"), "收到:你好")
+    store.setConversation("chat", {})
+    assert.equal(await service.prompt("chat", "echo", "新话题"), "收到:新话题")
+
+    // Only the newest few turns are kept
+    for (let i = 0; i < 6; i++) await service.prompt("chat", "echo", `第${i}条`)
+    assert.ok(store.getRecentTurns("chat", "echo").length <= 4)
+    service.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

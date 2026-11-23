@@ -57,6 +57,46 @@ export interface ModelInputs {
 interface OpencodeFeedSubscriber {
   sessionID: string
   onUpdate: (summary: string) => void
+  /** The answer so far, as OpenCode streams it; only for subscribers that asked for it. */
+  onDraft?: (text: string) => void
+  draft?: DraftTracker
+}
+
+/** Longest draft pushed to a client; the final reply is never cut, only the live preview. */
+const MAX_DRAFT_CHARS = 12_000
+
+/**
+ * Rebuilds the assistant's answer from `message.part.updated` events. Each text part arrives with
+ * its whole text so far, so the latest copy per part id is kept, in first-seen order. Only parts of
+ * messages announced as the assistant's count: the user's own prompt is a text part too, and it
+ * must never be echoed back as if the Agent had written it.
+ */
+class DraftTracker {
+  readonly #assistant = new Set<string>()
+  readonly #parts = new Map<string, string>()
+
+  /** Returns the new draft when this event changed it. */
+  accept(ev: { type?: unknown; properties?: Record<string, unknown> }, sessionID: string): string | undefined {
+    const properties = ev.properties ?? {}
+    const info = properties.info as Record<string, unknown> | undefined
+    if (info && info.sessionID === sessionID && info.role === "assistant" && typeof info.id === "string") {
+      this.#assistant.add(info.id)
+      return undefined
+    }
+    const part = properties.part as Record<string, unknown> | undefined
+    if (!part || part.type !== "text" || part.synthetic === true) return undefined
+    if ((properties.sessionID ?? part.sessionID) !== sessionID) return undefined
+    if (typeof part.messageID !== "string" || !this.#assistant.has(part.messageID)) return undefined
+    if (typeof part.text !== "string") return undefined
+    const id = typeof part.id === "string" ? part.id : part.messageID
+    if (this.#parts.get(id) === part.text) return undefined
+    this.#parts.set(id, part.text)
+    const text = [...this.#parts.values()]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join("\n\n")
+    return text.length > MAX_DRAFT_CHARS ? `…${text.slice(text.length - MAX_DRAFT_CHARS)}` : text
+  }
 }
 
 interface OpencodeFeed {
@@ -306,9 +346,13 @@ export class Opencode {
   readonly #feedSubs = new Map<number, OpencodeFeedSubscriber>()
   #feedSeq = 0
 
-  subscribeSession(sessionID: string, onUpdate: (summary: string) => void): () => void {
+  subscribeSession(
+    sessionID: string,
+    onUpdate: (summary: string) => void,
+    onDraft?: (text: string) => void,
+  ): () => void {
     const id = ++this.#feedSeq
-    this.#feedSubs.set(id, { sessionID, onUpdate })
+    this.#feedSubs.set(id, { sessionID, onUpdate, ...(onDraft ? { onDraft, draft: new DraftTracker() } : {}) })
     this.#startFeed()
     return () => {
       this.#feedSubs.delete(id)
@@ -337,15 +381,16 @@ export class Opencode {
         controller.signal.addEventListener("abort", done, { once: true })
       })
 
-    const dispatch = (ev: { properties?: Record<string, unknown> }): void => {
+    const dispatch = (ev: { type?: unknown; properties?: Record<string, unknown> }): void => {
       // Snapshot: an onUpdate that unsubscribes would otherwise shrink the Map mid-iteration
       // and silently skip the subscribers behind the one that left.
       const subs = Array.from(this.#feedSubs.values())
       for (const sub of subs) {
-        const status = eventStatus(ev, sub.sessionID)
-        if (!status) continue
         try {
-          sub.onUpdate(status)
+          const draft = sub.draft?.accept(ev, sub.sessionID)
+          if (draft !== undefined) sub.onDraft?.(draft)
+          const status = eventStatus(ev, sub.sessionID)
+          if (status) sub.onUpdate(status)
         } catch {
           // One subscriber's progress card must not break the stream for the others
         }

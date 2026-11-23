@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { Bot } from "grammy"
-import { ProgressTracker } from "../src/progress.js"
+import { DRAFT_PREVIEW_CHARS, draftPreview, ProgressTracker } from "../src/progress.js"
 
 interface ApiCall {
   method: string
@@ -241,6 +241,62 @@ test("progress card strips Markdown control characters from statuses", async (t)
     }
     assert.ok(!text.includes("\\"), "a backslash would make Telegram reject the Markdown card")
     assert.ok(text.includes("reading"), "the status text itself must survive escaping")
+  } finally {
+    h.restore()
+    await h.tracker.finish()
+  }
+})
+
+test("the draft preview hides directives, even half-written ones, and keeps the tail of a long answer", () => {
+  assert.equal(draftPreview("看图\n[[image:outbox/a.png]]\n说明"), "看图\n\n说明")
+  assert.equal(draftPreview("先说明。\n[[secret=[REDACTED_PASSWORD] | 推送]]"), "先说明。")
+  assert.equal(draftPreview("马上发图 [[image:outbox/a"), "马上发图", "a directive still being written is not shown")
+  const long = `${"开头".repeat(2_000)}结尾`
+  const preview = draftPreview(long)
+  assert.ok(preview.startsWith("…") && preview.endsWith("结尾"))
+  assert.ok(preview.length <= DRAFT_PREVIEW_CHARS + 1)
+})
+
+test("a streaming draft replaces the step list, goes out as plain text and is throttled", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] })
+  const options: unknown[] = []
+  const h = harness()
+  const api = h.bot.api as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
+  const send = api.sendMessage!
+  const edit = api.editMessageText!
+  api.sendMessage = (chatId, text, extra) => {
+    options.push(extra)
+    return send(chatId, text, extra)
+  }
+  api.editMessageText = (chatId, id, text, extra) => {
+    options.push(extra)
+    return edit(chatId, id, text, extra)
+  }
+  try {
+    h.tracker.update("thinking")
+    t.mock.timers.tick(2000)
+    await settle()
+    assert.equal((options[0] as { parse_mode?: string }).parse_mode, "Markdown")
+
+    h.tracker.draft("这是 *未闭合 的回复")
+    h.advance(3_000)
+    t.mock.timers.tick(2000)
+    await settle()
+    const edits = h.calls.filter((call) => call.method === "editMessageText")
+    assert.equal(edits.length, 1)
+    assert.match(String(edits[0]!.args[1]), /正在生成回复[\s\S]*这是 \*未闭合 的回复/)
+    assert.equal((options[1] as { parse_mode?: string }).parse_mode, undefined, "plain text: a stray * cannot break the edit")
+
+    // Within three seconds of the last edit a changed draft waits for the next tick
+    h.tracker.draft("这是 *未闭合 的回复，继续写")
+    h.advance(1_000)
+    t.mock.timers.tick(2000)
+    await settle()
+    assert.equal(h.calls.filter((call) => call.method === "editMessageText").length, 1)
+    h.advance(3_000)
+    t.mock.timers.tick(2000)
+    await settle()
+    assert.equal(h.calls.filter((call) => call.method === "editMessageText").length, 2)
   } finally {
     h.restore()
     await h.tracker.finish()

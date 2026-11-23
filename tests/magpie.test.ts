@@ -241,3 +241,23 @@ test("Telegram routing keeps a non-target view from swallowing write commands", 
   await cmd.handleCommand(1, "k", "tui")
   assert.ok(sent.some((text) => text.includes("全屏交互界面")))
 })
+
+test("addProvider masks an unlabelled key on success and on failure", async () => {
+  // No sk- prefix and no key= label, so the generic redaction cannot recognise it
+  const key = "relay7f3a9c2be1d04"
+  const ok = service(() => ({ code: 0, stdout: `saved provider using ${key}` }))
+  assert.doesNotMatch(await ok.svc.addProvider("deepseek", key), new RegExp(key))
+
+  const failing = service(() => ({ code: 1, stderr: `rejected credential ${key} for deepseek` }))
+  await assert.rejects(() => failing.svc.addProvider("deepseek", key), (err: unknown) => {
+    assert.ok(err instanceof MagpieRunError)
+    assert.doesNotMatch((err as Error).message, new RegExp(key), "the failure text must not carry the key")
+    assert.match((err as Error).message, /\*\*\*/)
+    return true
+  })
+
+  // A value that magpie would parse as its own flag never reaches argv
+  const { svc, calls } = service(() => ({ code: 0, stdout: "" }))
+  await assert.rejects(() => svc.addProvider("deepseek", "--force"), MagpieError)
+  assert.equal(calls.length, 0)
+})

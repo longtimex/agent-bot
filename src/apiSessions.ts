@@ -2,8 +2,9 @@ import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import type { Opencode } from "./opencode.js"
 import { INBOX_RETENTION_MS } from "./attachments.js"
 import {
-  archiveLiveSession,
   deleteArchivedSession,
+  startNewConversation,
+  updateArchivedSession,
   resumeArchivedSession,
   staleAttachmentNotice,
   type ArchivedSession,
@@ -21,6 +22,7 @@ export interface SessionRouteDeps {
   modelLabel: (engine: string, model: string) => string
   requireIdle: (what: string) => void
   sessionView: () => Record<string, unknown>
+  readJsonBody: (req: ApiRequestContext["req"]) => Promise<Record<string, unknown>>
   json: (res: ApiRequestContext["res"], status: number, body: unknown) => void
 }
 
@@ -34,6 +36,11 @@ export function archivedView(deps: SessionRouteDeps, entry: ArchivedSession): Re
     ...(entry.title ? { title: entry.title } : {}),
     ...(model ? { model } : {}),
     archivedAt: entry.archivedAt,
+    ...(entry.pinned ? { pinned: true } : {}),
+    // The conversation open right now: it stays listed, the App marks it instead of hiding it
+    ...(deps.store.getArchiveId(deps.appKey) === entry.id ? { current: true } : {}),
+    // No engine session was ever recorded (a stateless CLI, or no run succeeded)
+    ...(entry.sessionID ? {} : { stateless: true }),
   }
 }
 
@@ -43,7 +50,7 @@ export function archivedView(deps: SessionRouteDeps, entry: ArchivedSession): Re
  * the only place its disk space is reclaimed.
  */
 export function archiveCurrentSession(deps: SessionRouteDeps, title?: string): Promise<ArchivedSession | undefined> {
-  return archiveLiveSession(deps.store, deps.archive, deps.oc, deps.appKey, title)
+  return startNewConversation(deps.store, deps.archive, deps.oc, deps.appKey, title)
 }
 
 /** GET /sessions, POST /sessions/:id/resume, DELETE /sessions/:id */
@@ -62,21 +69,41 @@ export async function routeSessions(
     deps.requireIdle("切换会话")
     const switched = await resumeArchivedSession(deps.store, deps.archive, deps.oc, key, id)
     if (!switched) throw new ApiError(404, "历史会话不存在或已被清理")
-    const { target, parked } = switched
-    const stale = staleAttachmentNotice(target, INBOX_RETENTION_MS)
+    const { target, parked, alreadyCurrent } = switched
+    const stale = alreadyCurrent ? undefined : staleAttachmentNotice(target, INBOX_RETENTION_MS)
     deps.json(ctx.res, 200, {
       ok: true,
-      message:
-        `已切回「${target.title ?? "历史会话"}」（${deps.engineLabel(target.engine)}）` +
-        (parked ? "，刚才的会话已存入历史" : "") +
-        (stale ? `。${stale}` : ""),
+      message: alreadyCurrent
+        ? `「${target.title ?? "这个会话"}」就是当前会话`
+        : `已切回「${target.title ?? "历史会话"}」（${deps.engineLabel(target.engine)}）` +
+          (parked ? "，刚才的会话已存入历史" : "") +
+          (target.sessionID ? "" : "。该会话当时没有保存上下文，Agent 会从头开始") +
+          (stale ? `。${stale}` : ""),
       session: deps.sessionView(),
       ...(parked ? { archived: archivedView(deps, parked) } : {}),
     })
     return
   }
+  // Rename (an empty or null title clears it) and pin/unpin
+  if (id && !action && ctx.method === "PUT") {
+    const body = await deps.readJsonBody(ctx.req)
+    const patch: { title?: string | null; pinned?: boolean } = {}
+    if (body.title !== undefined) {
+      if (body.title !== null && typeof body.title !== "string") throw new ApiError(400, "title 必须是字符串")
+      patch.title = body.title as string | null
+    }
+    if (body.pinned !== undefined) {
+      if (typeof body.pinned !== "boolean") throw new ApiError(400, "pinned 必须是 true 或 false")
+      patch.pinned = body.pinned
+    }
+    if (patch.title === undefined && patch.pinned === undefined) throw new ApiError(400, "请提供 title 或 pinned")
+    const updated = updateArchivedSession(deps.store, deps.archive, key, id, patch)
+    if (!updated) throw new ApiError(404, "历史会话不存在或已被清理")
+    deps.json(ctx.res, 200, { ok: true, archived: archivedView(deps, updated) })
+    return
+  }
   if (id && !action && ctx.method === "DELETE") {
-    if (!(await deleteArchivedSession(deps.archive, deps.oc, key, id))) {
+    if (!(await deleteArchivedSession(deps.archive, deps.oc, key, id, deps.store))) {
       throw new ApiError(404, "历史会话不存在或已被清理")
     }
     deps.json(ctx.res, 200, { ok: true, removed: true })

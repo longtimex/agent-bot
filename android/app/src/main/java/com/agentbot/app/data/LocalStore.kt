@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -48,6 +49,20 @@ data class SentAttachment(
 ) {
     val sizeLabel: String get() = formatFileSize(size)
 }
+
+/**
+ * A text message written while the bot was unreachable. It waits on the phone and is sent, in
+ * order, once the server answers again. Only messages the server certainly never received are
+ * queued, so a resend can never start the same task twice.
+ */
+@Serializable
+data class OutboxEntry(
+    val id: String,
+    val prompt: String,
+    val engine: String? = null,
+    val model: String? = null,
+    val at: Long,
+)
 
 /** Copies content URIs (photo picker, document picker) into private cache files, and persists chat history locally. */
 object LocalStore {
@@ -108,6 +123,10 @@ object LocalStore {
         val at: Long,
         val media: List<TaskMedia> = emptyList(),
         val attachments: List<SentAttachment> = emptyList(),
+        /** Set while the bubble is a message still waiting in the outbox. */
+        val outboxId: String? = null,
+        /** Names only: a 安全输入 card must survive a restart, its value is never stored. */
+        val secretRequests: List<SecretRequest> = emptyList(),
     )
 
     /**
@@ -129,6 +148,8 @@ object LocalStore {
                 it.at,
                 it.media,
                 it.attachments,
+                outboxId = it.outboxId,
+                secretRequests = it.secretRequests,
             )
         }
         val encoded = stored.map { json.encodeToString(StoredMessage.serializer(), it) }
@@ -158,6 +179,22 @@ object LocalStore {
         if (messages.isEmpty()) clearMessages(context) else saveMessages(context, messages)
     }
 
+    // ---- offline outbox ----
+
+    private val outboxSerializer = ListSerializer(OutboxEntry.serializer())
+
+    /** apply() keeps the write order, so back-to-back queue changes never land out of sequence. */
+    fun saveOutbox(context: Context, entries: List<OutboxEntry>) {
+        val prefs = context.getSharedPreferences("agent_bot", Context.MODE_PRIVATE).edit()
+        if (entries.isEmpty()) prefs.remove("chat_outbox") else prefs.putString("chat_outbox", json.encodeToString(outboxSerializer, entries))
+        prefs.apply()
+    }
+
+    fun loadOutbox(context: Context): List<OutboxEntry> {
+        val raw = context.getSharedPreferences("agent_bot", Context.MODE_PRIVATE).getString("chat_outbox", null) ?: return emptyList()
+        return runCatching { json.decodeFromString(outboxSerializer, raw) }.getOrDefault(emptyList())
+    }
+
     fun loadMessages(context: Context): List<com.agentbot.app.ui.ChatMessage> {
         val raw = context.getSharedPreferences("agent_bot", Context.MODE_PRIVATE)
             .getString("chat_messages", null) ?: return emptyList()
@@ -179,6 +216,8 @@ object LocalStore {
                 at = stored.at,
                 media = stored.media,
                 attachments = stored.attachments,
+                outboxId = stored.outboxId,
+                secretRequests = stored.secretRequests,
             )
         }
     }
@@ -218,12 +257,14 @@ object LocalStore {
         }
     }
 
-    /** Takes the transcript out of the archive: once resumed, it is the live chat again. */
+    /**
+     * Reads an archived transcript. The file stays: the entry stays listed after a resume, and the
+     * live chat is written back over it the next time this conversation is parked.
+     */
     fun takeTranscript(context: Context, id: String): List<com.agentbot.app.ui.ChatMessage> {
         val file = archiveFile(context, id) ?: return emptyList()
         if (!file.exists()) return emptyList()
         val rows = runCatching { json.parseToJsonElement(file.readText()).jsonArray }.getOrNull()
-        file.delete()
         return rows?.mapNotNull { element ->
             val stored = runCatching { json.decodeFromJsonElement(StoredMessage.serializer(), element) }.getOrNull()
                 ?: return@mapNotNull null
@@ -243,6 +284,13 @@ object LocalStore {
     }
 
     fun hasTranscript(context: Context, id: String): Boolean = archiveFile(context, id)?.exists() == true
+
+    /** Archived transcripts on this phone whose messages contain [query], for 历史会话 search. */
+    fun transcriptsMatching(context: Context, ids: List<String>, query: String): Set<String> {
+        val needle = query.trim()
+        if (needle.isEmpty()) return emptySet()
+        return ids.filter { id -> takeTranscript(context, id).any { it.text.contains(needle, ignoreCase = true) } }.toSet()
+    }
 
     fun dropTranscript(context: Context, id: String) {
         archiveFile(context, id)?.delete()

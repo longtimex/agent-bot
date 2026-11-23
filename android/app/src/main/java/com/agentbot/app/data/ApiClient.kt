@@ -15,7 +15,9 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
@@ -120,6 +122,12 @@ class ApiClient {
         // Four queued prompts plus the running one each hold an SSE stream: the default
         // five-per-host would put every ordinary call behind them until a task finished.
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 16 })
+        // The bot closes an idle keep-alive socket after 5s (src/api.ts) and tunnels/NAT drop
+        // them sooner still. OkHttp's default pool keeps them 5 minutes, so the next tap went out
+        // on a socket already dead and failed with "unexpected end of stream". Expire them first.
+        .connectionPool(ConnectionPool(5, 4, TimeUnit.SECONDS))
+        .retryOnConnectionFailure(true)
+        .addInterceptor(IdempotentRetry)
         .build()
 
     /**
@@ -131,6 +139,32 @@ class ApiClient {
         .readTimeout(30, TimeUnit.MINUTES)
         .writeTimeout(30, TimeUnit.MINUTES)
         .build()
+
+    /**
+     * One quiet retry for a read that died on the wire: a Wi-Fi/cellular handover, a tunnel that
+     * recycled its connection, a pooled socket the server already closed. Only GET is repeated;
+     * a POST may already have started a task, and running it twice costs a second Agent run.
+     * The SSE stream is excluded too: its caller reconnects with its own backoff.
+     */
+    private object IdempotentRetry : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
+            val request = chain.request()
+            val retryable = request.method == "GET" && !request.url.encodedPath.endsWith("/events")
+            if (!retryable) return chain.proceed(request)
+            var last: IOException? = null
+            for (attempt in 0 until 2) {
+                try {
+                    return chain.proceed(request)
+                } catch (err: IOException) {
+                    // A timeout means the server is slow, not that the socket was stale
+                    if (err is SocketTimeoutException || chain.call().isCanceled()) throw err
+                    last = err
+                    if (attempt == 0) Thread.sleep(300)
+                }
+            }
+            throw last!!
+        }
+    }
 
     private fun url(connection: Connection, path: String): String =
         connection.baseUrl.trimEnd('/') + "/api/v1" + path
@@ -432,9 +466,18 @@ class ApiClient {
      * Returns normally on done/failed/cancelled; throws when the stream cannot
      * be established or closes early, so the caller can fall back to polling.
      */
+    /**
+     * The server pings every 15s. A stream that goes quiet for longer is dead: a tunnel or NAT
+     * dropped it without a FIN, which OkHttp's 30s read timeout only half covered and proxies
+     * that buffer pings defeated entirely. Failing fast hands the task to [pollTaskLoop].
+     */
+    private val streamHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(45, TimeUnit.SECONDS)
+        .build()
+
     suspend fun streamTask(connection: Connection, id: String, onEvent: suspend (Task) -> Unit): Unit =
         withContext(Dispatchers.IO) {
-            openCall(request(connection, "GET", "/task/$id/events")).use { res ->
+            openCall(request(connection, "GET", "/task/$id/events"), streamHttp).use { res ->
                 if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
                 // A task that had already settled when the request arrived answers with one
                 // plain JSON snapshot instead of a stream (src/api.ts), so read that too.
@@ -477,8 +520,46 @@ class ApiClient {
         return res["archivedId"]?.jsonPrimitive?.content
     }
 
+    /** Restores the working tree to how it was before the last CLI task; the reply says what happened. */
+    /** 安全输入: the value goes into the server's vault, never into a prompt. */
+    suspend fun provideSecret(connection: Connection, taskId: String, name: String, value: String): SecretProvideResult {
+        val res = send(connection, "POST", "/task/$taskId/secret", buildJsonObject {
+            put("name", name)
+            put("value", value)
+        })
+        return json.decodeFromJsonElement(SecretProvideResult.serializer(), res)
+    }
+
+    suspend fun listSecrets(connection: Connection): List<SecretInfo> =
+        parseList(getBody(connection, "/tasks/secrets"), "secrets", SecretInfo.serializer())
+
+    suspend fun clearSecrets(connection: Connection): Int {
+        val res = send(connection, "DELETE", "/tasks/secrets")
+        return res["cleared"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+    }
+
+    suspend fun undoChanges(connection: Connection): String {
+        val res = send(connection, "POST", "/undo")
+        return res["message"]?.jsonPrimitive?.content ?: "已处理撤销请求"
+    }
+
     suspend fun archivedSessions(connection: Connection): List<ArchivedSession> =
         parseList(getBody(connection, "/sessions"), "sessions", ArchivedSession.serializer())
+
+    /** Renames and/or pins a 历史会话 entry; the server answers with the updated entry. */
+    suspend fun updateArchivedSession(
+        connection: Connection,
+        id: String,
+        title: String? = null,
+        pinned: Boolean? = null,
+    ): ArchivedSession {
+        val res = send(connection, "PUT", "/sessions/$id", buildJsonObject {
+            if (title != null) put("title", title)
+            if (pinned != null) put("pinned", pinned)
+        })
+        val archived = res["archived"]?.jsonObject ?: throw ApiException(500, "响应缺少 archived 字段")
+        return json.decodeFromJsonElement(ArchivedSession.serializer(), archived)
+    }
 
     suspend fun resumeSession(connection: Connection, id: String): SessionResume =
         json.decodeFromJsonElement(SessionResume.serializer(), send(connection, "POST", "/sessions/$id/resume"))

@@ -199,7 +199,7 @@ export class TelegramAttachments {
     pruneInbox(this.#deps.cfg.inboxDir)
 
     const caps = model ? await this.#deps.oc.inputCapabilities(model) : undefined
-    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps })
+    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps }, { signal })
     failed.push(...stt.errors)
     return buildAttachmentSections(job.text, { saved: stt.saved, failed, modelCapabilities: caps })
   }
