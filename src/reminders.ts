@@ -756,7 +756,12 @@ export class ReminderService {
     // deliver after the timeout had already been booked as a failure. Abort it for real.
     const controller = new AbortController()
     let timer: NodeJS.Timeout | undefined
-    const sending = this.#send(chatId, text, reminder, controller.signal)
+    // Aborting rejects the send with an AbortError, which would win the race below and be
+    // read as a refusal — the one outcome that must not be retried. Translate it first.
+    const sending = this.#send(chatId, text, reminder, controller.signal).catch((err: unknown) => {
+      if (controller.signal.aborted) throw new ReminderSendTimeout()
+      throw err
+    })
     // The losing branch of the race must not surface as an unhandled rejection
     sending.catch(() => {})
     try {
@@ -764,8 +769,9 @@ export class ReminderService {
         sending,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            controller.abort()
+            // Reject before aborting: the timeout is the truth, the abort is the cleanup
             reject(new ReminderSendTimeout())
+            controller.abort()
           }, this.#sendTimeoutMs)
         }),
       ])

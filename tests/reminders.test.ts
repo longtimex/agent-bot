@@ -693,7 +693,8 @@ test("Telegram hands the reminder to its delivery bridge so snooze buttons exist
   const source = readFileSync("src/telegram.ts", "utf8")
   assert.match(
     source,
-    /new ReminderService\([\s\S]{0,300}?\(chatId, text, reminder\) => this\.#deliverReminder\(chatId, text, reminder\)/,
+    // The bridge grew a signal parameter; what matters is that the reminder still travels
+    /new ReminderService\([\s\S]{0,300}?\(chatId, text, reminder(?:, signal)?\) => this\.#deliverReminder\(chatId, text, reminder(?:, signal)?\)/,
     "a two-parameter wrapper compiles but never passes the reminder, which makes the delivery's snooze buttons dead code",
   )
 })
