@@ -249,7 +249,8 @@ test("progress card strips Markdown control characters from statuses", async (t)
 
 test("the draft preview hides directives, even half-written ones, and keeps the tail of a long answer", () => {
   assert.equal(draftPreview("看图\n[[image:outbox/a.png]]\n说明"), "看图\n\n说明")
-  assert.equal(draftPreview("先说明。\n[[secret=[REDACTED_PASSWORD] | 推送]]"), "先说明。")
+  // The directive syntax is `[[secret:<value> | <label>]]`; the value here is a fixture
+  assert.equal(draftPreview("先说明。\n[[secret:sk-test-1234 | 推送]]"), "先说明。")
   assert.equal(draftPreview("马上发图 [[image:outbox/a"), "马上发图", "a directive still being written is not shown")
   const long = `${"开头".repeat(2_000)}结尾`
   const preview = draftPreview(long)

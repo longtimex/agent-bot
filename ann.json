@@ -1,0 +1,38 @@
+[
+  {
+    "path": ".github",
+    "blob_href": "https://github.com/longtimex/agent-bot/blob/aa4afe63e5fecade100088ddfbad087f5bb63486/.github",
+    "start_line": 7914,
+    "start_column": null,
+    "end_line": 7914,
+    "end_column": null,
+    "annotation_level": "failure",
+    "title": "",
+    "message": "Process completed with exit code 1.",
+    "raw_details": ""
+  },
+  {
+    "path": ".github",
+    "blob_href": "https://github.com/longtimex/agent-bot/blob/aa4afe63e5fecade100088ddfbad087f5bb63486/.github",
+    "start_line": 7913,
+    "start_column": null,
+    "end_line": 7913,
+    "end_column": null,
+    "annotation_level": "failure",
+    "title": "failing test",
+    "message": "not ok 1019 - an Agent request collects every secret into the vault and resumes the task without the values",
+    "raw_details": ""
+  },
+  {
+    "path": ".github",
+    "blob_href": "https://github.com/longtimex/agent-bot/blob/aa4afe63e5fecade100088ddfbad087f5bb63486/.github",
+    "start_line": 7912,
+    "start_column": null,
+    "end_line": 7912,
+    "end_column": null,
+    "annotation_level": "failure",
+    "title": "failing test",
+    "message": "not ok 896 - the draft preview hides directives, even half-written ones, and keeps the tail of a long answer",
+    "raw_details": ""
+  }
+]

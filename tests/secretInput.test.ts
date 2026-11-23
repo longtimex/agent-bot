@@ -188,18 +188,18 @@ test("an Agent request collects every secret into the vault and resumes the task
   try {
     const { input, calls, enqueued } = harness()
     const job = { key: "tg:7", chatId: 7, userId: 1 }
-    const asked = input.fromReply(job, "需要两个密钥。\n[[secret: GITHUB_TOKEN | 推送]]\n[[secret: NPM_TOKEN_X]]")
+    const asked = input.fromReply(job, "需要两个密钥。\n[[secret: GITHUB_TOKEN | 推送]]\n[[secret: SERVICE_TOKEN]]")
     assert.equal(asked.text, "需要两个密钥。")
     await asked.ask()
     assert.match(calls.at(-1) ?? "", /AI 请求提供 GITHUB_TOKEN（1\/2）/)
     await input.intercept({ chatId: 7, userId: 1, messageId: 20, text: TOKEN })
-    assert.match(calls.at(-1) ?? "", /AI 请求提供 NPM_TOKEN_X（2\/2）/)
+    assert.match(calls.at(-1) ?? "", /AI 请求提供 SERVICE_TOKEN（2\/2）/)
     assert.equal(enqueued.length, 0, "not resumed while one is missing")
     await input.intercept({ chatId: 7, userId: 1, messageId: 21, text: "npm-secret-value" })
     assert.ok(calls.includes("delete 7#20") && calls.includes("delete 7#21"))
-    assert.deepEqual(vault.env("tg:7"), { GITHUB_TOKEN: TOKEN, NPM_TOKEN_X: "npm-secret-value" })
+    assert.deepEqual(vault.env("tg:7"), { GITHUB_TOKEN: TOKEN, SERVICE_TOKEN: "npm-secret-value" })
     assert.equal(enqueued.length, 1)
-    assert.match(enqueued[0]!.text, /GITHUB_TOKEN、NPM_TOKEN_X/)
+    assert.match(enqueued[0]!.text, /GITHUB_TOKEN、SERVICE_TOKEN/)
     assert.doesNotMatch(enqueued[0]!.text, new RegExp(`${TOKEN}|npm-secret-value`))
 
     // Asking again for what is already there does not loop back into the Agent
