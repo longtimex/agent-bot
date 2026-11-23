@@ -53,6 +53,7 @@ import com.agentbot.app.ui.RemindersScreen
 import com.agentbot.app.ui.Screen
 import com.agentbot.app.ui.SchedulesScreen
 import com.agentbot.app.ui.SessionScreen
+import com.agentbot.app.ui.SessionsScreen
 import com.agentbot.app.ui.SettingsScreen
 import com.agentbot.app.ui.StatusScreen
 import com.agentbot.app.ui.theme.AgentBotTheme
