@@ -59,6 +59,8 @@ import { OpsActionJobs, routeOps } from "./apiOpsRoutes.js"
 import { AndroidReleaseService, routeAndroidRelease } from "./androidRelease.js"
 import { routeAgentModels, routeAgentProvider, routeCustomModels, routeModelTest, type ModelRouteDeps } from "./apiModelRoutes.js"
 import { ApiAgentActions } from "./apiAgentRoutes.js"
+import { archiveCurrentSession, routeSessions, type SessionRouteDeps } from "./apiSessions.js"
+import { SessionArchiveStore } from "./sessionArchive.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
 // fixed application-level ceiling: the JSON body is still bounded by available
@@ -120,6 +122,15 @@ export interface ApiServerOptions {
   /** Fetches remote media (Telegram's guarded downloader) so the app can receive it too. */
   fetchMedia?: (target: string) => Promise<Buffer>
   version?: string
+  /** Cap on a JSON request body; defaults to what four base64 attachments at MAX_MEDIA_MB need. */
+  maxJsonBodyBytes?: number
+  /** Where 新建会话 parks the old session; defaults to data/session-archive.json. */
+  sessionArchive?: SessionArchiveStore
+}
+
+/** Base64 inflates by 4/3; the extra megabyte covers the prompt text and JSON framing. */
+export function defaultJsonBodyLimit(maxMediaBytes: number): number {
+  return Math.ceil((maxMediaBytes * 4 * 4) / 3) + 1024 * 1024
 }
 
 export { ApiError, type ApiRequestContext } from "./apiCore.js"
@@ -200,6 +211,7 @@ export class ApiServer {
   #magpieActionRunning = false
   readonly #taskManager: ApiTaskManager
   readonly #agentActions: ApiAgentActions
+  readonly #archive: SessionArchiveStore
   readonly #agentModels: AgentModelCatalog
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
   readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
@@ -228,6 +240,8 @@ export class ApiServer {
     this.#token = token
     this.#encKey = encKey
     this.#agentModels = new AgentModelCatalog(options.agents.registry, { log: options.log })
+    this.#archive =
+      options.sessionArchive ?? new SessionArchiveStore(resolve(options.cfg.dataDir, "session-archive.json"), options.log)
     this.#taskManager = new ApiTaskManager({
       cfg: options.cfg,
       oc: options.oc,
@@ -297,6 +311,11 @@ export class ApiServer {
       this.#log.error("api server error:", err.message)
     })
     this.#log.info(`api listening on http://${this.#opts.cfg.api.bind}:${this.#opts.cfg.api.port}${API_PREFIX}`)
+  }
+
+  /** Open task event streams; a test seam for proving disconnected clients are released. */
+  get taskStreamSubscribers(): number {
+    return this.#taskManager.streamSubscribers
   }
 
   async stop(): Promise<void> {
@@ -460,8 +479,20 @@ export class ApiServer {
 
     if (resource === "new" && method === "POST") {
       this.#requireIdle("开启新会话")
-      await this.#resetSession()
-      this.#json(ctx.res, 200, { ok: true, message: "已开启新会话，上下文已清空。" })
+      // Parked, not deleted: 历史会话 can switch back to it with its context intact
+      const body = await this.#readJsonBody(ctx.req)
+      const title = typeof body.title === "string" ? body.title : undefined
+      const archived = await archiveCurrentSession(this.#sessionRouteDeps(), title)
+      this.#json(ctx.res, 200, {
+        ok: true,
+        message: archived ? "已开启新会话，原会话已存入历史，可随时切回。" : "已开启新会话，上下文已清空。",
+        ...(archived ? { archivedId: archived.id } : {}),
+      })
+      return
+    }
+
+    if (resource === "sessions") {
+      await routeSessions(ctx, this.#sessionRouteDeps(), id, action)
       return
     }
 
@@ -830,6 +861,20 @@ export class ApiServer {
     this.#taskManager.requireIdle(what)
   }
 
+  #sessionRouteDeps(): SessionRouteDeps {
+    return {
+      store: this.#opts.store,
+      archive: this.#archive,
+      oc: this.#opts.oc,
+      appKey: this.appKey,
+      engineLabel: (engine) => this.#opts.agents.registry.label(engine),
+      modelLabel: (engine, model) => this.#opts.agents.registry.modelLabel(engine, model),
+      requireIdle: (what) => this.#requireIdle(what),
+      sessionView: () => this.#sessionView(),
+      json: (res, status, body) => this.#json(res, status, body),
+    }
+  }
+
   /** Task routes only need the manager plus the transport helpers. */
   #taskRouteDeps(): TaskRouteDeps {
     return {
@@ -1104,9 +1149,29 @@ export class ApiServer {
 
   async #readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     const encKey = this.#bodyKeys.get(req)
+    // requestTimeout is 0 so a slow phone can finish a large upload, which also means nothing
+    // else stops a client from streaming an endless body into memory. Large files belong in
+    // the multipart route, which streams to disk; a JSON body only has to fit the base64 case.
+    const limit = this.#opts.maxJsonBodyBytes ?? defaultJsonBodyLimit(this.#opts.cfg.maxMediaBytes)
+    const tooLarge = (): ApiError =>
+      new ApiError(413, `请求体超过 ${Math.round(limit / 1024 / 1024)}MB 上限；大文件请用 multipart 上传`)
+    const declared = Number(req.headers["content-length"])
+    if (Number.isFinite(declared) && declared > limit) {
+      // Answer without reading; the 413 carries connection: close (see #json) so the unread
+      // body is dropped with the socket instead of being parsed as the next request
+      throw tooLarge()
+    }
     const chunks: Buffer[] = []
+    let size = 0
     for await (const chunk of req) {
-      chunks.push(chunk as Buffer)
+      const data = chunk as Buffer
+      size += data.byteLength
+      if (size > limit) {
+        // Stop buffering at once; the 413 closes the connection behind it
+        req.pause()
+        throw tooLarge()
+      }
+      chunks.push(data)
     }
     if (chunks.length === 0) return {}
     const raw = Buffer.concat(chunks)
@@ -1154,6 +1219,9 @@ export class ApiServer {
       "x-frame-options": "DENY",
       "referrer-policy": "no-referrer",
       "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+      // A rejected oversize body is left unread on the socket; closing it is the only way
+      // to keep those bytes from being read as the next request on a kept-alive connection
+      ...(status === 413 ? { connection: "close" } : {}),
       ...extraHeaders,
     }
     if (encKey) {

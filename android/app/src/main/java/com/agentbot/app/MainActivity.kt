@@ -196,6 +196,7 @@ class MainActivity : ComponentActivity() {
                                 when (screen) {
                                     Screen.Chat -> ChatScreen(vm = vm, onOpenDrawer = { scope.launch { drawerState.open() } })
                                     Screen.History -> HistoryScreen(vm)
+                                    Screen.Sessions -> SessionsScreen(vm)
                                     Screen.Reminders -> RemindersScreen(vm)
                                     Screen.Schedules -> SchedulesScreen(vm)
                                     Screen.Session -> SessionScreen(vm)

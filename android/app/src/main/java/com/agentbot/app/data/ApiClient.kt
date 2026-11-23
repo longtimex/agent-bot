@@ -467,8 +467,24 @@ class ApiClient {
         return res["stopped"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
     }
 
-    suspend fun newSession(connection: Connection) {
-        send(connection, "POST", "/new")
+    /**
+     * Parks the current session in 历史会话 and starts a fresh one. Returns the archive id the
+     * old session got, so the App can file its local transcript under the same id; null when
+     * there was no context to keep.
+     */
+    suspend fun newSession(connection: Connection, title: String? = null): String? {
+        val res = send(connection, "POST", "/new", buildJsonObject { if (title != null) put("title", title) })
+        return res["archivedId"]?.jsonPrimitive?.content
+    }
+
+    suspend fun archivedSessions(connection: Connection): List<ArchivedSession> =
+        parseList(getBody(connection, "/sessions"), "sessions", ArchivedSession.serializer())
+
+    suspend fun resumeSession(connection: Connection, id: String): SessionResume =
+        json.decodeFromJsonElement(SessionResume.serializer(), send(connection, "POST", "/sessions/$id/resume"))
+
+    suspend fun deleteArchivedSession(connection: Connection, id: String) {
+        send(connection, "DELETE", "/sessions/$id")
     }
 
     /** Stops one task: a queued entry is dropped, a running one is aborted. */

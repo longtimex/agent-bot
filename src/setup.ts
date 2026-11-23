@@ -11,6 +11,7 @@ import {
   isPortLikeApiBind,
   parseApiPublicUrl,
 } from "./config.js"
+import { withFileLock } from "./fileLock.js"
 
 const DEFAULT_DETECT_TIMEOUT_MS = 120_000
 const API_TIMEOUT_MS = 20_000
@@ -371,9 +372,12 @@ export async function runSetup(deps: SetupDeps): Promise<SetupResult> {
   }
   // Re-read right before writing: the wizard can sit for minutes, and a value the
   // running bot stored meanwhile (e.g. a new whitelisted user) must not be reverted.
-  const latest = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
-  if (!latest) updates.TELEGRAM_ALLOW_ALL_USERS = "0"
-  writeEnvFile(envPath, upsertEnv(latest, updates))
+  // Under the same lock the running bot takes for /env, so neither writer reverts the other
+  withFileLock(envPath, () => {
+    const latest = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
+    if (!latest) updates.TELEGRAM_ALLOW_ALL_USERS = "0"
+    writeEnvFile(envPath, upsertEnv(latest, updates))
+  })
 
   deps.print("")
   deps.print("✅ 配置已保存。")
@@ -390,8 +394,12 @@ function readEnvState(envPath: string): Record<string, string> {
 
 /** Re-read immediately before writing so edits made while a prompt was open are preserved. */
 function persistEnv(envPath: string, updates: Record<string, string>, section: string): void {
-  const latest = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
-  writeEnvFile(envPath, upsertEnv(latest, updates, section))
+  // The re-read alone still raced a bot writing between this read and the rename; the lock
+  // (shared with OpsService.envSet) closes that window
+  withFileLock(envPath, () => {
+    const latest = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
+    writeEnvFile(envPath, upsertEnv(latest, updates, section))
+  })
 }
 
 function envBool(value: string | undefined): boolean {

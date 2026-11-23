@@ -225,3 +225,113 @@ test("a broken opencode binary is reported instead of crashing the process", asy
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+interface RaceState {
+  healthy: boolean
+  gateHealth: boolean
+  gateStop: boolean
+  holdHealth?: () => void
+  holdStop?: () => void
+}
+
+function createRaceHarness() {
+  const dir = mkdtempSync(join(tmpdir(), "bot-opencode-supervisor-race-"))
+  writeFileSync(join(dir, "opencode.pid"), "1") // a pid file marks the server as bot-managed
+  const clock = { now: 1_000 }
+  const counts = { start: 0, stop: 0 }
+  const state: RaceState = { healthy: true, gateHealth: false, gateStop: false }
+  const supervisor = new OpencodeSupervisor({
+    paths: {
+      projectDir: dir,
+      dataDir: dir,
+      envPath: join(dir, ".env"),
+      logPath: join(dir, "bot.log"),
+      opencodeLogPath: join(dir, "opencode.log"),
+      pidPath: join(dir, "bot.pid"),
+      lockPath: join(dir, "bot.lock"),
+      opencodePidPath: join(dir, "opencode.pid"),
+      startupPath: join(dir, "startup.json"),
+    },
+    env: {},
+    log,
+    onDemand: true,
+    idleStopMs: 60_000,
+    tickMs: 60 * 60_000,
+    now: () => clock.now,
+    healthy: async () => {
+      if (state.gateHealth) {
+        state.gateHealth = false
+        await new Promise<void>((resolve) => (state.holdHealth = resolve))
+      }
+      return state.healthy
+    },
+    start: async () => {
+      counts.start += 1
+      state.healthy = true
+      return { ok: true, message: "started" }
+    },
+    stop: async () => {
+      if (state.gateStop) {
+        state.gateStop = false
+        await new Promise<void>((resolve) => (state.holdStop = resolve))
+      }
+      counts.stop += 1
+      state.healthy = false
+      return "stopped"
+    },
+    localTarget: () => ({ host: "127.0.0.1", port: 4096 }),
+    unitManaged: () => false,
+  })
+  const cleanup = (): void => {
+    supervisor.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+  return { supervisor, clock, counts, state, cleanup }
+}
+
+async function flush(until: () => boolean): Promise<void> {
+  for (let i = 0; i < 20 && !until(); i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
+test("a task arriving during the idle health check is not cut off", async () => {
+  const h = createRaceHarness()
+  try {
+    h.clock.now += 61_000
+    h.state.gateHealth = true
+    const sweep = h.supervisor.tick()
+    await flush(() => h.state.holdHealth !== undefined)
+    assert.ok(h.state.holdHealth, "the sweep should be waiting on its health check")
+
+    const release = h.supervisor.track()
+    h.state.holdHealth!()
+    await sweep
+    assert.equal(h.counts.stop, 0, "a task that started mid-check must keep its server")
+    assert.equal(await h.supervisor.ensureRunning(), true)
+    assert.equal(h.counts.start, 0)
+    release()
+  } finally {
+    h.cleanup()
+  }
+})
+
+test("a task arriving while the server is being stopped starts it again", async () => {
+  const h = createRaceHarness()
+  try {
+    h.clock.now += 61_000
+    h.state.gateStop = true
+    const sweep = h.supervisor.tick()
+    await flush(() => h.state.holdStop !== undefined)
+    assert.ok(h.state.holdStop, "the sweep should be inside stop")
+
+    const release = h.supervisor.track()
+    const ready = h.supervisor.ensureRunning()
+    h.state.holdStop!()
+    await sweep
+    assert.equal(await ready, true)
+    assert.equal(h.counts.stop, 1)
+    assert.equal(h.counts.start, 1, "the server stopped under the task must be started again")
+    release()
+  } finally {
+    h.cleanup()
+  }
+})

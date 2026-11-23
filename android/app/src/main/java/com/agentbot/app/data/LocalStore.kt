@@ -190,6 +190,73 @@ object LocalStore {
             .apply()
     }
 
+    // ---- archived transcripts (历史会话) ----
+
+    /**
+     * The chat of a session parked by 新建会话, under the server's archive id. Files rather than
+     * SharedPreferences: up to 20 of them would otherwise all be read back on every launch.
+     */
+    private fun archiveFile(context: Context, id: String): File? {
+        // The id comes back from the server; anything but its own 12-hex shape is not a file name
+        if (!ARCHIVE_ID.matches(id)) return null
+        return File(File(context.filesDir, "session_archive").apply { mkdirs() }, "$id.json")
+    }
+
+    private val ARCHIVE_ID = Regex("^[0-9a-f]{12}$")
+
+    fun archiveTranscript(context: Context, id: String, messages: List<com.agentbot.app.ui.ChatMessage>) {
+        val file = archiveFile(context, id) ?: return
+        if (messages.isEmpty()) return
+        val stored = messages.map {
+            StoredMessage(it.role.ordinal, it.text, it.taskId, it.status, it.errorCode, it.engineNote, it.at, it.media, it.attachments)
+        }
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.writeText(json.encodeToString(stored))
+        if (!tmp.renameTo(file)) {
+            file.delete()
+            tmp.renameTo(file)
+        }
+    }
+
+    /** Takes the transcript out of the archive: once resumed, it is the live chat again. */
+    fun takeTranscript(context: Context, id: String): List<com.agentbot.app.ui.ChatMessage> {
+        val file = archiveFile(context, id) ?: return emptyList()
+        if (!file.exists()) return emptyList()
+        val rows = runCatching { json.parseToJsonElement(file.readText()).jsonArray }.getOrNull()
+        file.delete()
+        return rows?.mapNotNull { element ->
+            val stored = runCatching { json.decodeFromJsonElement(StoredMessage.serializer(), element) }.getOrNull()
+                ?: return@mapNotNull null
+            val role = com.agentbot.app.ui.ChatMessage.Role.entries.getOrNull(stored.role) ?: return@mapNotNull null
+            com.agentbot.app.ui.ChatMessage(
+                role = role,
+                text = stored.text,
+                taskId = stored.taskId,
+                status = stored.status,
+                errorCode = stored.errorCode,
+                engineNote = stored.engineNote,
+                at = stored.at,
+                media = stored.media,
+                attachments = stored.attachments,
+            )
+        }.orEmpty()
+    }
+
+    fun hasTranscript(context: Context, id: String): Boolean = archiveFile(context, id)?.exists() == true
+
+    fun dropTranscript(context: Context, id: String) {
+        archiveFile(context, id)?.delete()
+    }
+
+    /** Removes transcripts the server no longer lists (evicted past its 20-session cap). */
+    fun pruneTranscripts(context: Context, keep: Set<String>) {
+        val dir = File(context.filesDir, "session_archive")
+        dir.listFiles()?.forEach { file ->
+            val id = file.name.removeSuffix(".json")
+            if (file.name.endsWith(".json") && id !in keep) file.delete()
+        }
+    }
+
     // ---- unsent draft ----
 
     fun saveDraft(context: Context, text: String) {

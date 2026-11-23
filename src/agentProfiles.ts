@@ -170,5 +170,45 @@ export const BUILTIN_AGENT_PROFILES: AgentCliProfile[] = [
     },
     experimental: true,
   },
+  {
+    // DeepSeek's official harness. Headless is the only mode without a listening port, and it
+    // prints the final answer as plain text, which is what this bot needs.
+    id: "dsh",
+    label: "DeepSeek Harness",
+    bin: "dsh",
+    aliases: ["deepseek", "deepseek-harness"],
+    desc: "DeepSeek Harness（dsh），headless 一次性任务",
+    install: "npm install -g @deepseek-ai/dsh",
+    installSpec: { method: "npm", package: "@deepseek-ai/dsh" },
+    sessionMode: "stateless",
+    parse: "text",
+    // The model is chosen inside dsh's profile (Settings → Models), not by a flag
+    supportsModel: false,
+    modelHint: "模型由 dsh 的 profile 配置决定，在 dsh web 的「设置 → 模型」里改",
+    args: {
+      base: ["--profile", "headless"],
+      prompt: ["{prompt}"],
+    },
+  },
+  {
+    // Pi — a terminal coding agent whose core is intentionally small. `-p` runs one prompt
+    // without the TUI, which keeps the output parseable as plain text.
+    id: "pi",
+    label: "Pi",
+    bin: "pi",
+    aliases: ["pi-coding-agent"],
+    desc: "Pi 终端编码 agent，单次提示模式",
+    install: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+    installSpec: { method: "npm", package: "@earendil-works/pi-coding-agent" },
+    sessionMode: "stateless",
+    parse: "text",
+    supportsModel: true,
+    modelHint: "按当前 Pi 账号动态查询",
+    modelProbe: { args: ["--list-models"], format: "auto" },
+    args: {
+      base: [],
+      model: ["--model", "{model}"],
+      prompt: ["-p", "{prompt}"],
+    },
+  },
 ]
-

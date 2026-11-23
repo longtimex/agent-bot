@@ -610,11 +610,13 @@ export class Opencode {
       throw new OpencodeError(`model error: ${error.data?.message ?? error.name ?? "unknown"}`)
     }
 
+    // Each text part is a whole message ("我先读一下配置", a tool call, then the answer), not a
+    // delta of one string: joined with nothing, the paragraphs ran together into one line
     return (response.parts ?? [])
       .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text)
-      .join("")
-      .trim()
+      .map((part) => (part.text as string).trim())
+      .filter((text) => text.length > 0)
+      .join("\n\n")
   }
 
   #headers(): Record<string, string> {

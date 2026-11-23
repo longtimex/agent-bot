@@ -166,6 +166,11 @@ fun SessionScreen(vm: AppViewModel) {
                         onClick = vm::newChat,
                     )
                 }
+                QuietButton(
+                    text = "历史会话…",
+                    onClick = { vm.navigate(Screen.Sessions) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
 

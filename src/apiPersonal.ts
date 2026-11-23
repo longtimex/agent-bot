@@ -14,6 +14,7 @@ import type { SettingsStore } from "./settings.js"
 import type { AgentCustomModelStore } from "./agentCustomModels.js"
 import { supportsRelay } from "./agentProviders.js"
 import { whichSync } from "./agentCli.js"
+import { readDshModel } from "./dshConfig.js"
 import { clampLimit, res_attachment, stamp } from "./apiHttp.js"
 import type { BotConfig } from "./config.js"
 import { resolveOpencodeModel } from "./engineCall.js"
@@ -701,6 +702,11 @@ export function customModelView(key: string, entry: ModelInfo): Record<string, u
   return { key, providerID: entry.providerID, modelID: entry.modelID, label: entry.label, desc: entry.desc }
 }
 
+/** The model a profile-only engine is configured with, shown read-only in the App. */
+function configuredModelFor(id: string): string | undefined {
+  return id === "dsh" ? readDshModel() : undefined
+}
+
 export function builtinAgentView(): Record<string, unknown> {
   // The binary is removable (npm uninstall -g opencode-ai), so "installed" cannot be a constant
   const binPath = whichSync("opencode")
@@ -715,6 +721,7 @@ export function builtinAgentView(): Record<string, unknown> {
     binPath: binPath ?? null,
     sessionMode: "session",
     supportsModel: true,
+    configuredModel: null,
     // OpenCode takes its provider block in opencode.json, not an env var
     relaySupported: false,
     models: undefined,
@@ -749,6 +756,8 @@ export function agentView(deps: PersonalRouteDeps, profile: AgentCliProfile): Re
     install: profile.install,
     sessionMode: profile.sessionMode,
     supportsModel: Boolean(profile.supportsModel),
+    // Engines that pick their model in a config file can still report which one, read-only
+    configuredModel: configuredModelFor(profile.id) ?? null,
     // Only engines that read their endpoint from the environment can point at a relay
     relaySupported: supportsRelay(profile.id),
     // Models are discovered per account at request time; a client asks /models?engine=…

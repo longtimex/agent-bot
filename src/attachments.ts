@@ -54,6 +54,9 @@ export interface SavedAttachment extends AttachmentDescriptor {
 const INLINE_LIMIT = 60_000
 const INBOX_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+/** How long inbox files live; exported so 历史会话 can say when a parked session's files are gone. */
+export const INBOX_RETENTION_MS = INBOX_MAX_AGE_MS
+
 const TEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".markdown", ".json", ".jsonl", ".csv", ".tsv", ".log", ".yml", ".yaml",
   ".toml", ".ini", ".cfg", ".conf", ".xml", ".html", ".htm", ".css", ".scss", ".js", ".mjs",

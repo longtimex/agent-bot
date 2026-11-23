@@ -1,11 +1,9 @@
-import { randomBytes } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
 import { decryptPayload, encryptPayload } from "./apiCrypto.js"
 import { withFileLock } from "./fileLock.js"
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { asRecord } from "./util.js"
 import type { Logger } from "./logger.js"
+import { loadOrCreateSecretKey } from "./secretKey.js"
 
 /**
  * A third-party relay ("中转站") a CLI engine should talk to instead of its vendor.
@@ -49,19 +47,25 @@ export class AgentProviderStore {
 
   /** Passing undefined removes the relay, so the engine goes back to its own default. */
   set(engine: string, config: AgentProviderConfig | undefined): void {
-    const all = this.#load()
-    // The key is encrypted so a backup or a copied data directory carries no usable credential
-    if (config?.baseURL) {
-      all[engine] = {
-        baseURL: config.baseURL,
-        ...(config.apiKey ? { secret: encryptPayload(this.#keyBuffer(), config.apiKey) } : {}),
-      }
-    }
-    else delete all[engine]
-    writePrivateAtomic(
-      this.#path,
-      `${JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), engines: all }, null, 2)}\n`,
-    )
+    // Encrypt before taking the lock: creating the key may itself wait on another process
+    const secret = config?.baseURL && config.apiKey ? encryptPayload(this.#keyBuffer(), config.apiKey) : undefined
+    // The bot and the App each hold a store over this file; loading outside the lock let the
+    // later save erase a relay the other had just configured for a different engine
+    withFileLock(this.#path, () => {
+      // Work on the stored records, not on #load()'s decrypted view: writing that view back put
+      // every other engine's relay key on disk in plain text, and dropped the key of any entry
+      // that failed to decrypt. Only the engine being set changes; the rest keep their ciphertext.
+      const all = this.#loadStored()
+      // The key is encrypted so a backup or a copied data directory carries no usable credential
+      if (config?.baseURL) {
+        all[engine] = { baseURL: config.baseURL, ...(secret ? { secret } : {}) }
+      } else delete all[engine]
+      writePrivateAtomic(
+        this.#path,
+        `${JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), engines: all }, null, 2)}\n`,
+        `${this.#path}.${process.pid}.tmp`,
+      )
+    })
   }
 
   /**
@@ -80,23 +84,30 @@ export class AgentProviderStore {
 
   /** Same file and format the account vault uses: one data directory, one local secret. */
   #keyBuffer(): Buffer {
-    if (existsSync(this.#keyPath)) {
-      const raw = readFileSync(this.#keyPath, "utf8").trim()
-      if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
-      throw new Error(`账号密钥 ${this.#keyPath} 格式无效，请从备份恢复该文件。`)
-    }
-    return withFileLock(this.#keyPath, () => {
-      // Another store may have created it while this one waited for the lock
-      if (existsSync(this.#keyPath)) {
-        const raw = readFileSync(this.#keyPath, "utf8").trim()
-        if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
-      }
-      mkdirSync(dirname(this.#keyPath), { recursive: true })
-      const key = randomBytes(32)
-      writeFileSync(this.#keyPath, `${key.toString("hex")}\n`, { mode: 0o600 })
-      this.#log.info(`agent key created at ${this.#keyPath}`)
-      return key
+    return loadOrCreateSecretKey(this.#keyPath, {
+      onCreate: (path) => this.#log.info(`agent key created at ${path}`),
     })
+  }
+
+  /** Records as stored, with a pre-encryption plain `apiKey` encrypted on the way through. */
+  #loadStored(): Record<string, { baseURL: string; secret?: string }> {
+    const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
+    const engines = asRecord(raw?.engines)
+    const result: Record<string, { baseURL: string; secret?: string }> = {}
+    if (!engines) return result
+    for (const [engine, value] of Object.entries(engines)) {
+      const record = asRecord(value)
+      const baseURL = typeof record?.baseURL === "string" ? record.baseURL.trim() : ""
+      if (!baseURL) continue
+      if (typeof record?.secret === "string" && record.secret) {
+        result[engine] = { baseURL, secret: record.secret }
+      } else if (typeof record?.apiKey === "string" && record.apiKey) {
+        result[engine] = { baseURL, secret: encryptPayload(this.#keyBuffer(), record.apiKey) }
+      } else {
+        result[engine] = { baseURL }
+      }
+    }
+    return result
   }
 
   #load(): Record<string, AgentProviderConfig> {

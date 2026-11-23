@@ -97,7 +97,9 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
         sessionID = await ensureSession(deps, opts.key)
         unsubscribe?.()
         listen()
-        return await promptOnce()
+        // Recovery is silent otherwise, and a session resumed from 历史会话 that the server has
+        // since dropped would look restored while the Agent remembers nothing of it
+        return `${LOST_SESSION_NOTICE}\n\n${await promptOnce()}`
       }
     } finally {
       unsubscribe?.()
@@ -118,6 +120,9 @@ export function cliAttachmentNotice(files?: PromptFile[]): string | undefined {
   const names = files.map((file) => file.filename).join("、")
   return `[二进制附件] ${names} 未随本次请求传给 CLI 引擎，只能用附件清单里的绝对路径自行读取；图片、音频、视频和扫描件请切换到 OpenCode 引擎。`
 }
+
+/** Prefixed to a reply that ran in a fresh session because OpenCode no longer had the old one. */
+export const LOST_SESSION_NOTICE = "⚠️ 原会话在 OpenCode 服务端已不存在，已自动开启新会话，之前的上下文没有带过来。"
 
 /** Only an explicit per-session selection is returned; the engine owns the default model. */
 export function resolveOpencodeModel(

@@ -130,6 +130,43 @@ test("safe mode drops the flags that hand every tool call to the CLI", () => {
   assert.equal(bypassesPermissionChecks(gemini), true)
   assert.equal(bypassesPermissionChecks(profileById(registry, "kiro")), false)
   assert.equal(bypassesPermissionChecks(profileById(registry, "antigravity")), true)
+  // These three used to read as safe: Qoder's flag sits in its session templates, Copilot and
+  // Cursor spell "never ask" their own way
+  assert.equal(bypassesPermissionChecks(profileById(registry, "qoder")), true)
+  assert.equal(bypassesPermissionChecks(profileById(registry, "copilot")), true)
+  assert.equal(bypassesPermissionChecks(profileById(registry, "cursor")), true)
+})
+
+test("safe mode leaves no unattended-execution flag on any built-in engine", () => {
+  const registry = new AgentCliRegistry({ log })
+  const bypass = [
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-allow-all",
+    "--allow-all-tools",
+    "--allow-all-paths",
+    "yolo",
+  ]
+  const runs: Array<[boolean, string | undefined]> = [
+    [true, "11111111-1111-4111-8111-111111111111"],
+    [false, "s1"],
+    [false, undefined],
+  ]
+  for (const profile of registry.list()) {
+    for (const [isNew, sessionId] of runs) {
+      const argv = buildCliArgs(profile, { workDir: "/tmp", prompt: "hi", sessionId }, isNew, { safeMode: true })
+      const left = argv.filter((token) => bypass.includes(token) || (profile.id === "cursor" && token === "--force"))
+      assert.deepEqual(left, [], `${profile.id} keeps ${left.join(" ")} in safe mode`)
+      assert.ok(argv.includes("hi"), `${profile.id} lost its prompt while stripping flags`)
+    }
+  }
+  // `--force` is only Cursor's bypass; another CLI's ordinary --force must survive
+  const custom: AgentCliProfile = {
+    ...profileById(registry, "kiro"),
+    id: "mycli",
+    args: { base: ["run", "--force"], prompt: ["{prompt}"] },
+  }
+  assert.ok(buildCliArgs(custom, { workDir: "/tmp", prompt: "hi" }, true, { safeMode: true }).includes("--force"))
 })
 
 test("registry loads custom profiles, overrides builtins and ignores invalid entries", () => {
@@ -464,7 +501,14 @@ test("parseCliOutput reads Codex JSONL streams", () => {
     '{"type":"item.completed","item":{"type":"agent_message","text":" world"}}',
     '{"type":"turn.completed"}',
   ].join("\n")
-  assert.deepEqual(parseCliOutput("codex-jsonl", raw), { text: "Hello world", sessionId: "t1", error: undefined })
+  // Separate agent_messages are separate paragraphs, not one run-on line
+  assert.deepEqual(parseCliOutput("codex-jsonl", raw), { text: "Hello\n\nworld", sessionId: "t1", error: undefined })
+  const cjk = [
+    '{"type":"item.completed","item":{"type":"agent_message","text":"我先看一下文件。"}}',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"答案是 42。"}}',
+  ].join("\n")
+  assert.equal(parseCliOutput("codex-jsonl", cjk).text, "我先看一下文件。\n\n答案是 42。")
 
   const failed = parseCliOutput("codex-jsonl", '{"type":"turn.failed","error":{"message":"overloaded"}}')
   assert.equal(failed.error, "overloaded")
@@ -1047,4 +1091,26 @@ test("terminateProcess escalates to SIGKILL when only the pipes reached EOF", as
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
   }
+})
+
+test("DeepSeek Harness and Pi produce the argv their docs describe", () => {
+  const registry = new AgentCliRegistry({ log })
+
+  // dsh: launcher flags before the task, which is a positional argument
+  const dsh = registry.get("dsh")
+  assert.ok(dsh, "dsh must be registered")
+  assert.deepEqual(
+    buildCliArgs(dsh, { workDir: "/tmp", prompt: "fix the failing test" }, true),
+    ["--profile", "headless", "fix the failing test"],
+  )
+  assert.equal(dsh.supportsModel, false, "dsh picks its model inside the profile, not by flag")
+
+  // pi: one-shot prompt, with the model as a flag when one is chosen
+  const pi = registry.get("pi")
+  assert.ok(pi, "pi must be registered")
+  assert.deepEqual(
+    buildCliArgs(pi, { workDir: "/tmp", prompt: "review this", model: "deepseek-v4-flash" }, true),
+    ["--model", "deepseek-v4-flash", "-p", "review this"],
+  )
+  assert.deepEqual(buildCliArgs(pi, { workDir: "/tmp", prompt: "review this" }, true), ["-p", "review this"])
 })

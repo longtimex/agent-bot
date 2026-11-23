@@ -17,7 +17,7 @@ internal val ONE_OFF_WORDS = setOf("engine", "engine!", "model!")
  * is never submitted to the AI as a prompt.
  */
 internal val SLASH_COMMANDS = setOf(
-    "start", "menu", "help", "new", "stop", "retry", "queue", "history", "export",
+    "start", "menu", "help", "new", "sessions", "stop", "retry", "queue", "history", "export",
     "status", "usage", "report", "id", "api", "agent", "agents", "model", "dir", "timezone",
     "remind", "reminders", "cancel", "schedule", "env", "access", "alias", "account", "proxy",
     "cc", "magpie", "ops", "logs", "diag", "update", "restart", "service",
@@ -126,6 +126,7 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
         }
 
         "new" -> vm.newChat()
+        "sessions" -> vm.navigate(Screen.Sessions)
         "stop" -> vm.stop()
         "retry" -> vm.retryLastTask()
 

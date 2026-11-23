@@ -731,3 +731,65 @@ test("ReminderService.postpone moves a pending one-shot and refuses repeats", as
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("a timed-out reminder is cancelled and never sent twice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+  try {
+    let attempts = 0
+    let aborted = 0
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      (_chatId, _text, _reminder, signal) => {
+        attempts += 1
+        // A slow Telegram: the request only gives up when the service cancels it
+        return new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            aborted += 1
+            reject(new Error("aborted"))
+          })
+        })
+      },
+      log,
+      undefined,
+      undefined,
+      { sendTimeoutMs: 30 },
+    )
+    const now = Date.now()
+    service.add(42, 7, "10s 开会", now)
+
+    await service.tick(now + 11_000)
+    assert.equal(attempts, 1)
+    assert.equal(aborted, 1, "the timed-out request must be cancelled, not left running")
+    assert.equal(service.list(42).length, 0, "an unknown outcome must not be queued for a resend")
+
+    await service.tick(now + 11_000 + 2 * 60 * 60_000)
+    assert.equal(attempts, 1, "no retry may follow a send that might have landed")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a refused reminder send is still retried", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-reminders-"))
+  try {
+    let attempts = 0
+    const service = new ReminderService(
+      join(dir, "reminders.json"),
+      async () => {
+        attempts += 1
+        throw new Error("network down")
+      },
+      log,
+      undefined,
+      undefined,
+      { sendTimeoutMs: 30 },
+    )
+    const now = Date.now()
+    service.add(42, 7, "10s 开会", now)
+    await service.tick(now + 11_000)
+    assert.equal(attempts, 1)
+    assert.equal(service.list(42).length, 1, "a definite failure keeps its backoff retry")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

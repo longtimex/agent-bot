@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { callEngine, cliAttachmentNotice, resolveOpencodeModel } from "../src/engineCall.js"
+import { LOST_SESSION_NOTICE, callEngine, cliAttachmentNotice, resolveOpencodeModel } from "../src/engineCall.js"
 import type { EngineCallDeps } from "../src/engineCall.js"
 import { OpencodeError } from "../src/opencode.js"
 import { OpencodeSupervisor, configureOpencodeSupervisor } from "../src/opencodeSupervisor.js"
@@ -87,7 +87,8 @@ test("a lost session (404) is recreated transparently and the prompt retried onc
   try {
     store.set("tg:1", "ses-gone")
     const reply = await callEngine(deps, { key: "tg:1", engine: "opencode", text: "再来" })
-    assert.equal(reply, "回复:再来")
+    // The reply still arrives, but says the context did not survive
+    assert.equal(reply, `${LOST_SESSION_NOTICE}\n\n回复:再来`)
     assert.equal(fake.prompts.length, 2, "the prompt runs twice: once against the dead session, once against the new one")
     assert.equal(fake.sessions.length, 1, "exactly one replacement session is created")
     assert.equal(store.get("tg:1"), "ses-1", "the store points at the new session")

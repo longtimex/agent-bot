@@ -525,7 +525,32 @@ export class ReminderStore {
   }
 }
 
-export type ReminderSender = (chatId: number, text: string, reminder?: Reminder) => Promise<void>
+/**
+ * Delivers one reminder. `signal` fires when the send has timed out: a sender must pass it on
+ * to the transport so the request is actually cancelled rather than left to land late.
+ */
+export type ReminderSender = (
+  chatId: number,
+  text: string,
+  reminder?: Reminder,
+  signal?: AbortSignal,
+) => Promise<void>
+
+/**
+ * A send that hit the timeout. The request may still have reached Telegram before it was
+ * cancelled, so the outcome is unknown, unlike a send that was refused outright.
+ */
+export class ReminderSendTimeout extends Error {
+  constructor() {
+    super("Telegram 发送超时")
+    this.name = "ReminderSendTimeout"
+  }
+}
+
+export interface ReminderServiceOptions {
+  /** How long one delivery may take before it is cancelled; tests shorten it. */
+  sendTimeoutMs?: number
+}
 
 export class ReminderService {
   readonly #store: ReminderStore
@@ -536,6 +561,7 @@ export class ReminderService {
   #timer?: NodeJS.Timeout
   #ticking = false
   #activeTick?: Promise<void>
+  readonly #sendTimeoutMs: number
 
   constructor(
     path: string,
@@ -543,7 +569,9 @@ export class ReminderService {
     log: Logger,
     timeZone = DEFAULT_TIMEZONE,
     access?: (userId: number) => boolean,
+    options: ReminderServiceOptions = {},
   ) {
+    this.#sendTimeoutMs = options.sendTimeoutMs ?? SEND_TIMEOUT_MS
     this.#store = new ReminderStore(path, log)
     this.#send = send
     this.#log = log
@@ -693,6 +721,17 @@ export class ReminderService {
             )
             continue
           }
+          if (err instanceof ReminderSendTimeout) {
+            // The request was cancelled, but it may already have reached Telegram: a late send
+            // used to land and then be retried, so the user got the same reminder twice or
+            // more. For a one-shot, one possibly-missed reminder beats a stream of duplicates.
+            this.#store.settle(reminder.id)
+            this.#log.warn(
+              `reminder #${reminder.id} timed out after ${Math.round(this.#sendTimeoutMs / 1000)}s; ` +
+                "it may have been delivered, so it is not retried",
+            )
+            continue
+          }
           if (attempts >= MAX_ATTEMPTS) {
             this.#store.settle(reminder.id)
             this.#log.error(
@@ -713,12 +752,21 @@ export class ReminderService {
   }
 
   async #sendWithTimeout(chatId: number, text: string, reminder?: Reminder): Promise<void> {
+    // Racing a timer alone only stopped waiting: the send itself kept going and could still
+    // deliver after the timeout had already been booked as a failure. Abort it for real.
+    const controller = new AbortController()
     let timer: NodeJS.Timeout | undefined
+    const sending = this.#send(chatId, text, reminder, controller.signal)
+    // The losing branch of the race must not surface as an unhandled rejection
+    sending.catch(() => {})
     try {
       await Promise.race([
-        this.#send(chatId, text, reminder),
+        sending,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("Telegram 发送超时")), SEND_TIMEOUT_MS)
+          timer = setTimeout(() => {
+            controller.abort()
+            reject(new ReminderSendTimeout())
+          }, this.#sendTimeoutMs)
         }),
       ])
     } finally {

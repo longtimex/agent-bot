@@ -1,11 +1,9 @@
-import { randomBytes } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
 import { decryptPayload, encryptPayload } from "./apiCrypto.js"
 import { withFileLock } from "./fileLock.js"
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { asRecord } from "./util.js"
 import type { Logger } from "./logger.js"
+import { loadOrCreateSecretKey } from "./secretKey.js"
 
 /**
  * Model ids an operator adds by hand for a CLI engine.
@@ -65,21 +63,8 @@ export class AgentCustomModelStore {
 
   /** Same file and format the account vault uses: one data directory, one local secret. */
   #keyBuffer(): Buffer {
-    if (existsSync(this.#keyPath)) {
-      const raw = readFileSync(this.#keyPath, "utf8").trim()
-      if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
-      throw new Error(`账号密钥 ${this.#keyPath} 格式无效，请从备份恢复该文件。`)
-    }
-    return withFileLock(this.#keyPath, () => {
-      if (existsSync(this.#keyPath)) {
-        const raw = readFileSync(this.#keyPath, "utf8").trim()
-        if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, "hex")
-      }
-      mkdirSync(dirname(this.#keyPath), { recursive: true })
-      const key = randomBytes(32)
-      writeFileSync(this.#keyPath, `${key.toString("hex")}\n`, { mode: 0o600 })
-      this.#log.info(`model key created at ${this.#keyPath}`)
-      return key
+    return loadOrCreateSecretKey(this.#keyPath, {
+      onCreate: (path) => this.#log.info(`model key created at ${path}`),
     })
   }
 
@@ -100,24 +85,40 @@ export class AgentCustomModelStore {
     if (baseURL) entry.baseURL = baseURL
     // Only the URL without a key is meaningless, so a key is stored next to it, encrypted
     if (baseURL && model.apiKey) entry.secret = encryptPayload(this.#keyBuffer(), model.apiKey)
-    const data = this.#load()
-    const current = data[engine] ?? []
-    // Re-adding the same value updates its label instead of creating a duplicate entry
-    const next = [...current.filter((entry) => entry.value !== value), entry].slice(-MAX_PER_ENGINE)
-    data[engine] = next
-    this.#save(data)
-    return next
+    return this.#mutate((data) => {
+      const current = data[engine] ?? []
+      // Re-adding the same value updates its label instead of creating a duplicate entry
+      const next = [...current.filter((item) => item.value !== value), entry].slice(-MAX_PER_ENGINE)
+      data[engine] = next
+      return { result: next, changed: true }
+    })
   }
 
   remove(engine: string, value: string): boolean {
-    const data = this.#load()
-    const current = data[engine] ?? []
-    const next = current.filter((entry) => entry.value !== value)
-    if (next.length === current.length) return false
-    if (next.length > 0) data[engine] = next
-    else delete data[engine]
-    this.#save(data)
-    return true
+    return this.#mutate((data) => {
+      const current = data[engine] ?? []
+      const next = current.filter((entry) => entry.value !== value)
+      if (next.length === current.length) return { result: false, changed: false }
+      if (next.length > 0) data[engine] = next
+      else delete data[engine]
+      return { result: true, changed: true }
+    })
+  }
+
+  /**
+   * One read-modify-write under the cross-process lock. The bot and the App each hold their
+   * own store over this file, and an unlocked load-then-save let the later writer erase a model
+   * the other had just added. Reading inside the lock makes each edit apply to the latest file.
+   */
+  #mutate<T>(
+    fn: (data: Record<string, CustomAgentModel[]>) => { result: T; changed: boolean },
+  ): T {
+    return withFileLock(this.#path, () => {
+      const data = this.#load()
+      const { result, changed } = fn(data)
+      if (changed) this.#save(data)
+      return result
+    })
   }
 
   #load(): Record<string, CustomAgentModel[]> {
@@ -149,6 +150,8 @@ export class AgentCustomModelStore {
     writePrivateAtomic(
       this.#path,
       `${JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), engines: data }, null, 2)}\n`,
+      // Per-process temp name: two writers must never share (and clobber) one staging file
+      `${this.#path}.${process.pid}.tmp`,
     )
   }
 }

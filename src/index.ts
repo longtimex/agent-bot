@@ -4,6 +4,7 @@ import { ApiServer, resolveApiToken, resolveEncKey } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
 import { CcSwitchService, redactSecrets } from "./ccswitch.js"
+import { configureFileClock } from "./clock.js"
 import { MagpieService } from "./magpie.js"
 import { ConfigError, hasControlClientEvidence, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
 import { migrateDataDirectory } from "./dataMigration.js"
@@ -84,6 +85,8 @@ async function main(): Promise<void> {
   installCrashGuards()
   const cfg = await loadConfigOrSetup()
   botToken = cfg.telegram.token
+  // Until the bridge exists the configured zone is the live one; it takes over below
+  configureFileClock(() => cfg.reminderTimezone)
   const log = createLogger(cfg.logLevel)
   mkdirSync(cfg.dataDir, { recursive: true })
   // Reply artifacts and inbound files can carry private chats or configs. The startup
@@ -245,6 +248,8 @@ async function main(): Promise<void> {
     feishuConnection?.resolver,
     feishuConnection?.client,
   )
+  // /timezone and the App switcher change this live; file names follow without a restart
+  configureFileClock(() => tgBridge.currentTimezone)
 
   let apiServer: ApiServer | undefined
   let apiError: string | undefined

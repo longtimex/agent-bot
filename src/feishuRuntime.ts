@@ -145,6 +145,7 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
       void deps.bridge.announceStartup(connection.identities.ownerChatId(), "feishu")
     },
     onFatal: options.onFatal,
+    seenPath: resolve(deps.cfg.dataDir, "feishu-seen"),
   })
   const callbackConfig = cfg.callback
   const actionContext = new AsyncLocalStorage<{ handled: boolean }>()

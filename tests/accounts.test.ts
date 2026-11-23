@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -230,6 +230,89 @@ test("accounts snapshot answers list, categories and tags from a single read", (
     assert.equal(snapshot.entries.length, 2)
     assert.deepEqual(snapshot.categories.map((item) => item.name).sort(), ["开发", "社交"].sort())
     assert.deepEqual(snapshot.tags.map((item) => item.name).sort(), ["A", "B"])
+  } finally {
+    f.close()
+  }
+})
+
+test("two store instances editing at once keep both changes", () => {
+  const f = fixture()
+  try {
+    // The bot and `npm run account` each hold their own store over the same file
+    const bot = f.store()
+    const cli = f.store()
+    bot.add({ name: "GitHub", username: "me" })
+    cli.add({ name: "GitLab", username: "me" })
+    bot.update("GitHub", { notes: "工作" })
+    cli.remove("不存在")
+
+    const names = f.store().list().map((entry) => entry.name).sort()
+    assert.deepEqual(names, ["GitHub", "GitLab"], "a later save must not erase the other instance's entry")
+    assert.equal(f.store().find("GitHub")?.notes, "工作")
+  } finally {
+    f.close()
+  }
+})
+
+test("a stale instance cannot add a name another instance already took", () => {
+  const f = fixture()
+  try {
+    const a = f.store()
+    const b = f.store()
+    a.add({ name: "GitHub", username: "a" })
+    assert.throws(() => b.add({ name: "github", username: "b" }), /已存在/)
+  } finally {
+    f.close()
+  }
+})
+
+test("a key created by another process first is adopted, not overwritten", () => {
+  const f = fixture()
+  try {
+    const keyPath = join(f.dir, "accounts.key")
+    const first = f.store()
+    // Builds the key and encrypts with it, like the process that won the race
+    first.add({ name: "GitHub", username: "me", password: "s3cret" })
+    const winner = readFileSync(keyPath, "utf8")
+
+    // A second instance that had not loaded a key yet must reuse the file on disk
+    const second = f.store()
+    second.add({ name: "GitLab", username: "me", password: "other" })
+    assert.equal(readFileSync(keyPath, "utf8"), winner, "the existing key must never be replaced")
+    assert.equal(f.store().reveal("GitHub")?.password, "s3cret")
+    assert.equal(f.store().reveal("GitLab")?.password, "other")
+  } finally {
+    f.close()
+  }
+})
+
+test("the store is rewritten as 0600 even if the file was made world-readable", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "GitHub", username: "me" })
+    const path = join(f.dir, "accounts.json")
+    chmodSync(path, 0o644)
+    store.add({ name: "GitLab", username: "me" })
+    assertFileMode(path, 0o600)
+  } finally {
+    f.close()
+  }
+})
+
+test("one damaged ciphertext does not break the shared-password report", () => {
+  const f = fixture()
+  try {
+    const store = f.store()
+    store.add({ name: "A", username: "x", password: "same" })
+    store.add({ name: "B", username: "x", password: "same" })
+    store.add({ name: "C", username: "x", password: "solo" })
+    const path = join(f.dir, "accounts.json")
+    const data = JSON.parse(readFileSync(path, "utf8")) as { accounts: Array<{ name: string; secret?: string }> }
+    const c = data.accounts.find((entry) => entry.name === "C")!
+    c.secret = Buffer.alloc(40, 1).toString("base64")
+    writeFileSync(path, JSON.stringify(data))
+    assert.deepEqual(f.store().sharedPasswords(), [{ names: ["A", "B"] }])
   } finally {
     f.close()
   }

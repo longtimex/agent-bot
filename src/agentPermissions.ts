@@ -10,7 +10,25 @@ const PERMISSION_BYPASS_SEGMENTS: string[][] = [
   ["--dangerously-bypass-approvals-and-sandbox"],
   ["--dangerously-allow-all"],
   ["--approval-mode", "yolo"],
+  // GitHub Copilot CLI: every tool and every path without a prompt
+  ["--allow-all-tools"],
+  ["--allow-all-paths"],
 ]
+
+/**
+ * Flags that only mean "run without asking" for one CLI. `--force` is Cursor Agent's switch for
+ * executing commands unattended, but the same word is an ordinary option elsewhere, so it is
+ * matched only on the engine that defines it. Missing these let safe mode leave Cursor and Copilot
+ * fully unattended while the agents panel showed no warning for them.
+ */
+const ENGINE_BYPASS_SEGMENTS: Record<string, string[][]> = {
+  cursor: [["--force"]],
+}
+
+function segmentsFor(engine?: string): string[][] {
+  const scoped = engine && Object.hasOwn(ENGINE_BYPASS_SEGMENTS, engine) ? ENGINE_BYPASS_SEGMENTS[engine]! : []
+  return [...PERMISSION_BYPASS_SEGMENTS, ...scoped]
+}
 
 function segmentAt(argv: string[], segment: string[], from: number): number {
   for (let i = from; i + segment.length <= argv.length; i += 1) {
@@ -19,9 +37,9 @@ function segmentAt(argv: string[], segment: string[], from: number): number {
   return -1
 }
 
-export function stripPermissionBypass(argv: string[]): string[] {
+export function stripPermissionBypass(argv: string[], engine?: string): string[] {
   let out = argv
-  for (const segment of PERMISSION_BYPASS_SEGMENTS) {
+  for (const segment of segmentsFor(engine)) {
     for (let at = segmentAt(out, segment, 0); at >= 0; at = segmentAt(out, segment, at)) {
       out = [...out.slice(0, at), ...out.slice(at + segment.length)]
     }
@@ -31,8 +49,13 @@ export function stripPermissionBypass(argv: string[]): string[] {
 
 /** Whether this profile would run tools without asking. Used by the agents panel to warn. */
 export function bypassesPermissionChecks(profile: AgentCliProfile): boolean {
-  const argv = [...(profile.args.base ?? []), ...(profile.args.resumeBase ?? [])]
-  return PERMISSION_BYPASS_SEGMENTS.some((segment) => segmentAt(argv, segment, 0) >= 0)
+  // Every template, not only base/resumeBase: Qoder puts its bypass in newSession and
+  // resumeSession, so reading two fields hid the warning for an engine that never asks
+  const args = profile.args
+  const templates = [args.base, args.resumeBase, args.newSession, args.resumeSession, args.cwd, args.model, args.prompt]
+  return templates.some(
+    (argv) => argv !== undefined && segmentsFor(profile.id).some((segment) => segmentAt(argv, segment, 0) >= 0),
+  )
 }
 
 /** Whether this deployment asked for a review-first posture (`AGENT_CLI_SAFE_MODE=1`). */

@@ -515,7 +515,8 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/model <模型ID>` | 为当前 Agent CLI 指定模型（如 `/model sonnet`；OpenCode 仍走 `/model` 面板） |
 | `/dir` | 查看本会话 CLI 引擎的工作目录（默认是 Bot 自身所在目录），面板上有「恢复默认目录」按钮 |
 | `/dir <路径>` | 让本会话的 CLI 引擎在另一个项目里执行，支持 `~`、相对路径与引号；目录必须存在，切换会重置该会话的 CLI 上下文。OpenCode 的目录由其服务端决定，不受此设置影响 |
-| `/new`、`/reset` | 重置当前会话上下文 |
+| `/new`、`/reset` | 开启新会话；原会话存入历史，可切回 |
+| `/sessions` | 历史会话：列出最近 20 个会话，一键切回接着聊（与安卓 App「历史会话」共用） |
 | `/stop` | 停止当前任务（同时丢弃排队中的提示） |
 | `/retry` | 重新发送上一条任务（失败提示上也有「重试」按钮，只重发它自己那一条） |
 | `/queue` | 查看排队消息，可逐条取消或一键清空；当前任务不受影响 |
@@ -654,6 +655,8 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | `copilot` | GitHub Copilot CLI | `copilot` | 单次 | 无列表命令，模型 ID 透传 |
 | `antigravity` | Antigravity CLI | `agy` | 单次 | 无列表命令，模型 ID 透传 |
 | `kiro` | Kiro CLI | `kiro-cli` | 单次 | 不支持切换（实验性） |
+| `dsh` | DeepSeek Harness | `dsh` | 单次 | 不支持切换 |
+| `pi` | Pi | `pi` | 单次 | `pi --list-models` |
 <!-- END AGENT TABLE -->
 
 内置档案只保存非交互的探测命令，不保存模型清单或默认模型。`/model`、模型面板、定时任务与 Android 的单条指定都会先读取同一次实时探测结果；`/model <模型ID>` 可用列表中的 ID、显示名或 `data/agents.json` 里的别名。CLI 未安装、当前账号无额度或探测失败时，面板会显示具体原因，并仍允许直接输入安全的模型 ID 交给 CLI 判断。
@@ -677,6 +680,8 @@ App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互�
 | `codex` | `npm install -g @openai/codex` |
 | `gemini` | `npm install -g @google/gemini-cli` |
 | `copilot` | `npm install -g @github/copilot` |
+| `dsh` | `npm install -g @deepseek-ai/dsh` |
+| `pi` | `npm install -g @earendil-works/pi-coding-agent` |
 <!-- END AGENT INSTALL TABLE -->
 
 - Qoder、Antigravity、Cursor、Kiro 使用官方安装器或需要登录，`/agents` 只显示手动安装方式，不会执行远程脚本。

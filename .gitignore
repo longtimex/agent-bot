@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .env
+# Cross-process lock and staging files the bot and `npm run setup` leave beside .env
+.env.lock
+.env.*.tmp
 # Runtime state only. An unanchored `data/` also swallowed the Android
 # source package com.agentbot.app.data, which must stay in the repo.
 /data/

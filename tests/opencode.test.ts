@@ -136,6 +136,28 @@ test("prompt omits a file above OpenCode's own attachment limit but keeps the re
   assert.deepEqual(received?.parts, [{ type: "text", text: "hi" }])
 })
 
+test("prompt keeps separate text parts as separate paragraphs", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(
+        JSON.stringify({
+          parts: [
+            { type: "text", text: "我先读一下配置。\n" },
+            { type: "tool", tool: "read" },
+            { type: "text", text: "   " },
+            { type: "text", text: "结论是：端口写错了。" },
+          ],
+        }),
+      )
+    },
+    async (oc) => {
+      // A tool call between two messages used to glue them into one line; a blank part adds nothing
+      assert.equal(await oc.prompt("ses_test", "hi"), "我先读一下配置。\n\n结论是：端口写错了。")
+    },
+  )
+})
+
 test("prompt tolerates an empty 200 response", async () => {
   await withServer(
     (_req, res) => {

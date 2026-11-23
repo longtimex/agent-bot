@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { readFileSync } from "node:fs"
+import { writePrivateAtomic } from "./jsonStore.js"
 import { isReservedAliasName } from "./help.js"
 import type { Logger } from "./logger.js"
 
@@ -144,14 +144,12 @@ export class AliasStore {
       return
     }
     try {
-      mkdirSync(dirname(this.#path), { recursive: true })
       const payload: AliasFile = { aliases: {} }
       for (const [chatKey, aliases] of this.#data) {
         payload.aliases[chatKey] = Object.fromEntries(aliases)
       }
-      const tmp = `${this.#path}.tmp`
-      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
-      renameSync(tmp, this.#path)
+      // fsynced, 0600 and a per-process temp name, like every other store
+      writePrivateAtomic(this.#path, `${JSON.stringify(payload, null, 2)}\n`, `${this.#path}.${process.pid}.tmp`)
     } catch (err) {
       this.#log.warn(`failed to write alias store ${this.#path}:`, (err as Error).message)
     }

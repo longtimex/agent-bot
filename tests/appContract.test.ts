@@ -537,7 +537,7 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "runSchedule → POST /schedules/:id/run", method: "POST", path: `/schedules/${scheduleId}/run`, model: "Schedule", at: "schedule" },
         { name: "deleteSchedule → DELETE /schedules/:id", method: "DELETE", path: `/schedules/${scheduleId}` },
         { name: "clearHistory → DELETE /history", method: "DELETE", path: "/history" },
-        { name: "newSession → POST /new", method: "POST", path: "/new" },
+        { name: "newSession → POST /new", method: "POST", path: "/new", body: { title: "契约探针会话" } },
         { name: "followPeer → POST /peers/follow", method: "POST", path: "/peers/follow", body: { scope: "telegram" } },
         { name: "ccUse → POST /cc/use", method: "POST", path: "/cc/use", body: { id: "p1" }, model: "CcActionResult" },
         { name: "ccTest → POST /cc/test", method: "POST", path: "/cc/test", body: { id: "p1" }, model: "CcTestResult" },
@@ -590,6 +590,36 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "ccRun → POST /cc/run", method: "POST", path: "/cc/run", body: { args: ["--version"], confirm: true }, model: "CcRunResult" },
       ]
       for (const probe of mutations) await call(probe)
+
+      // 历史会话: a parked session must list, resume and delete in the shapes the App decodes.
+      // The CLI stub answers instantly, so seed a resumable CLI session before parking it.
+      h.store.setEngine("api:app", "claude")
+      h.store.setCliSession("api:app", "claude", "probe-cli-session")
+      await call({ name: "newSession(park) → POST /new", method: "POST", path: "/new", body: { title: "可切回的会话" } })
+      const parked = await call({
+        name: "archivedSessions → GET /sessions",
+        method: "GET",
+        path: "/sessions",
+        model: "ArchivedSession",
+        at: "sessions[]",
+      })
+      const parkedId = ((parked?.sessions ?? []) as Array<Record<string, unknown>>)[0]?.id
+      if (typeof parkedId !== "string") problems.push("archivedSessions → GET /sessions: nothing was parked by /new")
+      else {
+        await call({
+          name: "resumeSession → POST /sessions/:id/resume",
+          method: "POST",
+          path: `/sessions/${parkedId}/resume`,
+          model: "SessionResume",
+        })
+        h.store.setCliSession("api:app", "claude", "probe-cli-session-2")
+        await call({ name: "newSession(park again) → POST /new", method: "POST", path: "/new" })
+        const again = await call({ name: "archivedSessions(again) → GET /sessions", method: "GET", path: "/sessions" })
+        const dropId = ((again?.sessions ?? []) as Array<Record<string, unknown>>)[0]?.id
+        if (typeof dropId === "string") {
+          await call({ name: "deleteArchivedSession → DELETE /sessions/:id", method: "DELETE", path: `/sessions/${dropId}` })
+        }
+      }
 
       // The App decides to show its confirmation dialog by matching the server's wording, so
       // that handshake is checked here rather than trusted from a comment.

@@ -32,6 +32,11 @@ import { UpdateOrchestrator } from "./updateOrchestrator.js"
 import { readStartupSelfCheck, type StartupSelfCheck } from "./startupSelfCheck.js"
 import { buildReleaseOverview, type ReleaseOverview } from "./releaseStatus.js"
 import { summarizeStepOutput } from "./failureDigest.js"
+import { fileStamp } from "./clock.js"
+import { withFileLock } from "./fileLock.js"
+
+/** The data directory's local secret; see secretKey.ts. Backed up, unlike the pairing secrets. */
+const ACCOUNT_KEY_FILE = "accounts.key"
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
 const MAX_OUTPUT_CHARS = 4 * 1024 * 1024
@@ -509,19 +514,20 @@ export class OpsService {
           (name) => name.endsWith(".json") && name !== "api-token.json" && name !== "api-enc-key.json",
         )
       : []
+    // The account key is not like the pairing secrets above: nothing regenerates it. The vault,
+    // the relay credentials and the per-model endpoint keys are ciphertext under it, so a backup
+    // without it restored every password as unreadable bytes, silently. It goes in the archive,
+    // and the reply says plainly that the archive now has to be guarded like a password.
+    const withKey = files.length > 0 && existsSync(join(this.#dataDir, ACCOUNT_KEY_FILE))
+    if (withKey) files.push(ACCOUNT_KEY_FILE)
     if (files.length === 0) {
       return { ok: false, message: "data 目录里还没有可备份的状态文件。", steps }
     }
     const backupDir = join(this.#dataDir, "backups")
     mkdirSync(backupDir, { recursive: true, mode: 0o700 })
     chmodSync(backupDir, 0o700)
-    const now = new Date()
-    const pad = (value: number, width = 2): string => String(value).padStart(width, "0")
     // Milliseconds in the name: two backups in the same second must not overwrite each other
-    const out = join(
-      backupDir,
-      `backup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}${pad(now.getMilliseconds(), 3)}.tar.gz`,
-    )
+    const out = join(backupDir, `backup-${fileStamp(Date.now(), { millis: true })}.tar.gz`)
     const tar = await this.#runCommand("tar", ["-czf", out, "-C", this.#dataDir, ...files], 60_000)
     steps.push(this.#step("打包状态文件", tar))
     if (tar.code !== 0) {
@@ -541,7 +547,11 @@ export class OpsService {
     return {
       ok: true,
       file: out,
-      message: `📦 已备份 ${files.length} 个状态文件（${kb} KB）。配对令牌未包含：新机器首次启动会自动重新生成。账号库密钥 \`data/accounts.key\` 同样不在包内，恢复后需单独复制，否则已存密码无法解密。`,
+      message:
+        `📦 已备份 ${files.length} 个状态文件（${kb} KB）。配对令牌未包含：新机器首次启动会自动重新生成。` +
+        (withKey
+          ? "\n⚠️ 备份内含账号库密钥 `accounts.key`，可解密已存密码与中转站密钥：请像保管密码一样保管这个备份，不要转发或上传到公开位置。"
+          : ""),
       steps,
     }
   }
@@ -885,15 +895,20 @@ export class OpsService {
         message: `${key} 同时含有单引号与双引号/反斜杠，无法安全写入 .env；请改用其他路径或值。`,
       }
     }
-    const content = existsSync(this.#envPath) ? readFileSync(this.#envPath, "utf8") : ""
-    const rows = content ? content.split(/\r?\n/) : []
     const line = `${key}=${quoted}`
-    const index = rows.findIndex((row) => lineMatchesKey(row, key))
-    const filtered = rows.filter((row) => !lineMatchesKey(row, key))
-    if (index >= 0) filtered.splice(Math.min(index, filtered.length), 0, line)
-    else filtered.push(line)
-    while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
-    this.#writeEnv(`${filtered.join("\n")}\n`)
+    // `npm run setup` is a separate process that rewrites the same file. Reading outside a lock
+    // let whichever saved second revert the other's change, so the whole read-modify-write runs
+    // under the lock setup.ts takes too.
+    withFileLock(this.#envPath, () => {
+      const content = existsSync(this.#envPath) ? readFileSync(this.#envPath, "utf8") : ""
+      const rows = content ? content.split(/\r?\n/) : []
+      const index = rows.findIndex((row) => lineMatchesKey(row, key))
+      const filtered = rows.filter((row) => !lineMatchesKey(row, key))
+      if (index >= 0) filtered.splice(Math.min(index, filtered.length), 0, line)
+      else filtered.push(line)
+      while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
+      this.#writeEnv(`${filtered.join("\n")}\n`)
+    })
     this.#log?.info(`updated .env key ${key}`)
     return {
       ok: true,
@@ -912,14 +927,16 @@ export class OpsService {
       return { ok: false, message: `${key} 请使用 /access del <ID> 逐项删除：清空白名单会让所有人都无法使用 Bot。` }
     }
     if (!existsSync(this.#envPath)) return { ok: false, message: "未找到 .env 文件。" }
-    const content = readFileSync(this.#envPath, "utf8")
-    const rows = content.split(/\r?\n/)
-    if (!rows.some((row) => lineMatchesKey(row, key))) {
-      return { ok: false, message: `.env 中没有设置 ${key}。` }
-    }
-    const filtered = rows.filter((row) => !lineMatchesKey(row, key))
-    while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
-    this.#writeEnv(`${filtered.join("\n")}\n`)
+    const removed = withFileLock(this.#envPath, () => {
+      const content = existsSync(this.#envPath) ? readFileSync(this.#envPath, "utf8") : ""
+      const rows = content.split(/\r?\n/)
+      if (!rows.some((row) => lineMatchesKey(row, key))) return false
+      const filtered = rows.filter((row) => !lineMatchesKey(row, key))
+      while (filtered.length > 0 && filtered[filtered.length - 1] === "") filtered.pop()
+      this.#writeEnv(`${filtered.join("\n")}\n`)
+      return true
+    })
+    if (!removed) return { ok: false, message: `.env 中没有设置 ${key}。` }
     this.#log?.info(`removed .env key ${key}`)
     return { ok: true, message: `已删除 ${key}，将使用默认值。重启 Bot 后生效。` }
   }

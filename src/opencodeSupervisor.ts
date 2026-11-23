@@ -51,7 +51,8 @@ export class OpencodeSupervisor {
   #active = 0
   #lastUsed: number
   #starting?: Promise<boolean>
-  #stopping = false
+  /** In-flight idle stop; ensureRunning waits for it instead of racing it. */
+  #stopping?: Promise<void>
   /** True only for a server this process started (or a previous run left behind). */
   #managed: boolean
   #timer: NodeJS.Timeout
@@ -94,6 +95,9 @@ export class OpencodeSupervisor {
    */
   async ensureRunning(): Promise<boolean> {
     if (!this.#onDemand) return true
+    // An idle stop may be mid-flight: a health check now would still see the dying server
+    // and report it usable. Let the stop finish, then decide on a fresh health check.
+    if (this.#stopping) await this.#stopping
     if (await this.#healthy()) {
       this.#lastUsed = this.#now()
       return true
@@ -140,22 +144,34 @@ export class OpencodeSupervisor {
   }
 
   async #stopIfIdle(): Promise<void> {
-    if (this.#stopping) return
-    this.#stopping = true
+    if (this.#stopping) return this.#stopping
+    const run = this.#runStop().finally(() => {
+      if (this.#stopping === run) this.#stopping = undefined
+    })
+    this.#stopping = run
+    return run
+  }
+
+  #idle(): boolean {
+    return this.#active === 0 && this.#managed && this.#now() - this.#lastUsed >= this.#idleStopMs
+  }
+
+  async #runStop(): Promise<void> {
     try {
       // Re-check: a task may have arrived between the tick and this call
-      if (this.#active > 0 || !this.#managed) return
+      if (!this.#idle()) return
       if (!(await this.#healthy())) {
         this.#managed = false
         return
       }
+      // The health check above is an await: a task that started during it saw a healthy
+      // server and is about to use it, so stopping now would cut it off. Check once more.
+      if (!this.#idle()) return
       const message = await this.#stopFn()
       this.#managed = false
       this.#log.info(`OpenCode 空闲回收：${message}`)
     } catch (err) {
       this.#log.warn(`OpenCode 空闲回收失败：${(err as Error).message}`)
-    } finally {
-      this.#stopping = false
     }
   }
 }

@@ -68,6 +68,29 @@ data class Session(
 }
 
 /**
+ * One parked conversation from 历史会话. The id names the archive entry only: the engine's own
+ * session id never leaves the server.
+ */
+@Serializable
+data class ArchivedSession(
+    val id: String,
+    val engine: String,
+    val engineLabel: String? = null,
+    val title: String? = null,
+    val model: String? = null,
+    val archivedAt: Long = 0,
+)
+
+/** `POST /sessions/:id/resume`: the restored session, plus the entry the old one became. */
+@Serializable
+data class SessionResume(
+    val ok: Boolean = false,
+    val message: String? = null,
+    val session: Session = Session(),
+    val archived: ArchivedSession? = null,
+)
+
+/**
  * `POST /agent` answers with the new session plus the note Telegram shows: pointing at the
  * engine already in use, or at a CLI whose binary is missing, both say so here.
  */
@@ -120,6 +143,8 @@ data class AgentInfo(
     /** "session" / "preassign" / "capture" / "stateless": whether context carries over. */
     val sessionMode: String? = null,
     val supportsModel: Boolean? = null,
+    /** For engines that pick the model in a config file: the one it names, read-only. */
+    val configuredModel: String? = null,
     /** True when this engine reads its endpoint from an env var, so a relay can be set here. */
     val relaySupported: Boolean = false,
     /** Where the binary was found; null when it is not installed. */

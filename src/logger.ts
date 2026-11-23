@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, readdirSync, statSync, truncateSync, unlinkSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { redactSecrets } from "./ccswitch.js"
+import { fileStamp } from "./clock.js"
 
 export type LogLevel = "debug" | "info" | "warn" | "error"
 
@@ -12,12 +13,7 @@ export function rotateLogIfNeeded(path: string, maxBytes = LOG_ROTATE_BYTES, now
     if (!existsSync(path)) return undefined
     if (statSync(path).size < maxBytes) return undefined
 
-    const date = new Date(now)
-    const pad = (value: number, length = 2): string => String(value).padStart(length, "0")
-    const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(
-      date.getMinutes(),
-    )}${pad(date.getSeconds())}`
-    const rotated = `${path}.${stamp}`
+    const rotated = `${path}.${fileStamp(now)}`
     copyFileSync(path, rotated)
     truncateSync(path, 0)
     return rotated

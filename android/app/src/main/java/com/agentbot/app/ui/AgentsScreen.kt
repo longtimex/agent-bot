@@ -215,7 +215,14 @@ fun AgentsScreen(vm: AppViewModel) {
                         // The two things Telegram explains after a switch: context and models
                         val capability = listOfNotNull(
                             agent.sessionMode?.let { if (agent.stateless) "每次全新会话" else "保留上下文" },
-                            agent.supportsModel?.let { if (it) "可切换模型" else "模型由 CLI 配置" },
+                            agent.supportsModel?.let { supported ->
+                                if (supported) {
+                                    "可切换模型"
+                                } else {
+                                    // The engine names its model in a config file; show which one
+                                    agent.configuredModel?.let { "模型：$it（CLI 配置）" } ?: "模型由 CLI 配置"
+                                }
+                            },
                         ).joinToString(" · ")
                         if (capability.isNotBlank()) {
                             Text(

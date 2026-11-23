@@ -27,6 +27,7 @@ import com.agentbot.app.data.AccessResult
 import com.agentbot.app.data.AliasEntry
 import com.agentbot.app.data.AgentInfo
 import com.agentbot.app.data.AndroidReleaseInfo
+import com.agentbot.app.data.ArchivedSession
 import com.agentbot.app.data.ApiClient
 import com.agentbot.app.data.ApiException
 import com.agentbot.app.data.AttachmentLimits
@@ -128,6 +129,7 @@ sealed interface Screen {
     data object Reminders : Screen
     data object Schedules : Screen
     data object Session : Screen
+    data object Sessions : Screen
     data object Queue : Screen
     data object Agents : Screen
     data object Ops : Screen
@@ -494,6 +496,20 @@ class AppViewModel(
     var sessionDraftRejected by mutableStateOf(false)
 
     var sessionBusy by mutableStateOf(false)
+        private set
+
+    /** 历史会话: sessions 新建会话 parked on the server, newest first. */
+    var archivedSessions by mutableStateOf<List<ArchivedSession>>(emptyList())
+        private set
+
+    var archivedLoading by mutableStateOf(false)
+        private set
+
+    var archivedError by mutableStateOf<String?>(null)
+        private set
+
+    /** The entry a resume or delete is waiting on, so its row can show progress and ignore taps. */
+    var archivedBusyId by mutableStateOf<String?>(null)
         private set
 
     /** Where the working-directory picker is standing; null while it is closed. */
@@ -989,6 +1005,7 @@ class AppViewModel(
             Screen.Session -> {
                 refreshSessionSettings()
             }
+            Screen.Sessions -> refreshArchivedSessions()
             Screen.Queue -> refreshQueue()
             Screen.Agents -> refreshAgents()
             Screen.Ops -> {
@@ -1144,6 +1161,7 @@ class AppViewModel(
             Screen.Agents -> refreshAgents()
             Screen.Models -> refreshCustomModels()
             Screen.Session -> refreshSessionSettings()
+            Screen.Sessions -> refreshArchivedSessions()
             Screen.Status -> refreshStatus()
             Screen.Proxy -> refreshProxiesQuietly()
             Screen.Aliases -> refreshAliasesQuietly()
@@ -3747,7 +3765,13 @@ class AppViewModel(
             return
         }
         guarded("新会话") {
-            api.newSession(conn())
+            val transcript = messages
+            val archivedId = api.newSession(conn(), sessionTitle(transcript))
+            // The server parked the old session under this id; the bubbles go with it, so 历史会话
+            // can bring both back together
+            if (archivedId != null) {
+                withContext(Dispatchers.IO) { LocalStore.archiveTranscript(appContext, archivedId, transcript) }
+            }
             session = api.session(conn())
             // Only clear the local transcript after the server accepted the reset. Clearing first
             // left the user staring at an empty chat when the request failed, while the server still
@@ -3760,7 +3784,92 @@ class AppViewModel(
             // through them too: calling clearMessages here could be overtaken by an in-flight
             // snapshot and bring the old bubbles back on the next launch.
             persistMessages()
-            toast = "已开启新会话"
+            toast = if (archivedId != null) "已开启新会话，原会话可在「历史会话」切回" else "已开启新会话"
+        }
+    }
+
+    /** The first thing the user asked: what a list of past sessions is recognised by. */
+    private fun sessionTitle(transcript: List<ChatMessage>): String? =
+        transcript.firstOrNull { it.role == ChatMessage.Role.USER && it.text.isNotBlank() }
+            ?.text?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(60)
+
+    fun hasArchivedTranscript(id: String): Boolean = LocalStore.hasTranscript(appContext, id)
+
+    fun refreshArchivedSessions() {
+        if (archivedLoading) return
+        archivedLoading = true
+        archivedError = null
+        viewModelScope.launch {
+            try {
+                val loaded = api.archivedSessions(conn())
+                archivedSessions = loaded
+                // The server keeps 20; transcripts of the ones it evicted can never be resumed
+                withContext(Dispatchers.IO) { LocalStore.pruneTranscripts(appContext, loaded.map { it.id }.toSet()) }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                archivedError = if (err is NotConfiguredException) err.message else "无法加载历史会话：${err.message}"
+            } finally {
+                archivedLoading = false
+            }
+        }
+    }
+
+    /**
+     * Switches back to a parked session: the server restores its engine, model and context, and
+     * the current one is parked in its place, so nothing is lost either way.
+     */
+    fun resumeArchivedSession(id: String) {
+        if (hasLiveTask) {
+            archivedError = "任务执行中，请先停止当前任务再切换会话"
+            return
+        }
+        if (archivedBusyId != null) return
+        archivedBusyId = id
+        archivedError = null
+        viewModelScope.launch {
+            try {
+                val current = messages
+                val result = api.resumeSession(conn(), id)
+                val restored = withContext(Dispatchers.IO) {
+                    result.archived?.let { LocalStore.archiveTranscript(appContext, it.id, current) }
+                    LocalStore.takeTranscript(appContext, id)
+                }
+                session = result.session
+                messages = restored
+                mediaImages = emptyMap()
+                mediaErrors = emptySet()
+                mediaErrorDetails = emptyMap()
+                persistMessages()
+                toast = result.message ?: "已切回历史会话"
+                navigate(Screen.Chat)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                archivedError = if (err is NotConfiguredException) err.message else "切换会话失败：${err.message}"
+            } finally {
+                archivedBusyId = null
+            }
+        }
+    }
+
+    fun deleteArchivedSession(id: String) {
+        if (archivedBusyId != null) return
+        archivedBusyId = id
+        archivedError = null
+        viewModelScope.launch {
+            try {
+                api.deleteArchivedSession(conn(), id)
+                withContext(Dispatchers.IO) { LocalStore.dropTranscript(appContext, id) }
+                archivedSessions = archivedSessions.filter { it.id != id }
+                toast = "已删除历史会话"
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                archivedError = if (err is NotConfiguredException) err.message else "删除历史会话失败：${err.message}"
+            } finally {
+                archivedBusyId = null
+            }
         }
     }
 

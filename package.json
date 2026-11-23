@@ -18,6 +18,7 @@
     "clients": "tsx src/setup-cli.ts --clients-only",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "lint": "oxlint src tests scripts",
     "knip": "knip --include files,dependencies --no-config-hints",
     "check:android": "node scripts/check-android-sources.mjs",

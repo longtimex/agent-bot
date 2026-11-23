@@ -26,11 +26,7 @@ import { AgentCliService, whichSync } from "./agentCli.js"
 import { AgentCliInstaller } from "./agentInstaller.js"
 import { AgentModelCatalog } from "./agentModelCatalog.js"
 import { appVersion } from "./version.js"
-import {
-  findModel,
-  resolveModelKey,
-  type ModelInfo,
-} from "./models.js"
+import type { ModelInfo } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
 import { OpencodeHealth, resolveUsableEngine } from "./engineFallback.js"
 import { ChatTaskOutcomeRecorder, chatTaskOutcomeRecorder } from "./telegramTaskOutcome.js"
@@ -57,9 +53,12 @@ import { TelegramPersonalPanels } from "./telegramPersonalPanels.js"
 import { TelegramCorePanels } from "./telegramCorePanels.js"
 import { TelegramPersonalCommands } from "./telegramPersonalCommands.js"
 import { TelegramModelCommands } from "./telegramModelCommands.js"
-import { resolveCliModelCallback } from "./telegramCliModelCallback.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
 import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
+import { TelegramSessionCommands } from "./telegramSessionCommands.js"
+import { handlePanelCallback, type PanelCallbackDeps } from "./telegramPanelCallbacks.js"
+import { SessionArchiveStore } from "./sessionArchive.js"
+import { formatReminderTime } from "./reminders.js"
 import { TelegramProxyCommands } from "./telegramProxyCommands.js"
 import { FEISHU_OPEN_ID_RE } from "./config.js"
 import { TelegramAdminCommands } from "./telegramAdminCommands.js"
@@ -166,6 +165,7 @@ export class TelegramBridge {
   readonly #modelCommands: TelegramModelCommands
   readonly #opsCommands: TelegramOpsCommands
   readonly #agentCommands: TelegramAgentCommands
+  readonly #sessionCommands: TelegramSessionCommands
   readonly #proxyCommands: TelegramProxyCommands
   readonly #adminCommands: TelegramAdminCommands
   readonly #attachments: TelegramAttachments
@@ -173,10 +173,7 @@ export class TelegramBridge {
   readonly #infoCommands: TelegramInfoCommands
   readonly #channel?: ChannelIdResolver
   readonly #feishuResourceClient?: FeishuApiLike
-  readonly #reminderDelivery = new ReminderDelivery({
-    sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard, "reminder"),
-    snooze: (chatId, userId, text, minutes) => this.#reminders.snooze(chatId, userId, text, minutes),
-  })
+  readonly #reminderDelivery: ReminderDelivery
   #startedAt = Date.now()
   #running = false
   #reconnectTimer?: ReturnType<typeof setTimeout>
@@ -208,6 +205,13 @@ export class TelegramBridge {
   ) {
     this.#cfg = cfg
     this.#timezone = cfg.reminderTimezone
+    // Built here rather than as a field initializer: it needs cfg.dataDir for its token file
+    this.#reminderDelivery = new ReminderDelivery({
+      sendText: (chatId, text, keyboard, signal) => this.#sendTextMessage(chatId, text, keyboard, "reminder", signal),
+      snooze: (chatId, userId, text, minutes) => this.#reminders.snooze(chatId, userId, text, minutes),
+      path: resolve(cfg.dataDir, "reminder-snoozes.json"),
+      warn: (message) => log.warn(message),
+    })
     // Feishu-only deployments still need a Bot instance because every command
     // and panel is authored against the Bot API. The placeholder is never
     // polled: start() skips init/getUpdates when the token is absent and the
@@ -267,7 +271,7 @@ export class TelegramBridge {
     })
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
-      (chatId, text, reminder) => this.#deliverReminder(chatId, text, reminder),
+      (chatId, text, reminder, signal) => this.#deliverReminder(chatId, text, reminder, signal),
       log,
       this.#timezone,
       (userId) => this.#isAllowedUser(userId),
@@ -397,6 +401,15 @@ export class TelegramBridge {
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
       agentPanel: (key) => this.#corePanels.agentPanel(key),
       agentInstallerPanel: () => this.#corePanels.agentInstallerPanel(),
+    })
+    this.#sessionCommands = new TelegramSessionCommands({
+      store: this.#store,
+      archive: new SessionArchiveStore(resolve(cfg.dataDir, "session-archive.json"), log),
+      oc: this.#oc,
+      engineLabel: (engine) => this.#agents.registry.label(engine),
+      modelLabel: (engine, model) => this.#cliModelLabel(engine, model),
+      busy: (key) => this.#runningSince.has(key) || this.#pending.has(key),
+      formatTime: (at) => formatReminderTime(at, this.#timezone),
     })
     this.#proxyCommands = new TelegramProxyCommands({
       proxies: this.#proxies,
@@ -833,6 +846,10 @@ export class TelegramBridge {
         await this.#handleQueue(chatId, key)
         return
       }
+      if (command === "/sessions") {
+        await this.#sendPanel(chatId, this.#sessionCommands.panel(key))
+        return
+      }
       if (command === "/proxy") {
         // `add` runs a connectivity test that can take seconds: keep it off the
         // update loop so /stop stays responsive in every chat
@@ -1009,6 +1026,11 @@ export class TelegramBridge {
         return
       }
 
+      const message = ctx.callbackQuery?.message
+      const refresh = (panel: Panel): Promise<void> =>
+        message && "message_id" in message ? this.#editPanelRef(chatId, message.message_id, panel) : this.#sendPanel(chatId, panel)
+      if (await this.#sessionCommands.callback(data, key, answer, (text) => this.#sendTextMessage(chatId, text), refresh)) return
+
       const snoozeMatch = /^snooze:([0-9a-f]+):(\d+)$/.exec(data)
       if (snoozeMatch) {
         await this.#reminderDelivery.snooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
@@ -1044,56 +1066,6 @@ export class TelegramBridge {
       if (data.startsWith("ops:")) {
         await this.#handleOpsCallback(chatId, data.slice("ops:".length), answer)
         return
-      }
-
-      if (data.startsWith("proxy:")) {
-        const rest = data.slice("proxy:".length)
-        const [action, rawId] = rest.split(":", 2)
-        const id = Number(rawId)
-
-        if (action === "off") {
-          this.#proxies.disable()
-          await answer("已停用代理")
-          await this.#editPanel(ctx, this.#proxyPanel())
-          return
-        }
-
-        if (!Number.isInteger(id)) {
-          await answer("代理编号无效")
-          return
-        }
-
-        if (action === "use") {
-          try {
-            const proxy = this.#proxies.use(id)
-            await answer(`已启用代理 #${proxy.id}`)
-          } catch (err) {
-            await answer(err instanceof Error ? err.message : "启用失败")
-            return
-          }
-          await this.#editPanel(ctx, this.#proxyPanel())
-          return
-        }
-
-        if (action === "del") {
-          const removed = this.#proxies.remove(id)
-          await answer(removed ? `已删除代理 #${id}` : `代理 #${id} 不存在`)
-          await this.#editPanel(ctx, this.#proxyPanel())
-          return
-        }
-
-        if (action === "test") {
-          await answer("正在测试代理…")
-          // A test can take up to 10s: it must not hold the update loop
-          this.#offLoop(chatId, "代理测试", async () => {
-            const result = await this.#proxies.test(id)
-            const text = result.ok
-              ? `✅ 代理 #${id} 连接正常（${result.latencyMs ?? 0}ms）`
-              : `❌ 代理 #${id} 测试失败：${result.message}`
-            await this.#sendTextMessage(chatId, escapeMarkdown(text))
-          })
-          return
-        }
       }
 
       if (data === "task:stop") {
@@ -1292,103 +1264,7 @@ export class TelegramBridge {
 
       // Refresh is a global panel action and must be handled before the OpenCode-only
       // `model:` branch below (otherwise its exact callback is swallowed as a model id).
-      if (data === "model:refresh") {
-        if (this.#store.getEngine(key) === "opencode") {
-          await answer("OpenCode 模型由服务端配置")
-        } else {
-          await answer("正在重新探测模型…")
-        }
-        await this.#editPanel(ctx, await this.#modelPanel(key, true))
-        return
-      }
-
-      if (data.startsWith("model:")) {
-        if (this.#store.getEngine(key) !== "opencode") {
-          await answer("当前不是 OpenCode 引擎")
-          await this.#editPanel(ctx, await this.#modelPanel(key))
-          return
-        }
-        // Deleting the session while it is generating would fail the running task
-        if (this.#runningSince.has(key)) {
-          await answer("任务执行中，请先发送 /stop")
-          return
-        }
-        if (data === "model:reset") {
-          if (!(await this.#clearOpenCodeModelSelection(key))) {
-            await answer("本会话没有独立的模型选择")
-            return
-          }
-          await answer("已清除模型选择，之后由 OpenCode 自身配置决定")
-          await this.#editPanel(ctx, await this.#modelPanel(key))
-          return
-        }
-        const targetKey = resolveModelKey(data.slice("model:".length))
-        const target = findModel(targetKey)
-        if (!target) {
-          await answer("模型不存在")
-          return
-        }
-        const current = this.#modelCommands.getCurrentModel(key)
-        if (current?.providerID === target.providerID && current.modelID === target.modelID) {
-          await answer("已经是当前模型")
-          return
-        }
-        await answer(`已切换至 ${target.label}`)
-        await this.#applyOpenCodeModel(key, target)
-        await this.#editPanel(ctx, await this.#modelPanel(key))
-        return
-      }
-
-      if (data.startsWith("cmodelreset:")) {
-        const engine = data.slice("cmodelreset:".length)
-        const profile = this.#agents.registry.get(engine)
-        if (!profile || this.#store.getEngine(key) !== engine) {
-          await answer("引擎已切换，请重新打开模型面板")
-          await this.#editPanel(ctx, await this.#modelPanel(key))
-          return
-        }
-        if (this.#runningSince.has(key)) {
-          await answer("任务执行中，请先发送 /stop")
-          return
-        }
-        if (!this.#clearCliModelSelection(key, engine)) {
-          await answer("本会话没有独立的模型选择")
-          return
-        }
-        await answer("已清除模型选择，之后由 CLI 自身配置决定")
-        await this.#editPanel(ctx, await this.#modelPanel(key))
-        return
-      }
-
-      if (data.startsWith("cmodel:") || data.startsWith("qmodel:")) {
-        const { engine, model } = resolveCliModelCallback(data, {
-          registry: this.#agents.registry,
-          catalog: this.#agentModels,
-        })
-
-        if (this.#store.getEngine(key) !== engine) {
-          await answer("引擎已切换，请重新打开模型面板")
-          await this.#editPanel(ctx, await this.#modelPanel(key))
-          return
-        }
-        if (!model) {
-          await answer("模型不存在")
-          return
-        }
-        if (this.#runningSince.has(key)) {
-          await answer("任务执行中，请先发送 /stop")
-          return
-        }
-        const current = this.#store.getCliModel(key, engine)
-        if (current === model) {
-          await answer("已经是当前模型")
-          return
-        }
-        this.#applyCliModel(key, engine, model)
-        await answer(`已切换至 ${this.#agentModels.label(engine, model)}`)
-        await this.#editPanel(ctx, await this.#modelPanel(key))
-        return
-      }
+      if (await handlePanelCallback(this.#panelCallbackDeps(ctx), data, chatId, key, answer)) return
 
       if (data.startsWith("rcancel:")) {
         const id = Number(data.slice("rcancel:".length))
@@ -1664,20 +1540,9 @@ export class TelegramBridge {
     }
 
     if (isBotCommand(command, "new")) {
-      const engine = this.#store.getEngine(job.key)
-      if (engine === "opencode") {
-        const old = this.#store.get(job.key)
-        if (old) {
-          await this.#oc.deleteSession(old).catch(() => {})
-          this.#store.clearSession(job.key)
-        }
-      } else {
-        this.#store.clearCliSession(job.key, engine)
-      }
-      await this.#sendTextMessage(
-        job.chatId,
-        `✨ *已开启新会话* (当前 Agent: ${escapeMarkdown(this.#agents.registry.label(engine))})，对话上下文已清空。`,
-      )
+      // Parked rather than deleted, titled by the last prompt: /sessions can switch back to it
+      const title = this.#lastPrompts.get(job.key)?.text.split("\n", 1)[0]?.trim().slice(0, 60)
+      await this.#sendTextMessage(job.chatId, await this.#sessionCommands.newSession(job.key, title || undefined))
       return
     }
 
@@ -2038,16 +1903,20 @@ export class TelegramBridge {
     return this.#modelCommands.applyOpenCodeModel(key, target)
   }
 
-  async #clearOpenCodeModelSelection(key: string): Promise<boolean> {
-    return this.#modelCommands.clearOpenCodeModelSelection(key)
-  }
-
-  #clearCliModelSelection(key: string, engine: string): boolean {
-    return this.#modelCommands.clearCliModelSelection(key, engine)
-  }
-
-  #applyCliModel(key: string, engine: string, model: string): void {
-    this.#modelCommands.applyCliModel(key, engine, model)
+  #panelCallbackDeps(ctx: Context): PanelCallbackDeps {
+    return {
+      store: this.#store,
+      agents: this.#agents,
+      agentModels: this.#agentModels,
+      proxies: this.#proxies,
+      models: this.#modelCommands,
+      running: (key) => this.#runningSince.has(key),
+      modelPanel: (key, refresh) => this.#modelPanel(key, refresh),
+      proxyPanel: () => this.#proxyPanel(),
+      editPanel: (panel) => this.#editPanel(ctx, panel),
+      sendText: (chatId, text) => this.#sendTextMessage(chatId, text),
+      offLoop: (chatId, label, run) => this.#offLoop(chatId, label, run),
+    }
   }
 
   async #panelFor(which: string, chatId: number, key: string): Promise<Panel | undefined> {
@@ -2071,6 +1940,10 @@ export class TelegramBridge {
         return this.#schedulePanel(chatId, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
       }
       case "queue": return this.#queuePanel(key)
+      case "sessions": {
+        const rawPage = Number(argument)
+        return this.#sessionCommands.panel(key, Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1)
+      }
       case "proxy": return this.#proxyPanel()
       case "usage": return this.#usagePanel(key)
       case "history": {
@@ -2155,8 +2028,8 @@ export class TelegramBridge {
     return sessionKeyForChat(chatId, this.#channel)
   }
 
-  async #deliverReminder(chatId: number, text: string, reminder?: Reminder): Promise<void> {
-    return this.#reminderDelivery.deliver(chatId, text, reminder)
+  async #deliverReminder(chatId: number, text: string, reminder?: Reminder, signal?: AbortSignal): Promise<void> {
+    return this.#reminderDelivery.deliver(chatId, text, reminder, signal)
   }
 
   async #executeScheduled(task: ScheduledTask): Promise<UsageOutcome> {
@@ -2209,6 +2082,7 @@ export class TelegramBridge {
     text: string,
     keyboard?: InlineKeyboard,
     kind: AppNotice["kind"] = "system",
+    signal?: AbortSignal,
   ): Promise<boolean> {
     // No chat to push to (App-only deployment): keep the text for the next time the App opens
     if (chatId === APP_CHAT_ID) {
@@ -2218,11 +2092,20 @@ export class TelegramBridge {
     const markup = keyboard && keyboard.inline_keyboard.length > 0 ? keyboard : undefined
     const safe = this.#maskToken(text)
     try {
-      await this.#bot.api.sendMessage(chatId, safe, { parse_mode: "Markdown", reply_markup: markup })
+      await this.#bot.api.sendMessage(
+        chatId,
+        safe,
+        { parse_mode: "Markdown", reply_markup: markup },
+        // telegraf declares the abort-controller package's AbortSignal; the object is the same
+        signal as never,
+      )
       return true
     } catch {
+      // A cancelled send is not a Markdown problem: retrying it as plain text would be the
+      // very late duplicate the cancellation exists to prevent
+      if (signal?.aborted) return false
       try {
-        await this.#bot.api.sendMessage(chatId, safe, { reply_markup: markup })
+        await this.#bot.api.sendMessage(chatId, safe, { reply_markup: markup }, signal as never)
         return true
       } catch {
         return false

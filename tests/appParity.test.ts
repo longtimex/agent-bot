@@ -347,7 +347,7 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
   const drawer = readFileSync(`${UI_DIR}/AppDrawer.kt`, "utf8")
   const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
   const routes = [
-    "History", "Reminders", "Schedules", "Session", "Queue", "Agents", "Ops", "Proxy",
+    "History", "Sessions", "Reminders", "Schedules", "Session", "Queue", "Agents", "Ops", "Proxy",
     "Aliases", "Access", "Models", "Cc", "Magpie", "Hermes", "Config", "Status", "Help", "Settings",
   ]
   assert.deepEqual(

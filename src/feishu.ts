@@ -5,6 +5,7 @@ import { FeishuOutbound } from "./feishuApi.js"
 import { feishuMessageToTelegram, feishuRefFromFile, type FeishuResourceRef } from "./feishuAttachments.js"
 import { parseFeishuCardAction } from "./feishuCards.js"
 import { FeishuIdentityStore } from "./feishuIdentity.js"
+import { SeenEventStore } from "./feishuSeen.js"
 import { asFeishuApi, type FeishuApiLike, type FeishuClientLike } from "./feishuTypes.js"
 import type { Logger } from "./logger.js"
 import type { TelegramBridge } from "./telegram.js"
@@ -55,6 +56,11 @@ export interface FeishuServiceDeps {
   onFirstChat?: () => void
   /** The transport has no usable connection and cannot recover on its own. */
   onFatal?: (err: Error) => void
+  /**
+   * Where handled event and card-action ids persist, so a redelivery after a restart is still
+   * recognised. Omitted, they live in memory only (tests).
+   */
+  seenPath?: string
 }
 
 interface ParsedEvent {
@@ -144,14 +150,18 @@ function isGroup(event: FeishuMessageEvent): boolean {
  */
 export class FeishuService {
   readonly #deps: FeishuServiceDeps
-  readonly #seenEvents = new Map<string, number>()
-  readonly #seenActions = new Map<string, number>()
+  readonly #seenEvents: SeenEventStore
+  readonly #seenActions: SeenEventStore
   readonly #timers = new Set<ReturnType<typeof setTimeout>>()
   #nextUpdateId = 5_000_000_000
   #started = false
 
   constructor(deps: FeishuServiceDeps) {
     this.#deps = deps
+    const warn = (message: string): void => deps.log.warn(message)
+    const at = (kind: string): string | undefined => deps.seenPath && `${deps.seenPath}-${kind}.json`
+    this.#seenEvents = new SeenEventStore({ path: at("events"), max: MAX_SEEN, warn })
+    this.#seenActions = new SeenEventStore({ path: at("actions"), max: MAX_SEEN, warn })
   }
 
   /** Test seam and graceful close for the runtime wrapper. */
@@ -182,16 +192,8 @@ export class FeishuService {
   }
 
   /** Bounded dedupe: Feishu redelivers an unacknowledged event, but not forever. */
-  #once(map: Map<string, number>, key: string): boolean {
-    if (!key) return true
-    if (map.has(key)) return false
-    map.set(key, Date.now())
-    while (map.size > MAX_SEEN) {
-      const oldest = map.keys().next()
-      if (oldest.done) break
-      map.delete(oldest.value)
-    }
-    return true
+  #once(store: SeenEventStore, key: string): boolean {
+    return store.once(key)
   }
 
   async #receive(event: FeishuMessageEvent): Promise<unknown> {

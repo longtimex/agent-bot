@@ -598,40 +598,77 @@ export class ApiTaskManager {
       "x-accel-buffering": "no",
     })
     let closed = false
+    // Backpressure: every frame is a full task snapshot, so while the socket is not draining
+    // (a slow or stalled phone) only the newest frame is kept and older ones are dropped. Writing
+    // each one regardless used to queue every progress snapshot in memory for as long as the
+    // client stayed connected.
+    let blocked = false
+    let latest: string | undefined
+    let endAfterDrain = false
+    const send = (chunk: string): void => {
+      if (closed) return
+      if (blocked) {
+        // A heartbeat is pointless while frames are already waiting to go out
+        if (chunk.startsWith("data:")) latest = chunk
+        return
+      }
+      if (!res.write(chunk)) blocked = true
+    }
+    const onDrain = (): void => {
+      blocked = false
+      const next = latest
+      latest = undefined
+      if (next !== undefined) send(next)
+      if (!blocked && endAfterDrain) cleanup()
+    }
     const listener = (payload: string): void => {
       if (closed) return
-      res.write(`data: ${payload}\n\n`)
+      send(`data: ${payload}\n\n`)
       // The emitter drops the listener set on terminal states; end the response so the client
       // sees a clean stream close instead of waiting for a heartbeat. This reads the task's own
       // state rather than pattern-matching the serialized frame: today the frame's escaping keeps
       // a CLI that prints {"status":"done"} from matching, but any change to how the frame is
       // built would turn that coincidence into a live stream cut at its first frame.
       if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
-        cleanup()
+        // The terminal frame may still be waiting for drain; end only once it is flushed
+        if (blocked) endAfterDrain = true
+        else cleanup()
       }
     }
-    const heartbeat = setInterval(() => {
-      if (!closed) res.write(": ping\n\n")
-    }, 15_000)
+    const heartbeat = setInterval(() => send(": ping\n\n"), 15_000)
     const cleanup = (): void => {
       if (closed) return
       closed = true
+      latest = undefined
       clearInterval(heartbeat)
+      res.off("drain", onDrain)
       const listeners = this.#taskListeners.get(task.id)
       if (listeners) {
         listeners.delete(listener)
         if (listeners.size === 0) this.#taskListeners.delete(task.id)
       }
-      res.end()
+      if (!res.writableEnded && !res.destroyed) res.end()
     }
+    res.on("drain", onDrain)
+    // A response can fail or close on its own (socket reset, proxy timeout) without the request
+    // emitting anything; without these the listener and heartbeat would outlive the connection.
     req.on("close", cleanup)
     req.on("error", cleanup)
+    res.on("close", cleanup)
+    res.on("error", cleanup)
 
     const listeners = this.#taskListeners.get(task.id) ?? new Set()
     listeners.add(listener)
     this.#taskListeners.set(task.id, listeners)
     // Replay the current state first so late subscribers skip the polling round-trip
-    res.write(`data: ${JSON.stringify({ task: this.view(task) })}\n\n`)
+    send(`data: ${JSON.stringify({ task: this.view(task) })}\n\n`)
+  }
+
+  /** Live SSE subscribers across all tasks; lets tests prove a closed stream was released. */
+  get streamSubscribers(): number {
+    let count = 0
+    for (const listeners of this.#taskListeners.values()) count += listeners.size
+    return count
   }
 
   view(task: ApiTask): ApiTaskView {

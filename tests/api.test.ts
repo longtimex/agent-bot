@@ -17,7 +17,7 @@ import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
-import { ApiServer, resolveApiToken, CC_EXEC_COMMANDS, CC_VIEWS } from "../src/api.js"
+import { ApiServer, defaultJsonBodyLimit, resolveApiToken, CC_EXEC_COMMANDS, CC_VIEWS } from "../src/api.js"
 import { AndroidReleaseService } from "../src/androidRelease.js"
 import { ccBlockedReason, ccConfirmPlan } from "../src/ccGuards.js"
 import { AgentCliRegistry } from "../src/agentCli.js"
@@ -544,6 +544,8 @@ export async function withApi(
       ccswitch,
       magpie: magpie as unknown as import("../src/magpie.js").MagpieService,
       fetchMedia: async (target: string) => Buffer.from(`remote:${target}`),
+      // Small enough that the oversize-body test needs no megabytes of payload
+      maxJsonBodyBytes: 256 * 1024,
       ownerChatId: () => ownerChatId,
       ownerUserId: () => ownerUserId,
     },
@@ -1534,6 +1536,71 @@ test("api runs tasks from one session one at a time and answers every one", asyn
         ["答复 第一条", "答复 第二条", "答复 第三条"],
       )
       assert.deepEqual(settled.map((task) => task.id), ids, "tasks settle in submission order")
+    },
+  )
+})
+
+test("api rejects an oversize JSON body with 413 and keeps serving", async () => {
+  await withApi(
+    async (_key, _engine, text) => `ok:${text}`,
+    async (h) => {
+      const huge = JSON.stringify({ text: "x".repeat(300 * 1024) })
+      const rejected = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: huge,
+      })
+      assert.equal(rejected.status, 413)
+      assert.match(((await rejected.json()) as { error: string }).error, /上限/)
+
+      // A body that fits still goes through, so the cap did not wedge the server
+      const ok = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "小请求" }),
+      })
+      assert.equal(ok.status < 300, true, `small request answered ${ok.status}`)
+      await ok.body?.cancel()
+    },
+  )
+})
+
+test("defaultJsonBodyLimit fits four base64 attachments at the media cap", () => {
+  const media = 20 * 1024 * 1024
+  assert.ok(defaultJsonBodyLimit(media) >= Math.ceil((media * 4) / 3) * 4)
+})
+
+test("api releases a task stream once the client disconnects", async () => {
+  await withApi(
+    (_key, _engine, _text, _onProgress, signal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("已取消当前任务。")))
+      }),
+    async (h) => {
+      const created = await fetch(`${h.base}/api/v1/task`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ text: "看一眼就走的任务" }),
+      })
+      const { task } = (await created.json()) as { task: { id: string } }
+      const controller = new AbortController()
+      const stream = await fetch(`${h.base}/api/v1/task/${task.id}/events`, {
+        headers: authHeaders(),
+        signal: controller.signal,
+      })
+      assert.equal(stream.status, 200)
+      const reader = stream.body!.getReader()
+      await reader.read()
+      assert.equal(h.api.taskStreamSubscribers, 1, "the open stream is subscribed")
+
+      controller.abort()
+      await reader.cancel().catch(() => {})
+      const deadline = Date.now() + 2_000
+      while (h.api.taskStreamSubscribers > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      // A phone that walks away must not leave its listener and heartbeat timer behind
+      assert.equal(h.api.taskStreamSubscribers, 0, "the closed stream was not released")
     },
   )
 })

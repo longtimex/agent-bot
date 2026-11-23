@@ -771,6 +771,7 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
   for (const name of ["usage.json", "reminders.json", "api-token.json", "api-enc-key.json"]) {
     writeFileSync(join(dataDir, name), "{}")
   }
+  writeFileSync(join(dataDir, "accounts.key"), `${"ab".repeat(32)}\n`)
   const { ops, calls } = makeService(
     dir,
     (_command, args) => {
@@ -800,6 +801,9 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     assert.ok(tarCall!.args.includes("reminders.json"))
     assert.ok(!tarCall!.args.includes("api-token.json"), "the pairing token stays out of backups")
     assert.ok(!tarCall!.args.includes("api-enc-key.json"), "the encryption pairing key stays out of backups")
+    // Unlike the pairing secrets nothing regenerates the account key: without it a restore is useless
+    assert.ok(tarCall!.args.includes("accounts.key"), "the account key must be in the backup")
+    assert.match(result.message, /accounts\.key/, "the reply must warn that the archive holds the key")
 
     // 只保留最近 5 份:预置 7 份更旧的归档(名字排序在今天之前),再备份一次应剩 5
     for (let i = 0; i < 7; i++) {
@@ -830,5 +834,38 @@ test("ops backupData fails cleanly without data or tar", async () => {
     const result = await noTar.ops.backupData()
     assert.equal(result.ok, false)
     assert.match(result.message, /未找到 tar/)
+  }
+})
+
+test("ops env editing keeps a change another process wrote meanwhile", () => {
+  const dir = tempDir()
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, "LOG_LEVEL=info\n")
+    const { ops } = makeService(dir, () => undefined)
+    // `npm run setup` saved a key between two bot edits
+    writeFileSync(envPath, "LOG_LEVEL=info\nTELEGRAM_ALLOW_USERS=42\n")
+    assert.equal(ops.envSet("LOG_LEVEL", "debug").ok, true)
+    const content = readFileSync(envPath, "utf8")
+    assert.match(content, /LOG_LEVEL=debug/)
+    assert.match(content, /TELEGRAM_ALLOW_USERS=42/)
+    assert.equal(existsSync(`${envPath}.lock`), false, "the lock is released after the write")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("ops env editing waits for a live writer instead of racing it", () => {
+  const dir = tempDir()
+  try {
+    const envPath = join(dir, ".env")
+    writeFileSync(envPath, "LOG_LEVEL=info\n")
+    // A live owner (this very process) holds the lock, as the setup wizard would
+    writeFileSync(`${envPath}.lock`, String(process.pid))
+    const { ops } = makeService(dir, () => undefined)
+    assert.throws(() => ops.envSet("LOG_LEVEL", "debug"), /正被另一个进程写入/)
+    assert.equal(readFileSync(envPath, "utf8"), "LOG_LEVEL=info\n", "nothing is written without the lock")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

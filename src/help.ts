@@ -43,7 +43,8 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/agents uninstall <id>\` - 卸载由 Bot 安装的 CLI（需确认）
 • \`/model\` - 查看或切换当前引擎的底层模型；\`/model default\` 取消本会话选择，之后由引擎自身配置决定
 • \`/dir\` - 查看本会话 CLI 工作目录；\`/dir <路径>\` 切换（支持 \`~\` 与相对路径），\`/dir reset\` 恢复默认
-• \`/new\` 或 \`/reset\` - 重置会话上下文
+• \`/new\` 或 \`/reset\` - 开启新会话，原会话存入历史
+• \`/sessions\` - 历史会话，切回后接着聊
 • \`/stop\` - 立即停止当前正在执行的任务
 • \`/retry\` - 重新发送上一条任务
 • \`/queue\` - 查看或清空排队中的消息
@@ -236,7 +237,8 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "menu", description: "打开功能菜单" },
   { command: "help", description: "分类帮助（/help full 查看全部）" },
   { command: "status", description: "查看运行状态" },
-  { command: "new", description: "开启新会话（清空上下文）" },
+  { command: "new", description: "开启新会话（原会话存入历史，可切回）" },
+  { command: "sessions", description: "历史会话：切回之前的会话接着聊" },
   { command: "agent", description: "查看或切换 Agent 引擎（推荐 OpenCode）" },
   { command: "model", description: "查看或切换大模型" },
   { command: "dir", description: "查看或切换本会话 CLI 工作目录" },

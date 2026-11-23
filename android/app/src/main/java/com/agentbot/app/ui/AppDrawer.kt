@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
@@ -140,6 +141,7 @@ fun AppDrawer(
             ) {
                 Spacer(modifier = Modifier.padding(top = 6.dp))
                 DrawerSection("对话")
+                DrawerItem(Icons.Filled.Forum, "历史会话", current is Screen.Sessions) { onNavigate(Screen.Sessions) }
                 DrawerItem(Icons.Filled.History, "任务历史", current is Screen.History) { onNavigate(Screen.History) }
                 DrawerItem(
                     Icons.Filled.List,

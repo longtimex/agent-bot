@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { randomBytes } from "node:crypto"
 import { createHash } from "node:crypto"
 import { decryptPayload, encryptPayload } from "./apiCrypto.js"
 import { withFileLock } from "./fileLock.js"
+import { writePrivateAtomic } from "./jsonStore.js"
+import { loadOrCreateSecretKey } from "./secretKey.js"
 import { asRecord } from "./util.js"
 import type { Logger } from "./logger.js"
 
@@ -144,7 +146,10 @@ export class AccountStore {
   }
 
   add(input: AccountInput): AccountEntry {
-    this.#assertWritable()
+    return this.#mutate(() => this.#add(input))
+  }
+
+  #add(input: AccountInput): AccountEntry {
     const name = this.#checkName(input.name)
     const existing = this.find(name)
     if (existing) throw new Error(`账号「${name}」已存在，请换一个名称或先删除旧条目。`)
@@ -166,7 +171,6 @@ export class AccountStore {
     const password = input.password?.trim()
     if (password) entry.secret = encryptPayload(this.#keyBuffer(), password)
     this.#accounts.set(entry.id, entry)
-    this.#save()
     return entry
   }
 
@@ -175,7 +179,10 @@ export class AccountStore {
    * it. That is how a password can change without retyping the category and notes.
    */
   update(ref: string, patch: AccountUpdate): AccountEntry {
-    this.#assertWritable()
+    return this.#mutate(() => this.#update(ref, patch))
+  }
+
+  #update(ref: string, patch: AccountUpdate): AccountEntry {
     const current = this.find(ref)
     if (!current) throw new Error(`没有找到「${ref}」。`)
     const entry: AccountEntry = { ...current }
@@ -202,7 +209,6 @@ export class AccountStore {
 
     entry.updatedAt = Date.now()
     this.#accounts.set(entry.id, entry)
-    this.#save()
     return entry
   }
 
@@ -245,7 +251,15 @@ export class AccountStore {
     const key = this.#keyBuffer()
     for (const entry of this.#accounts.values()) {
       if (!entry.secret) continue
-      const digest = createHash("sha256").update(decryptPayload(key, entry.secret)).digest("hex")
+      let plain: string
+      try {
+        plain = decryptPayload(key, entry.secret)
+      } catch {
+        // One damaged ciphertext must not take the whole report down with it
+        this.#log.warn(`account ${entry.id} could not be decrypted; skipped in the shared-password check`)
+        continue
+      }
+      const digest = createHash("sha256").update(plain).digest("hex")
       groups.set(digest, [...(groups.get(digest) ?? []), entry.name])
     }
     return [...groups.values()]
@@ -300,12 +314,12 @@ export class AccountStore {
   }
 
   remove(ref: string): AccountEntry | undefined {
-    this.#assertWritable()
-    const entry = this.find(ref)
-    if (!entry) return undefined
-    this.#accounts.delete(entry.id)
-    this.#save()
-    return entry
+    return this.#mutate(() => {
+      const entry = this.find(ref)
+      if (!entry) return { result: undefined, changed: false }
+      this.#accounts.delete(entry.id)
+      return entry
+    })
   }
 
   #checkName(raw: string): string {
@@ -317,22 +331,10 @@ export class AccountStore {
   }
 
   #keyBuffer(): Buffer {
-    if (this.#key) return this.#key
-    if (existsSync(this.#keyPath)) {
-      const raw = readFileSync(this.#keyPath, "utf8").trim()
-      if (!/^[0-9a-f]{64}$/i.test(raw)) {
-        // Regenerating it would silently orphan every stored password
-        throw new Error(`账号密钥 ${this.#keyPath} 格式无效，请从备份恢复该文件。`)
-      }
-      this.#key = Buffer.from(raw, "hex")
-      return this.#key
-    }
-    mkdirSync(dirname(this.#keyPath), { recursive: true })
-    const key = randomBytes(32)
-    writeFileSync(this.#keyPath, `${key.toString("hex")}\n`, { mode: 0o600 })
-    this.#log.info(`account key created at ${this.#keyPath}`)
-    this.#key = key
-    return key
+    this.#key ??= loadOrCreateSecretKey(this.#keyPath, {
+      onCreate: (path) => this.#log.info(`account key created at ${path}`),
+    })
+    return this.#key
   }
 
   #assertWritable(): void {
@@ -397,22 +399,32 @@ export class AccountStore {
     }
   }
 
-  #save(): void {
+  /**
+   * Runs one read-modify-write under the cross-process lock. The bot and `npm run account`
+   * each hold their own store: the lock used to cover only the write of an in-memory copy read
+   * earlier, so two near-simultaneous edits each saved their own view and the later one erased
+   * the other's change. Re-reading inside the lock makes every edit apply on top of the latest
+   * file. A mutation may return `{ result, changed: false }` to skip the write.
+   */
+  #mutate<T>(fn: () => T | { result: T; changed: false }): T {
     mkdirSync(dirname(this.#path), { recursive: true })
-    const body = JSON.stringify({ version: 1, accounts: [...this.#accounts.values()] }, null, 2)
-    withFileLock(this.#path, () => {
-      const tmp = `${this.#path}.${process.pid}.tmp`
-      // Keep an existing 0600 mode: the file holds ciphertext, but its category and notes
-      // are still readable metadata
-      let mode = 0o600
-      try {
-        mode = statSync(this.#path).mode & 0o777
-      } catch {
-        // new file: use the private default
+    return withFileLock(this.#path, () => {
+      this.#refresh()
+      this.#assertWritable()
+      const outcome = fn()
+      if (outcome && typeof outcome === "object" && "changed" in outcome && outcome.changed === false) {
+        return (outcome as { result: T }).result
       }
-      writeFileSync(tmp, `${body}\n`, { mode })
-      renameSync(tmp, this.#path)
-      if (!existsSync(this.#path)) throw new Error("账号库写入失败")
+      this.#write()
+      return outcome as T
     })
+  }
+
+  #write(): void {
+    const body = JSON.stringify({ version: 1, accounts: [...this.#accounts.values()] }, null, 2)
+    // Always 0600, fsynced and renamed into place. Inheriting the old mode kept a copy that was
+    // restored as 0644 world-readable: ciphertext, but names, usernames, urls and notes in clear.
+    writePrivateAtomic(this.#path, `${body}\n`, `${this.#path}.${process.pid}.tmp`)
+    if (!existsSync(this.#path)) throw new Error("账号库写入失败")
   }
 }

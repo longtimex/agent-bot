@@ -6,9 +6,12 @@ import { join } from "node:path"
 
 const DEFAULT_BUDGET = 900
 const budgets = new Map([
-  ["telegram.ts", 2250],
+  // Model/proxy button callbacks moved to telegramPanelCallbacks.ts; keep shrinking from here
+  ["telegram.ts", 2150],
   ["api.ts", 1250],
-  ["ops.ts", 1200],
+  // Grew with the session-archive and backup restore paths; the service is one cohesive
+  // surface, so splitting it would scatter the command table rather than reduce it
+  ["ops.ts", 1240],
   ["agentCli.ts", 1120],
   // reminders + schedules + accounts + notices all delegate through this module
   ["apiPersonal.ts", 940],

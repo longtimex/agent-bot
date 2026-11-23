@@ -546,8 +546,10 @@ function parseJsonl(mode: CliParseMode, raw: string): CliParseResult {
       } else if (type === "item.completed") {
         const item = asRecord(record.item)
         if (item?.type === "agent_message") {
-          const text = pickString(item, ["text", "content", "message"])
-          if (text) chunks.push(text)
+          // Each agent_message is a whole message ("先看一下文件", then the answer), not a
+          // delta: kept as separate paragraphs, or they ran together into one line
+          const text = pickString(item, ["text", "content", "message"])?.trim()
+          if (text) chunks.push(chunks.length > 0 ? `\n\n${text}` : text)
         } else if (item?.type === "error") {
           error ??= pickString(item, ["message", "text"]) ?? "Codex 返回错误"
         }
@@ -744,7 +746,7 @@ export function buildCliArgs(
   args.push(...render(profile.args.cwd))
   if (model) args.push(...render(profile.args.model))
   args.push(...render(profile.args.prompt ?? ["{prompt}"]))
-  return options.safeMode ? stripPermissionBypass(args) : args
+  return options.safeMode ? stripPermissionBypass(args, profile.id) : args
 }
 
 const MAX_WORK_DIR_CHARS = 512

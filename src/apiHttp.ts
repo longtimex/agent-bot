@@ -1,4 +1,5 @@
 import type { ServerResponse } from "node:http"
+import { fileStamp } from "./clock.js"
 
 /**
  * Small HTTP helpers shared by the API surface. Kept free of ApiServer state so
@@ -68,7 +69,7 @@ export function res_attachment_binary(res: ServerResponse, filename: string, con
   res.end(body)
 }
 
-export function stamp(now = new Date()): string {
-  const pad = (value: number): string => String(value).padStart(2, "0")
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+/** Export file names: minute precision, in the bot's configured timezone. */
+export function stamp(now: Date | number = new Date()): string {
+  return fileStamp(now, { seconds: false })
 }
