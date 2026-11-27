@@ -222,7 +222,9 @@ test("a broken opencode binary is reported instead of crashing the process", asy
       { ...process.env, OPENCODE_BIN: broken, OPENCODE_URL: "http://127.0.0.1:1" },
     )
     assert.equal(result.ok, false)
-    assert.match(result.message, /OpenCode (启动失败|已启动)/)
+    // Three ways to fail, one per platform: spawn error (Windows), health timeout (POSIX with
+    // an executable script that exits), or a missing binary
+    assert.match(result.message, /OpenCode (启动失败|已启动|启动后健康检查未通过)/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
