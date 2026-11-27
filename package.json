@@ -38,20 +38,20 @@
     "release:android": "node scripts/publish-android-release.mjs"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.76.0",
-    "grammy": "^1.39.3",
+    "@larksuiteoapi/node-sdk": "^1.77.0",
+    "grammy": "^1.48.0",
     "jsonc-parser": "^3.3.1",
-    "playwright-core": "^1.64.1",
+    "playwright-core": "^1.65.1",
     "qrcode": "^1.5.4",
     "smol-toml": "^1.9.1",
-    "socks": "^2.8.10",
+    "socks": "^2.8.11",
     "undici": "^7.30.2"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/qrcode": "^1.5.6",
-    "knip": "^6.44.1",
-    "oxlint": "^1.91.0",
+    "knip": "^6.48.0",
+    "oxlint": "^1.95.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }
