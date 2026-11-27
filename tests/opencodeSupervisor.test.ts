@@ -217,7 +217,9 @@ test("a broken opencode binary is reported instead of crashing the process", asy
         opencodePidPath: join(dir, "opencode.pid"),
         startupPath: join(dir, "startup.json"),
       },
-      { ...process.env, OPENCODE_BIN: broken, OPENCODE_URL: "http://127.0.0.1:4099" },
+      // Port 1 is privileged and never listened on, so the health check cannot pass by
+      // accident if an earlier case left a server behind
+      { ...process.env, OPENCODE_BIN: broken, OPENCODE_URL: "http://127.0.0.1:1" },
     )
     assert.equal(result.ok, false)
     assert.match(result.message, /OpenCode (启动失败|已启动)/)
