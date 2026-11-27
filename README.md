@@ -6,9 +6,9 @@
 
 | 控制端 | 接入方式 | 网络要求 | 能力概览 |
 | --- | --- | --- | --- |
-| Telegram | Bot API 长轮询 | 无需公网地址 | 命令、内联按钮、附件、提醒、定时任务与运维 |
-| 飞书 | 自建应用长连接；卡片按钮另需回调 | 文字命令无需公网；面板按钮需公网 HTTPS | 命令、附件、提醒、定时任务与运维和 Telegram 一致；按钮依赖回调 |
-| 安卓 App | `/api/v1` + SSE | API 必须从手机可达 | 原生聊天、附件、任务队列、模型与运维界面 |
+| Telegram | Bot API 长轮询 | 无需公网地址 | 命令、内联按钮、附件、代码改动/审批/Webhook、提醒、定时任务与运维 |
+| 飞书 | 自建应用长连接；卡片按钮另需回调 | 文字命令无需公网；面板按钮需公网 HTTPS | 命令、附件、代码改动/审批/Webhook、提醒、定时任务与运维和 Telegram 一致；按钮依赖回调 |
+| 安卓 App | `/api/v1` + SSE | API 必须从手机可达 | 原生聊天、附件、代码改动、高危审批、Webhook、账号库、magpie、队列、模型与运维 |
 
 ```text
 Telegram  ── Bot API 长轮询 ────┐
@@ -18,7 +18,7 @@ Telegram  ── Bot API 长轮询 ────┐
 
 > 安卓 App 的构建与连接见 [`android/README.md`](android/README.md)。版本变更见 [`CHANGELOG.md`](CHANGELOG.md)，持续迭代的台账见 [`ITERATIONS.md`](ITERATIONS.md)，深度审查记录见 [`DEEP-100.md`](DEEP-100.md)，分层与模块边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [双实例测试](#双实例真实测试linux--android) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [运行](#运行) · [更新与迁移](#更新与迁移) · [聊天运维](#聊天运维中心) · [故障排查](#超时与错误) · [安全](#安全说明)
+**快速导航**：[一键安装](#一键安装推荐) · [快速开始](#快速开始) · [功能](#功能) · [命令](#命令) · [安卓 App](#第-4-步安卓-app可选) · [Instabox 云电脑教程](#instabox-云电脑部署安卓连接示例) · [双实例测试](#双实例真实测试linux--android) · [HTTP API](#http-apiapiv1) · [配置](#配置) · [运行](#运行) · [更新与迁移](#更新与迁移) · [聊天运维](#聊天运维中心) · [工作区与撤销](#工作区改动与撤销) · [高危审批](#高危操作审批中心) · [Webhook](#入站-webhook-事件触发器) · [用量与预算](#使用统计与费用预算) · [故障排查](#超时与错误) · [安全](#安全说明)
 
 ## 一键安装（推荐）
 
@@ -155,35 +155,36 @@ AGENT_BOT_DIR=/opt/agent-bot AGENT_BOT_OPENCODE=0 ./install.sh
 
 - **Telegram 官方 Bot**：长轮询，无需公网地址，无需扫码。
 - **飞书自建应用 Bot**：通过长连接接收私聊消息，无需公网地址；命令、面板、附件、提醒、定时任务、运维与访问控制与 Telegram 端完全共用。面板按钮需要可选的公网 HTTP 卡片回调（飞书 SDK 长连接不分发卡片回调），不启用时文字命令仍可用。飞书单聊中 @ 机器人或直接发命令均可；群聊默认忽略。
-- **安卓 App**：Grok 风格的原生客户端（聊天与可选中复制的 Markdown、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/视频/文件附件、语音消息、单条消息临时换引擎、图片/视频/语音回复查看、附件回显、系统分享导入、实时进度与失败重试、后台通知、任务队列、引擎/模型切换、工作目录、时区、历史、提醒、定时任务、状态统计），通过内置 HTTP API 控制同一台 bot；详见 `android/README.md`。
-- **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权的任务提交、引擎/模型切换、工作目录/时区调整、提醒/定时任务管理、运维诊断与日志查看，供 App 或任意脚本调用；Telegram 或飞书聊天里发 `/api` 查看配对信息。
-- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Claude Code、Codex、Gemini、Qoder、Antigravity、Cursor、Copilot、Kiro 等 8 种主流 Linux Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
+- **安卓 App**：原生暗色客户端（聊天与可选中复制的 Markdown、CLI 与 OpenCode 实时流式草稿、代码块/整条回复复制、全屏看图、会话内搜索、输入框 `/` 快捷命令、拍照与相册/视频/文件附件、语音消息、单条消息临时换引擎/模型、图片/视频/语音回复播放、系统分享导入、离线发件箱与失败重试、后台通知、任务队列、历史会话管理、跨端对话恢复与会话接管、代码改动 Diff/撤销/提交、高危操作审批中心、Webhook 触发器、加密账号库、引擎/模型/中转站管理、cc-switch、magpie、Hermes 记忆、工作目录浏览、时区、历史、提醒、定时任务、Token/费用统计与预算设置、运维中心与在线更新），通过内置 HTTP API 控制同一台 Bot；详见 [`android/README.md`](android/README.md)。
+- **HTTP API**：`/api/v1` 提供 Bearer Token 鉴权与可选 AES-256-GCM 消息级加密的任务提交、SSE 流式事件、工作区 Diff/撤销/提交、高危审批、Webhook 管理、跨端同步、引擎/模型切换、账号库、工作目录/时区调整、提醒/定时任务、Token 预算与运维诊断接口；Telegram 或飞书发 `/api` 查看配对二维码。
+- **多引擎切换**：`/agent opencode`（多模型、工具调用）与 Qoder、Claude Code、Codex、Gemini、Cursor、Copilot、Antigravity、Kiro、DeepSeek Harness、Pi 等 10 种主流内置 Agent CLI；可用 `data/agents.json` 接入任意私有 CLI。
 - **自动检测与安装**：首次启动扫描 `PATH`，`/start`、`/agent`、`/agents` 都会展示本机已安装的 CLI；可在聊天中通过 `/agents install <id>` 用 npm/pip 安装新 CLI，`/agents update <id>` 原地升级、`/agents uninstall <id>` 卸载——Bot 安装的版本直接移除，其他方式安装的先展示将执行的 npm/pip 命令并要求确认。默认推荐使用 OpenCode。
-- **多模型切换**：OpenCode 的模型由你自己登记（`/cc model add` 或 `npm run models -- add` 写入 `data/models.json`），provider/model 任意组合；CLI 引擎的模型按登录账号与 CLI 自身配置动态探测，不再内置推荐列表。
-- **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程等全部非交互命令；危险操作先确认，输出自动脱敏。
-- **magpie 集成**：`/magpie` 面板与 `/magpie <命令>` 管理 magpie 模型网关（Provider、各 Agent 的模型、路由组、配额、用量、守护进程），`/magpie run` 透传非交互命令；危险操作先确认，密钥与 Token 自动打码，并提供 `/api/v1/magpie/*` 给脚本与后续 App 面板使用。
+- **多模型切换**：OpenCode 的模型由你自己登记（`/cc model add` 或 `npm run models -- add` 写入 `data/models.json`），provider/model 任意组合；CLI 引擎的模型按登录账号与 CLI 自身配置动态探测，并支持按引擎或单模型配置加密中转站（`/models/provider`、`/models/agent`）。
+- **工作区改动与多步撤销**：`/diff` 查看当前 git 仓库改动与撤销栈，`/undo` 支持重启后多步撤销并自动保护用户后续编辑（含新建文件 SHA-256 校验），`/commit <说明>` 二次确认后提交（失败自动回滚暂存区）；切换 `/dir` 后严格按当前仓库隔离。
+- **高危操作审批中心**：`/approvals [auto|strict|off]` 在执行 `rm -rf`、`git push --force`、`DROP TABLE`、`curl | sh` 等高危指令前暂停并向 Telegram/飞书卡片和安卓 App 推送审批请求，支持「放行一次 / 本会话同类放行 / 拒绝」，`/new` 自动清理本会话放行记录。
+- **入站 Webhook 事件触发器**：`/hooks` 创建受 `X-Webhook-Secret` / `X-Hub-Signature-256`（GitHub HMAC）保护的触发器，接收 CI、监控或第三方事件交由 AI 分析；支持静默令牌过滤无异常事件、单 Hook 串行排队限流与结果推送。
+- **跨端对话同步与会话接管**：服务端持久化脱敏对话记录，安卓 App 可一键恢复历史消息或直接接管 Telegram/飞书会话上下文（含引擎、模型、工作目录与历史记录），并支持开启 App 任务完成同步提醒聊天端。
+- **实时进度与 CLI 流式草稿**：处理时间超过 2 秒后显示进度卡片（带「停止任务」按钮），OpenCode 与 Codex / Gemini / Claude Code 等 CLI 引擎均支持实时流式预览草稿；限流自动退避，Telegram 持续发送 typing 状态。
+- **cc-switch 集成**：`/cc` 面板与 `/cc <分组>` / `/cc run` 覆盖 Provider、MCP、提示词、技能、配置、代理、故障转移、会话、认证、守护进程与 Hermes 记忆等全部非交互命令；危险操作先确认，输出自动脱敏。
+- **magpie 集成**：`/magpie` 面板与 `/magpie <命令>` 管理 magpie 模型网关（Provider、各 Agent 的模型、路由组、配额、用量、守护进程），`/magpie run` 透传非交互命令；危险操作先确认，密钥与 Token 自动打码，并提供 `/api/v1/magpie/*` 与安卓端原生页面。
 - **模型管理**：`/cc model` 或 `npm run models` 为 Bot 与其他 agent 添加/删除模型、同步 `opencode.json`、指定 agent 模型，改动无需重启。
-- **聊天运维中心**：`/ops` 提供系统诊断、日志查看、项目更新、Bot 重启、OpenCode 服务启停、cc-switch 安装/更新与非密钥配置修改，Telegram 与飞书均可使用；首次部署之外几乎无需再登录服务器。面板上的「🔍 检查更新」会拉取远端并列出落后提交（干跑，不改动本地代码），确认无误再点「⬆️ 更新项目」。
-- **交互面板**：`/start`、`/agent`、`/model`、`/dir`、`/access`、`/reminders`、`/schedule`、`/proxy`、`/usage`、`/ops` 均带内联按钮，可直接点选切换引擎/模型、设置工作目录、增删访问白名单、暂停任务、取消提醒或操作代理。
-- **实时进度**：处理时间超过 2 秒后显示进度卡片（带「停止任务」按钮），Telegram 还会持续发送 typing 状态。卡片被限流时会自动退避而不是每 2 秒重试，状态没有变化时也最多每 30 秒刷新一次，避免长任务耗尽渠道的编辑额度。
-- **重试与队列**：失败消息附带的「重试」按钮只重发**它那一条**任务（不会被之后的新消息顶掉）；`/retry` 重发上一条任务，但若中途发过 `/stop`，排队的 `/retry` 会一起作废，不会把已取消的活儿再跑一遍；`/queue` 可逐条取消或一键清空排队消息。
+- **安全输入与加密账号库**：`/secrets` 与 `[[secret: NAME | 用途]]` 通过安全输入卡片采集凭据（加密落盘 `data/task-secrets.json`，不进入模型提示词，24 小时过期）；`/account` 提供 AES-256-GCM 加密账号库与只读 CLI `npm run -s account`。
+- **聊天运维中心**：`/ops` 提供系统诊断、日志查看、项目更新、Bot 重启、OpenCode 服务启停、数据备份、cc-switch 安装/更新与非密钥配置修改，Telegram 与飞书均可使用；首次部署之外几乎无需再登录服务器。面板上的「🔍 检查更新」会拉取远端并列出落后提交（干跑，不改动本地代码），确认无误再点「⬆️ 更新项目」。
+- **交互面板**：`/start`、`/agent`、`/model`、`/dir`、`/diff`、`/approvals`、`/hooks`、`/access`、`/reminders`、`/schedule`、`/proxy`、`/usage`、`/budget`、`/ops` 均带内联按钮，可直接点选操作。
+- **重试与队列**：失败消息附带的「重试」按钮只重发**它那一条**任务（不会被之后的新消息顶掉）；`/retry` 重发上一条任务，但若中途发过 `/stop`，排队的 `/retry` 与控制命令会一起作废；`/queue` 可逐条取消或一键清空排队消息（不影响正在执行的任务）。
 - **命令自动补全**：启动时注册 Telegram 的 `/` 菜单（`src/help.ts` 的 `BOT_MENU_COMMANDS`，与等价写法 `BOT_COMMAND_ALIASES` 一起通过 `GET /help` 下发给安卓 App），输入 `/` 即可看到全部命令与说明；测试会校验菜单与 `/help full` 保持一致，并校验 App 的命令表覆盖同样的命令。
 - **网络代理**：聊天内添加 HTTP/HTTPS/SOCKS4/SOCKS5 代理，自动测试连通性，可启用、停用、删除；远程媒体、Agent CLI 子进程与 Agent 网络命令自动使用。
-- **附件接收**：可直接发送图片、视频、文件、语音；文本/代码文件会读取内容，图片/视频/PDF/音频按当前模型能力附加，MIME 缺失时按扩展名识别。
+- **附件接收**：可直接发送图片、视频、文件、语音；文本/代码文件会读取内容，图片/视频/PDF/音频按当前模型能力附加，MIME 缺失时按扩展名识别；配置 `STT_BASE_URL` 后 OpenCode 与 CLI 引擎均支持语音自动转写。
 - **原生附件**：模型通过 `[[image:...]]` 等指令发送图片、视频、语音、文档。
-- **白名单**：Telegram 数字用户 ID 与飞书 `open_id` 各自独立；任一控制端启用时必须配置对应白名单（或显式 allow-all），日常增删用 `/access`，立即生效且不会把自己移出。
-- **仅私聊**：只响应私聊消息，群组/频道消息直接忽略，避免误触发。
-- **提醒稍后提醒**：一次性提醒触发时附带「10分钟 / 1小时 / 明天」按钮，一键延后
-- **定时提醒**：`/remind 30m 喝水` 即可设置；支持重复提醒（`every 30m`、`每5分钟`、`每天 08:30`）与中文口语时间（`5分钟后`、`下午3点`、`今晚8点半`、`后天 09:00`）；保存在 `data/reminders.json`，重启后仍然有效。
+- **白名单与仅私聊**：Telegram 数字用户 ID 与飞书 `open_id` 各自独立；任一控制端启用时必须配置对应白名单（或显式 allow-all），日常增删用 `/access`，立即生效且不会把自己移出，被撤销用户不会继续收到系统推送；群组/频道消息默认忽略。
+- **定时提醒与稍后提醒**：`/remind 30m 喝水` 即可设置；支持重复提醒（`every 30m`、`每5分钟`、`每天 08:30`）、中文口语时间（`5分钟后`、`下午3点`、`今晚8点半`、`后天 09:00`）与一次性提醒「10 分钟 / 1 小时 / 明天」一键延后；保存在 `data/reminders.json`，重启后仍然有效。
 - **时区可在线切换**：`/timezone` 或 `/timezone Asia/Tokyo` 立即改变提醒、定时任务与每日统计所用的时区，并写入 `.env`（`REMINDER_TIMEZONE`），无需重启。
 - **定时 AI 任务**：`/schedule add 每天 09:00 检查服务器` 到点自动调用 AI 执行提示词并回传结果；支持一次性与重复任务、指定引擎/模型、暂停/恢复/删除、立即运行一次，保存在 `data/schedules.json`。
-- **使用统计**：`/usage` 查看任务量、成功率、平均耗时、今日任务、近 7 天趋势与引擎分布，持久化到 `data/usage.json`；面板上的「📩 每日报告」可随时生成汇总，开启 `USAGE_DAILY_REPORT` 后每天到点自动向白名单第一位用户推送一份。
-- **任务历史**：`/history` 查看最近任务（提示词摘要、引擎/模型、耗时、结果、是否定时），每聊天保留 50 条，可一键清空，持久化到 `data/history.json`。
-- **任务取消**：`/stop` 可立即终止正在执行的 OpenCode / Agent CLI 任务，并清空排队中的提示。
-- **单实例**：`data/bot.lock` 防止重复启动；异常退出后残留的锁会被自动回收。
-- **会话持久化**：`data/sessions.json` 保存会话 ID、引擎与模型偏好，重启后自动恢复。
+- **使用统计与费用预算**：`/usage` 查看任务量、成功率、平均耗时、Token 用量、美元估算费用、近 7 天趋势与引擎分布，持久化到 `data/usage.json`；`/budget` 设置每日/每月费用上限（80% 预警、100% 超限推送）；开启 `USAGE_DAILY_REPORT` 后每天到点推送全局每日报告。
+- **任务历史与导出**：`/history` 查看最近任务（提示词摘要、引擎/模型、耗时、结果、是否定时），每聊天保留 50 条，`/export [json]` 导出 Markdown/JSON 存档，持久化到 `data/history.json`。
+- **任务取消、单实例与会话归档**：`/stop` 立即终止当前任务并清空排队；`data/bot.lock` 防重复启动并校验进程启动时间防 PID 复用；`/new` 将原会话归档到 `/sessions`（最多 20 个，支持搜索/置顶/改名/切回）。
 - **启动通知**：每次成功上线（含 `/restart`、服务器重启后）自动向白名单第一位用户发送一条「✅ Bot 已上线」通知，附版本号与 OpenCode 服务可达性，`STARTUP_NOTICE=0` 关闭。
-- **Docker 部署**：提供 Dockerfile 与 docker-compose.yml，一条 `docker compose up -d` 即可同时拉起 opencode 服务与 Bot，`data/` 与 `.env` 挂载持久化。
+- **Docker 部署**：提供多阶段构建 Dockerfile（含依赖层缓存优化与 `HEALTHCHECK` 存活探针）与 `docker-compose.yml`，一条 `docker compose up -d` 即可拉起服务，`data/` 与 `.env` 挂载持久化。
 
 ## 快速开始
 
@@ -515,19 +516,26 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/model <模型ID>` | 为当前 Agent CLI 指定模型（如 `/model sonnet`；OpenCode 仍走 `/model` 面板） |
 | `/dir` | 查看本会话 CLI 引擎的工作目录（默认是 Bot 自身所在目录），面板上有「恢复默认目录」按钮 |
 | `/dir <路径>` | 让本会话的 CLI 引擎在另一个项目里执行，支持 `~`、相对路径与引号；目录必须存在，切换会重置该会话的 CLI 上下文。OpenCode 的目录由其服务端决定，不受此设置影响 |
-| `/new`、`/reset` | 开启新会话；原会话存入历史，可切回 |
-| `/sessions` | 历史会话：列出最近 20 个会话，一键切回接着聊（与安卓 App「历史会话」共用） |
+| `/new`、`/reset` | 开启新会话；原会话存入历史，可切回（同时清除本会话的高危审批「始终允许」授权） |
+| `/sessions` | 历史会话：列出最近 20 个会话，一键切回接着聊；支持 `/sessions 关键词` 搜索、`/sessions rename 序号 名称` 改名（与安卓 App「历史会话」共用） |
+| `/diff` | 查看当前工作目录（Git 仓库）的改动汇总、文件 Patch 与可撤销栈 |
+| `/undo` | 撤销上一次任务对当前工作目录的改动（基于 `git stash create` 快照，支持重启后多步撤销，人工二次修改时自动拒绝覆盖） |
+| `/commit <说明>` | 暂存并提交当前工作目录的 Git 改动（需按钮确认，提交失败时自动取消暂存） |
+| `/secrets` | 查看或清除通过安全输入卡片保存的临时任务密钥（`/secrets clear`）；命令中将密钥写成 `?` 会弹出安全输入卡片 |
 | `/stop` | 停止当前任务（同时丢弃排队中的提示） |
 | `/retry` | 重新发送上一条任务（失败提示上也有「重试」按钮，只重发它自己那一条） |
 | `/queue` | 查看排队消息，可逐条取消或一键清空；当前任务不受影响 |
 | `/status` | 查看引擎、模型、运行时长、今日任务、代理、队列与提醒数 |
-| `/usage` | 查看任务量、成功率、平均耗时、今日与引擎统计 |
+| `/usage` | 查看任务量、成功率、平均耗时、Token 与估算费用、今日与引擎统计 |
+| `/budget [美元\|month 美元\|off]` | 查看或设置每日/每月费用预算与 80% / 100% 超额告警阈值（`off` 持久化关闭） |
 | `/report` | 生成跨聊天的每日用量报告（等价 `/usage` 面板的「📩 每日报告」按钮） |
 | `/history [条数]` | 查看最近任务历史（提示词摘要、引擎/模型、耗时与结果），可一键清空 |
 | `/export [json]` | 把最近任务历史导出为 Markdown（默认）或 JSON 文档发到聊天里，方便存档迁移 |
 | `/schedule` | 定时 AI 任务面板：查看、暂停、恢复、删除 |
 | `/schedule add 30m 检查服务器` | 到点自动执行 AI 任务；时间写法与 `/remind` 完全一致（见「定时提醒」） |
 | `/schedule add --engine qoder --model deepseek 2h 汇总日志` | 指定执行引擎与模型（任意 Agent CLI 均可） |
+| `/approvals [auto\|strict\|off]` | 高危操作审批中心：查看待审批卡片、切换防护级别（默认 `auto`，`strict` 追加拦截 `sudo` / 发布类操作） |
+| `/hooks` · `/hooks add 名称 \| 模板` | 管理入站 Webhook 事件触发器：列出/启停/测试/删除，生成独立触发地址与签名密钥 |
 | `/remind 30m 喝水` | 定时提醒：支持相对时长、中文时长（`5分钟后`、`半小时后`）、`18:30`、`下午3点`、`今晚8点半`、`明天/后天 08:30` |
 | `/remind every 30m 喝水` | 重复提醒：也支持 `每30m`、`每5分钟`、`每天 08:30`、`每天8点半` |
 | `/reminders` | 查看待触发提醒，可点按钮取消 |
@@ -556,7 +564,7 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `/access add <ID>` / `/access del <ID>` | 增删当前渠道白名单：Telegram 填数字用户 ID，飞书填 `ou_` 开头的 open_id；写入 `.env` 并**立即生效**，无需重启；会拒绝移除你自己、拒绝留空白名单。ID 可让对方发送 `/start` 后从被拒回复中取得 |
 | `/api` | 查看安卓 App 配对信息（HTTP API 地址、令牌与暴露提示），并附带可被 App「扫码配对」直接导入的二维码图片 |
 | `/alias` | 自定义快捷指令面板；`/alias add 名称 指令内容` 创建后，发送 `/名称` 即触发（支持 3 层嵌套，重启后保留）。名称不能与内置命令或 App 保留命令重名，避免创建出永远无法触发的指令 |
-| `/account` | 加密账号库：`add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注 \| 标签` 保存，`edit` 修改（空段不改、`-` 清空）、`rename` 改名、`tag` 覆盖标签、`field 键=值` 增改自定义字段、`unfield` 删除字段、`dup` 检查多个账号是否共用同一密码、`ls [分类]`、`show`、`pass`（明文仅显示一次，60 秒后自动删除该消息）、`rm 名称 yes`。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥在 `data/accounts.key`（不进 `/ops backup`）；保存密码要求加密通道：`API_ENCRYPTION=1`（需重新配对）、`API_PUBLIC_URL` 为 `https://`，或 `ALLOW_PLAINTEXT_SECRETS=1` |
+| `/account` | 加密账号库：`add 名称 \| 账号 \| 密码 \| 分类 \| 网址 \| 备注 \| 标签` 保存，`edit` 修改（空段不改、`-` 清空）、`rename` 改名、`tag` 覆盖标签、`field 键=值` 增改自定义字段、`unfield` 删除字段、`dup` 检查多个账号是否共用同一密码、`ls [分类]`、`show`、`pass`（明文仅显示一次，60 秒后自动删除该消息）、`rm 名称 yes`。密码用 AES-256-GCM 加密写入 `data/accounts.json`，密钥在 `data/accounts.key`（`/ops backup` 会一并打包以便恢复，请妥善保管备份文件）；保存/查看密码要求加密通道：`API_ENCRYPTION=1`（需重新配对）、`API_PUBLIC_URL` 为 `https://`，或 `ALLOW_PLAINTEXT_SECRETS=1` |
 | `/id` | 查看聊天 ID、用户 ID、时区与会话 ID |
 
 所有功能面板底部都有「⬅️ 主菜单」；在面板之间切换时会原地编辑当前消息，不会不断刷屏。`/start`、`/menu`、`/help` 不经过任务队列，即使正在执行长任务也能立即打开。
@@ -567,36 +575,41 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 
 **连接与鉴权**
 
-- 所有请求携带 `Authorization: Bearer <token>`；令牌可在 Telegram 或飞书发送 `/api` 查看，也可在安装向导完成时从终端复制。
+- 除入站 Webhook 触发端点 `POST /hooks/:id/trigger`（采用每条钩子独立的 `X-Webhook-Secret` 或 `X-Hub-Signature-256` HMAC-SHA256 验签）外，所有请求均需携带 `Authorization: Bearer <token>`；令牌可在 Telegram 或飞书发送 `/api` 查看，也可在安装向导完成时从终端复制。
 - API 独立于聊天渠道：Telegram 或飞书暂时不可达时会保留 API 并在后台重连；只有全部控制端都不可用时进程才会按启动逻辑退出。
-- 失败的令牌按来源地址限流（默认 60 秒 10 次，超限后暂停 5 分钟）；服务器先验证令牌，再检查失败预算，避免反向代理后的正确令牌被其他人的失败拖住。
+- 失败的令牌或 Webhook 签名按来源地址限流（默认 60 秒 10 次，超限后暂停 5 分钟，Webhook 触发共享该限流器并先查限流）；普通 API 先验证 Bearer 令牌，再检查失败预算，避免反向代理后的正确令牌被其他人的失败拖住。
 - `API_PUBLIC_URL` 填手机实际可访问的协议、主机与可选子路径，例如 `http://192.168.1.10:3080`、`https://bot.example.com/agent-bot`。设置后 `/api` 才生成可扫码二维码，否则只提供手动填写提示。
 
 **消息级加密**
 
-`API_ENCRYPTION=1` 时，请求/响应体使用 AES-256-GCM 加密。配对密钥保存在 `data/api-enc-key.json`，通过 `/api` 二维码下发；客户端带 `x-enc: v1` 即启用，未带仍走明文。SSE、媒体流与导出/备份附件不加密。轮换密钥后，旧密钥的写请求会收到明文 400，需在 App「设置」重新扫码。
+`API_ENCRYPTION=1` 时，请求/响应体使用 AES-256-GCM 加密。配对密钥保存在 `data/api-enc-key.json`，通过 `/api` 二维码下发；客户端带 `x-enc: v1` 即启用，未带仍走明文（账号密码读写等敏感接口未满足加密通道条件时直接返回 403）。SSE、媒体流与导出/备份附件不加密。轮换密钥后，旧密钥的写请求会收到明文 400，需在 App「设置」重新扫码；Android 客户端对敏感接口与 AEAD 解密失败绝不静默降级为明文重试。
 
 | 端点 | 说明 |
 | --- | --- |
-| `GET /health` | 存活检查：版本、当前引擎、时区 |
+| `GET /health` | 存活检查：版本、PID、运行时长、当前引擎、时区、是否启用加密与当前 release 信息 |
 | `GET /info` | 会话与配对信息：引擎/模型、会话 ID、工作目录、当前 owner 聊天 `chatId`、用户 `userId`、API 监听地址，以及 `automation.{available,reason}` 说明提醒/定时任务有没有投递去处（绑定聊天，或仅 App 时回落到信箱）；令牌不会回传 |
 | `GET /help` | 与聊天端共享的帮助文案：`sections` 含基础菜单、完整说明与 cc-switch 指令（已去除 Markdown 标记）；`commands` 是全部命令词与说明，`aliases` 是等价写法（`tz→timezone`、`reset→new`、`svc→service`、`maintenance→ops`） |
-| `GET /session` | 当前引擎/模型/工作目录；OpenCode 额外给出 `modelRef`，CLI 只给模型名。配套 `POST /agent` 切换引擎，`POST /model` 切换模型（复位词与聊天端一致），`POST /new` 重置会话。切换或恢复模型会清空上一个模型的上下文；`POST /model`、`POST /new`、`POST /dir`、`POST /peers/follow` 在任务排队/执行时返回 409；`POST /agent` 不影响当前上下文 |
+| `GET /session` | 当前引擎/模型/工作目录；OpenCode 额外给出 `modelRef`，CLI 只给模型名。配套 `POST /agent` 切换引擎，`POST /model` 切换模型（复位词与聊天端一致），`POST /new` 重置会话（并归档旧会话、清除审批会话授权）。切换或恢复模型会清空上一个模型的上下文；`POST /model`、`POST /new`、`POST /dir`、`POST /peers/follow`、`POST /sync/handoff` 在任务排队/执行时返回 409；`POST /agent` 不影响当前上下文 |
+| `GET /sessions` · `PUT /sessions/:id` · `POST /sessions/:id/resume` · `DELETE /sessions/:id` | 历史会话归档：`GET` 列出归档与当前会话；`PUT` 重命名或置顶（`{title?, pinned?}`）；`POST .../resume` 切回并自动归档当前会话（忙碌时 409）；`DELETE` 删除归档（OpenCode 会同步清理服务端会话） |
 | `GET /peers` · `POST /peers/follow {scope}` | 列出 App 与当前 owner 聊天（Telegram 或飞书）的引擎/模型/目录及用量；不返回内部会话键或聊天正文，也无法读取聊天端的队列深度。`follow` 只让 App 单向对齐该会话，不会反向修改聊天端设置 |
+| `GET /sync/messages?scope=&limit=` · `POST /sync/handoff {scope}` | 跨端对话同步与一键接管：`GET` 拉取指定端最近对话记录（默认 60 条、上限 80 条）；`POST` 把 Telegram/飞书对端的引擎、模型、工作目录、底层会话 ID 与近期对话记录同步接管到 App 端继续对话（任务忙碌时返回 409） |
+| `GET /diff` · `POST /undo` · `POST /commit {message}` | 工作区代码改动面板：`GET /diff` 返回当前工作目录的变更汇总、文件级 Patch 与可撤销历史栈；`POST /undo` 撤销最近一步任务改动（人工二次改动时拒绝覆盖）；`POST /commit` 暂存并提交改动（失败时自动取消暂存）。`undo` 与 `commit` 在任务忙碌时返回 409 |
+| `GET /approvals` · `PUT /approvals/mode {mode}` · `POST /approvals/:id/decide {decision}` | 高危操作审批中心：`GET` 返回当前模式（`auto`/`strict`/`off`）与待审批列表；`PUT` 切换防护模式并持久化至 `data/approvals.json`；`POST .../decide` 下发 `once` / `always` / `reject` 决定 |
+| `GET/POST /hooks` · `POST /hooks/:id/toggle\|test\|trigger` · `DELETE /hooks/:id` | 入站 Webhook 事件触发器：Bearer 接口管理钩子、切换启停与模拟触发；`POST /hooks/:id/trigger` 免 Bearer Token，使用 `X-Webhook-Secret` 或 `X-Hub-Signature-256` 验签、限制请求体 256KB、单钩子串行队列上限 8（超限 429），受理后返回 202 并在后台由 AI 处理 |
 | `POST /task` | 提交任务 `{text, engine?, model?, attachments?}`；JSON 请求中的附件为 `{name, mime, data(base64)}` 数组，也可用 `multipart/form-data` 的 `text`、`engine?`、`model?` 与 `file0…file3` 字段流式上传，最多 4 个，默认不限制单文件字节数，文本内联、图片/音频/视频/PDF 按模型能力直连；`text` 可为空但需带附件（服务端按类型补默认指令）；`engine`/`model` 只作用于本条任务，不改动会话默认，`model` 在提交时按该引擎解析（OpenCode 走模型注册表、CLI 走引擎模型表），无法识别直接返回 400 而不入队；队列与 Telegram 同深度（最多 4 条待处理，超出返回 409「待处理消息过多…」）；返回 202 与 taskId |
 | `GET /task/:id` · `GET /tasks?limit=` | 轮询任务状态（queued/running/done/failed/cancelled）与结果；完成时 `reply` 已剔除媒体指令，`media[]` 给出回复附件元数据（kind/label/name/size/remote）；`GET /tasks` 按时间倒序返回内存里保留的任务记录（默认 50 条、上限 200，含已结束的任务，`limit` 非法时回落到默认而不是空列表），App 的「最近任务」就靠它拿到可重试的旧任务 ID；`POST /stop` 停止全部 |
 | `POST /task/:id/stop` · `GET /queue` · `POST /queue/clear` | 停止单个任务（排队中直接丢弃、执行中中止）；查看当前排队/执行中的任务；一键清空排队（仅取消 queued，不影响执行中的任务） |
-| `GET /task/:id/events` | SSE 事件流：实时推送任务进度行与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
-| `POST /task/:id/retry` | 重放已结束的任务：服务端用自己的记录复原原始文本、引擎、临时模型与附件，返回 202 与新任务（`retriedFrom` 为旧 ID）。排队/执行中返回 409（请先停止），已被清理或不属于本会话返回 404。App 的「重试」按钮与 Telegram `/retry` 走同一条路径，不再从本地聊天记录拼文本 |
-| `GET /task/:id/media/:index` | 下载回复中的第 `index` 个媒体（任务视图 `media[]` 给出 kind/label/name/size/remote）；本地文件限 `data/outbox`，远程链接沿用与 Telegram 相同的 SSRF/代理防护 |
+| `GET /task/:id/events` | SSE 事件流：实时推送任务进度行、CLI 实时流式草稿（`partial`）与终态快照（250ms 节流、15s 心跳、终态自动关闭）；App 优先走流式，断流自动回退 1.5s 轮询 |
+| `POST /task/:id/retry` | 重放已结束的任务：服务端用自己的记录复原原始文本、引擎、临时模型与附件，返回 202 与新任务（`retriedFrom` 为旧 ID）。排队/执行中返回 409（请先停止，队列满 409 不会误删原任务收件附件），已被清理或不属于本会话返回 404。App 的「重试」按钮与 Telegram `/retry` 走同一条路径，不再从本地聊天记录拼文本 |
+| `POST /task/:id/secret` · `GET/DELETE /tasks/secrets` | 任务安全输入密钥：`POST` 为 AI 发起的 `[[secret: NAME \| 用途]]` 请求提交敏感值（AES-256-GCM 加密入库，仅在任务期间挂载为 `0600` 文件与 CLI 环境变量，绝不进入模型上下文）；`GET`/`DELETE /tasks/secrets` 查看或清空当前会话已存密钥 |
+| `GET /task/:id/media/:index` | 下载回复中的第 `index` 个媒体（任务视图 `media[]` 给出 kind/label/name/size/remote）；本地文件限 `data/outbox`，远程链接沿用与 Telegram 相同的 SSRF/代理防护；响应附带 `Content-Security-Policy: sandbox`、`X-Content-Type-Options: nosniff`，SVG 等可执行脚本类型强制按附件下载 |
 | `GET/POST /dir` | 查看 CLI 工作目录；`{dir:"/path"}` 切换（支持 `~` 与相对路径），`{reset:true}` 恢复默认；切换会重置 CLI 会话。`GET /dir/browse?path=` 列出该层的子目录供 App 的目录选择器使用：只回目录（隐藏项与文件不列，软链接只有指向真实目录才列出，悬空链接丢弃），名称按不区分大小写排序、最多 200 条并标 `truncated`，回 `{path, parent, home, cwd, defaultWorkDir, sessionDir, dirs:[{name,path}], truncated}`；路径走与 `POST /dir` 同一个解析器（`~`、相对路径、控制字符/超长/文件系统根目录的拒绝完全一致），非目录 400、无权限 409、`POST /dir/browse` 405、其它 `/dir/<子路径>` 404。它只读取，绝不改动会话（不会写 `dir`，也不会重置 CLI 上下文） |
 | `GET/POST /timezone` | 查看当前时区；`{timezone:"Asia/Shanghai"}` 切换（校验 IANA 名称，写入 `.env` 并立即生效） |
 | `GET/POST /proxy` · `POST /proxy/:id/use\|test` · `POST /proxy/off` · `DELETE /proxy/:id` | 网络代理：列表（地址已脱敏）、添加（先测试连通性）、启用/停用、单条测试与删除 |
 | `GET/POST /aliases` · `DELETE /aliases/:name` | 快捷指令：连接 Telegram/飞书时与所有者会话共享同一份列表，仅安卓端时保存在 App 会话；提交任务时 `/名称 ...` 会先展开（最多 3 层） |
-| `GET/POST /models/custom` | OpenCode 自定义模型：`POST` 可带 `provider:{baseURL,apiKey?}`，provider 不存在时写入 `opencode.json`（缺 baseURL 则只记录模型）|
-| `GET/POST /accounts` · `PATCH /accounts/:id` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回，客户端不缓存 |
+| `GET/POST /accounts` · `PATCH /accounts/:id` · `POST /accounts/:id/reveal` · `DELETE /accounts/:id` | 账号库：与 `/account` 共用同一份加密存储；列表只返回 `hasPassword`，明文密码仅由 `reveal` 按需返回（需满足加密通道校验），客户端不缓存 |
 | `GET/POST /access` · `DELETE /access/:id` | 访问白名单：查看/添加/移除，写入 `.env` 并立即生效；与 `/access` 共用防锁死校验（不能移除自己、不能清空） |
-| `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
+| `GET/POST /models/custom` · `DELETE /models/custom/:key?force=1` | 自定义 OpenCode 模型：列表（含 Agent 绑定）、添加（简称 + `provider/modelID` + 可选 `label`/`desc`/`attachment`/`contextWindow`/`outputLimit`，后两项须为 1–1000000000 的整数否则 400；还可带 `provider:{baseURL,apiKey?}`，provider 不存在时写入 `opencode.json`；能力写没写进 `opencode.json` 都写在 `message` 里，与 Telegram `/cc model add --attachment/--context/--output` 同一条句式）、删除（仍被引用时返回 409，`force=1` 强制并重置相关会话） |
 | `POST /models/assign` | 为 Agent 绑定模型（等同于 `/cc model assign`）：body `{agent, model}`，`agent=self` 且当前引擎为 opencode 时同步切换 App 会话 |
 | `GET /cc` | cc-switch 状态：是否安装、版本、应用、Provider 列表与当前项（与 `/cc` 面板一致） |
 | `POST /cc/use` · `POST /cc/test` | 切换 Provider（body `{id}`）与测速（省略 `id` 时测当前项）；同一时间只允许一个 cc-switch 变更操作 |
@@ -613,30 +626,31 @@ npm run release:android -- --apk /path/to/agent-bot-v1.1.1.apk \
 | `GET /cc/sessions?q=` · `POST /cc/deeplink` | 对应 `/cc sessions search`（关键词上限 128 字、不得以 `-` 开头或含控制字符，90 秒超时）与 `/cc deeplink`：仅接受 `ccswitch://v1/import?...`（上限 8192 字）、需 `confirm: true`，响应不回显链接本身 |
 | `GET /config` · `PUT /config/:key` · `DELETE /config/:key` | `.env` 配置项：查看（密钥值不下发）、修改、删除；仅允许规则内的键，两个渠道的白名单键仍须走 `/access`，`REMINDER_TIMEZONE` 立即生效 |
 | `GET /agents` · `GET /models` | 引擎列表（含安装状态 / 是否 Bot 托管 / 可安装性，并带 `aliases`、`bin`、`sessionMode`、`supportsModel`，客户端可用与 Telegram 相同的别名输入命中同一引擎）与模型列表。引擎列表第一项是内置的 `opencode`（`installed: true`，不可安装/更新/卸载），与 `POST /agent` 可接受的取值一致，客户端因此总能切回内置引擎；`GET /models?engine=<id>` 由已安装 CLI 实时查询当前账号可用的模型（供面板与单条临时指定使用，未知引擎返回 400），`?refresh=1` 跳过 60 秒缓存；响应带 `models`、`modelHint`、`source`（`probe` / `configured` / `none`）与 `checkedAt`。内置 Agent 不携带任何静态模型表，查询失败就返回空列表与原因，不会用过期列表兜底；没有列表命令的 CLI 仍可直接传模型 ID |
-| `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Bot 托管的 Agent CLI（npm/pip 方式）。已安装不可重复安装、非托管不可更新/卸载、当前引擎不可卸载；同一时间只允许一个操作 |
+| `POST /agents/:id/install\|update\|uninstall` | 安装、更新或卸载 Agent CLI（npm/pip 方式）。已安装不可重复安装、当前引擎不可卸载；同一时间只允许一个操作。非 Bot 托管的全局安装 CLI 也支持卸载，并在操作前提示将执行的包管理器卸载命令 |
 | `GET /ops/diag` · `GET /ops/logs?source=bot\|opencode&lines=N` | 运维诊断（版本、Git、OpenCode 可达性、磁盘/内存、日志大小）与日志尾部（10–400 行，自动脱敏） |
 | `GET /ops/check-update` | 检查更新（干跑）：拉取远端并列出本地落后的提交，不改动工作区 |
 | `GET /ops/check-update?async=1` · `GET /ops/actions/:id` | 长任务版本：立即返回 `{job:{id,state}}`（202），随后轮询任务结果。公网反向代理常在 20–30 秒断开同步请求，App 用这一对接口取回检查与构建结果；`GET /ops/actions/latest?label=<action>` 可在首个响应丢失后重连 |
-| `GET /ops/backup` | 数据备份：把 `data/*.json` 状态打包成 tar.gz 附件返回（不含配对令牌，`data/backups/` 同步留档最近 5 份）；聊天端的 `/ops` 面板也可发送同一份备份。**恢复只在终端做**：`npm run backup:restore -- --list` 列出备份，`npm run backup:restore -- --file backup-YYYYMMDD-HHMMSSmmm.tar.gz` 恢复；恢复前会自动把当前 JSON 快照到 `data/backups/pre-restore-<时间>/`，且拒绝含路径条目的压缩包 |
+| `GET /ops/backup` | 数据备份：把 `data/*.json` 状态与 `data/accounts.key` 打包成 tar.gz 附件返回（不含 `api-token.json` 与 `api-enc-key.json`，`data/backups/` 同步留档最近 5 份；因含账号库密钥，请妥善保管）；聊天端的 `/ops` 面板也可发送同一份备份。**恢复只在终端做**：`npm run backup:restore -- --list` 列出备份，`npm run backup:restore -- --file backup-YYYYMMDD-HHMMSSmmm.tar.gz` 恢复；恢复前会自动把当前 JSON 快照到 `data/backups/pre-restore-<时间>/`，且拒绝含路径条目的压缩包 |
 | `GET /ops/release` | 轻量版本卡：current/pending/previous release、stable/beta 通道、最近更新与启动自检；App 轮询它而不触发完整诊断探针 |
-| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（npm run check）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏。加 `?async=1` 时立即返回 `{job:{id,state}}`，再用 `GET /ops/actions/:id` 轮询，适合会切断长请求的隧道；不带该参数时保持原来的同步响应 |
+| `POST /ops/check` · `POST /ops/update` · `POST /ops/restart` · `POST /ops/rollback` · `POST /ops/cancel-pending` | 运行检查（`npm run check`）、隔离构建并留下 pending release、重启到 current/pending、回滚到上一版、丢弃 pending；更新/重启/回滚在任务运行中返回 `409`，操作串行且输出自动脱敏。加 `?async=1` 时立即返回 `{job:{id,state}}`，再用 `GET /ops/actions/:id` 轮询，适合会切断长请求的隧道；不带该参数时保持原来的同步响应 |
 | `GET /ops/service` · `POST /ops/service/start\|stop\|restart` | OpenCode 服务状态与启停/重启（只管理 Bot 自己启动的进程） |
 | `POST /ops/cc` · `POST /ops/cc-update` | 安装 / 更新 cc-switch 二进制（较久，输出脱敏） |
 | `GET /android/release` · `GET /android/release/apk` | App 更新清单与经 Bearer 鉴权的 APK 原始字节；清单包含版本、大小、SHA-256 与说明，APK 下载不套消息级加密 |
 | `GET /history?limit=` · `DELETE /history` | 任务历史：`limit`（1–50）取最近 N 条，响应同时返回服务端保留的 `total`（最多 50 条），供 App 显示「已显示 N / 共 M 条」 |
 | `GET /export?format=markdown\|json` | 下载任务历史文档（markdown/JSON，附件形式返回） |
-| `GET /usage` | 用量统计与近 7 天趋势 |
-| `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
+| `GET /usage` | 用量统计（含 Token 与估算费用）及近 7 天趋势 |
+| `GET/POST /budget` | 每日/每月费用预算：`GET` 返回当前限额、当日/当月消耗与告警状态；`POST` 更新 `{dailyUsd?, monthlyUsd?}`（设为 `0` 持久化关闭） |
+| `GET /usage/report` | 全局每日报告：跨全部聊天聚合的当日汇总（总数/成功/失败/取消/平均耗时/Token 与费用）、来源分布（`byChat[].source` 为展示名）、近 7 天趋势与渲染好的推送文本 `text`；与 `USAGE_DAILY_REPORT` 定时推送共用同一份数据 |
 | `GET/POST /reminders` · `DELETE /reminders/:id` · `POST /reminders/:id/snooze {minutes}` | 提醒管理（触发时投递到当前 owner 聊天；没有聊天但开启了 API 时改写入 App 信箱 `data/app-notices.json` 并返回 `200`）；`snooze` 延后一次性提醒（1–10080 分钟），返回更新后的记录 |
-| `GET/POST /settings` | 新会话的默认引擎：`{defaultEngine}`（`null` 表示恢复「第一个已安装」）；响应带 `effective`，即未指定时会真正使用的引擎 |
+| `GET/POST /settings` | 持久化设置：`{defaultEngine?, opencodeUrl?, notifyChatOnAppTask?}`（`defaultEngine`/`opencodeUrl` 传 `null` 恢复默认；响应附带 `effective` 与 `opencodeUrlEffective` 当前生效值，修改 `opencodeUrl` 需重启生效；开启 `notifyChatOnAppTask` 后 App 任务完成会自动同步摘要到配对聊天） |
 | `GET/POST/DELETE /models/provider?engine=` | CLI 引擎的第三方中转站：`{baseURL,apiKey?}` 存进 `data/agent-providers.json`，Bot 启动该引擎时按引擎注入环境变量（codex/qoder → `OPENAI_BASE_URL`/`OPENAI_API_KEY`，claude → `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`，gemini → `GOOGLE_GEMINI_BASE_URL`/`GEMINI_API_KEY`）；`DELETE` 恢复官方端点；apiKey 用 `data/accounts.key` 加密后存 `secret` 字段，备份里没有明文密钥 |
-| `POST /models/test` | 探测 `{baseURL}/models`：`{baseURL,apiKey?,model?}` → `{ok,message,models[]}`；服务只有 chat/completions 时报告「可访问但无法列模型」 |
+| `POST /models/test` | 探测 `{baseURL}/models`：`{baseURL,apiKey?,model?}` → `{ok,message,models[]}`；默认拒绝指向私网/回环地址（SSRF 防护，可用 `MEDIA_ALLOW_PRIVATE_URLS=1` 在本地调试时放开），服务只有 chat/completions 时报告「可访问但无法列模型」 |
 | `GET/POST/DELETE /models/agent?engine=` | 为某个 CLI 引擎增删自定义模型 `{value,label,baseURL?,apiKey?}`；带 baseURL 的模型在运行时用它自己的中转站（apiKey 加密存 `secret`），没带的回落到引擎级配置 |
-| `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果与用量报告（`kind` 分别为 `reminder`/`schedule`/`report`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |
-| `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间）。没有聊天推送目标时同样返回 `409` |
+| `GET /notices?since=` | App 信箱：返回该时间戳之后的提醒、定时任务结果、用量报告与系统/预算/Webhook 通知（`kind` 含 `reminder`/`schedule`/`report`/`system`），App 据此只插入未展示过的条目；`since` 缺省时返回最近 100 条，App 首次只展开最近 20 条并提示剩余数量 |
+| `GET/POST /schedules` · `POST /schedules/:id/pause\|resume\|run` · `DELETE /schedules/:id` | 定时任务管理（`POST` 的 `text` 支持 `--engine/--model` 前缀指定执行目标；响应含 `target`「引擎 / 模型」；`run` 立即执行一次，不影响原定时间；无绑定聊天且启用 API 时结果写入 App 信箱） |
 | `GET /status` | 系统状态：运行时长、今日任务、OpenCode 可达性，以及队列情况（`activeTask` 为正在执行/排队中的任务快照，`tasksActive` 计数排队+执行，`tasksTotal` 是服务器仍保留、可重试的任务条数） |
 
-App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互不干扰。`GET /peers` 展示 App 与 owner 聊天的现状，App 可据此显示对端引擎/模型/目录与最近用量，并用 `POST /peers/follow` 单向跟随。
+App 的会话是独立上下文（`api:app`），与 Telegram、飞书聊天互不干扰。`GET /peers` 展示 App 与 owner 聊天的现状，App 可据此显示对端引擎/模型/目录与最近用量，并用 `POST /peers/follow` 单向跟随，或用 `POST /sync/handoff` 一键接管对端会话与近期对话记录。
 
 ## Agent CLI 适配
 
@@ -747,17 +761,21 @@ bot/
 │   ├── telegramChannel.ts Telegram/飞书渠道解析、owner 与权限判定
 │   ├── telegramReminderDelivery.ts 提醒投递与一次性延后按钮
 │   ├── telegramSupport.ts Telegram 顶部通知与时间/ID/格式化辅助
-│   ├── telegramStats.ts 使用统计、任务历史、运行状态面板
+│   ├── telegramStats.ts 使用统计、预算状态、任务历史、运行状态面板
 │   ├── telegramPersonalPanels.ts 代理、队列、快捷指令、提醒、定时任务、白名单、时区面板
 │   ├── telegramCorePanels.ts 欢迎页、主菜单、Agent/模型/目录/安装面板
 │   ├── telegramPersonalCommands.ts 提醒、快捷指令、定时任务命令
+│   ├── telegramWorkspaceCommands.ts `/diff`、`/undo`、`/commit` 工作区改动命令与确认流
+│   ├── telegramApprovalCommands.ts `/approvals` 高危操作审批卡片与模式切换
+│   ├── telegramWebhookCommands.ts `/hooks` 入站 Webhook 事件触发器管理命令
+│   ├── telegramSecretInput.ts 安全输入卡片与 `[[secret:...]]` 任务临时密钥交互
 │   ├── telegramModelCommands.ts 模型切换、恢复默认与 CLI 工作目录命令
 │   ├── telegramOpsCommands.ts 诊断、日志、检查/更新、备份、OpenCode 服务、配置项与重启
 │   ├── telegramAgentCommands.ts Agent 引擎切换、CLI 安装/更新/卸载与确认流
 │   ├── telegramProxyCommands.ts 代理添加/启用/测试/删除
 │   ├── telegramAdminCommands.ts 白名单、时区命令与访问校验
 │   ├── telegramAttachments.ts 入站附件收集、下载与模型输入构建
-│   ├── telegramInfoCommands.ts 队列、配对信息、导出、状态与统计
+│   ├── telegramInfoCommands.ts 队列、配对信息、导出、状态、统计与预算命令
 │   ├── telegramMedia.ts 出站媒体、远程媒体下载与大小限制
 │   ├── feishu.ts     飞书消息/卡片事件转换为共享更新并分发命令
 │   ├── feishuRuntime.ts 飞书客户端、长连接、回调与共享桥的装配
@@ -767,26 +785,43 @@ bot/
 │   ├── feishuAttachments.ts 飞书图片/文件/音频下载与消息适配
 │   ├── feishuIdentity.ts 飞书 open_id/chat_id 与内部数字 ID 映射
 │   ├── feishuTypes.ts 飞书 API 与资源类型
-│   ├── api.ts        HTTP API `/api/v1`：任务、配置、运维与鉴权
+│   ├── api.ts        HTTP API `/api/v1`：任务、配置、运维、加密通道与鉴权
 │   ├── apiCore.ts    API 基础类型、错误与路径前缀
 │   ├── apiTaskTypes.ts 任务视图/附件类型
-│   ├── apiTasks.ts   任务队列、SSE、重试、停止与附件校验
+│   ├── apiTasks.ts   任务队列、SSE、流式草稿、重试、停止与附件校验
 │   ├── apiPersonal.ts 个人数据路由：提醒、定时、目录、时区、白名单
-│   ├── apiTaskRoutes.ts API 任务/队列/停止路由
+│   ├── apiTaskRoutes.ts API 任务/队列/停止/临时密钥路由
+│   ├── apiSessions.ts 历史会话归档、重命名、置顶与恢复路由
+│   ├── apiSync.ts    跨端对话记录同步与会话接管路由
+│   ├── apiWorkspace.ts 工作区 Diff、撤销与提交路由
+│   ├── apiApprovals.ts 高危操作审批模式与审批决策路由
+│   ├── apiWebhooks.ts 入站 Webhook 验签触发与管理路由
+│   ├── apiBudget.ts  每日/每月费用预算读写路由
+│   ├── apiAccounts.ts 账号库、App 信箱与持久化设置路由
 │   ├── apiOpsRoutes.ts API 运维诊断/日志/备份/服务路由
-│   ├── apiModelRoutes.ts API 自定义模型查看/添加/删除路由
-│   ├── apiCc.ts      cc-switch 路由
-│   ├── apiCcSpecs.ts cc-switch 只读视图与危险操作白名单
-│   ├── apiRateLimit.ts 失败 Bearer 认证的按地址限流（服务器先鉴权再查预算，反向代理后拿对令牌的 App 不会被别人的失败拖住）
+│   ├── apiModelRoutes.ts API 自定义模型查看/添加/删除/探活路由
+│   ├── apiCc.ts / apiCcSpecs.ts cc-switch 路由、只读视图与危险操作白名单
+│   ├── apiMagpie.ts / apiMagpieSpecs.ts magpie 网关路由与命令白名单
+│   ├── apiRateLimit.ts 失败 Bearer / Webhook 鉴权的按地址限流
+│   ├── writeLock.ts  异步写操作并发互斥锁（fail-fast）
 │   ├── models.ts     模型表、别名解析与自定义模型热加载
 │   ├── modelAdmin.ts 自定义模型注册、opencode.json 同步、agent 模型绑定
 │   ├── model-cli.ts  `npm run models` 命令行入口
 │   ├── ccswitch.ts   cc-switch CLI 封装：Provider/测速/MCP/提示词/环境/代理
+│   ├── magpie.ts     magpie CLI 封装与本地网关健康检查
 │   ├── progress.ts   进度卡片
 │   ├── opencode.ts   opencode HTTP/SSE 客户端
 │   ├── agentCli.ts   通用 Agent CLI 适配层：PATH 检测、子进程、会话与输出解析
-│   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Antigravity…）
+│   ├── agentCliStream.ts CLI 实时流式草稿解析（JSON/文本流增量提取）
+│   ├── agentProfiles.ts 内置 Agent CLI 档案（Claude/Codex/Gemini/Qoder/Cursor…）
 │   ├── agentInstaller.ts npm/pip 安装、更新、卸载与 Bot 托管清单
+│   ├── workspaceChanges.ts 基于 git stash create 的改动追踪、Diff 摘要、多步撤销与提交
+│   ├── approvals.ts  高危命令规则评估、审批模式持久化与 5 分钟超时挂起控制
+│   ├── webhooks.ts   Webhook 触发器存储、HMAC/密钥验签与提示词模板渲染
+│   ├── chatTranscript.ts 跨端共享对话记录存储
+│   ├── sessionArchive.ts 历史会话归档与恢复
+│   ├── accounts.ts / secretKey.ts / secretVault.ts 加密账号库、数据目录主密钥与任务临时密钥库
+│   ├── appNotices.ts App 信箱通知存储
 │   ├── ops.ts        运维：诊断、日志、重启、OpenCode 服务与 .env 编辑
 │   ├── releaseManager.ts 隔离构建、release 存储/state、激活与回滚
 │   ├── updateOrchestrator.ts 备份 → 门禁构建 → pending → 取消/回滚
@@ -805,14 +840,15 @@ bot/
 │   ├── attachments.ts 入站附件保存、文本内联、inbox 清理
 │   ├── reminders.ts  定时提醒：解析、重复调度、持久化、轮询投递
 │   ├── scheduler.ts  定时 AI 任务：解析、引擎/模型快照、持久化、执行与重复调度
-│   ├── usage.ts      使用统计：任务量、成功率、耗时与每日聚合
+│   ├── usage.ts / tokenUsage.ts / usageBudget.ts 使用统计、Token/费用估算与每日/每月预算告警
 │   ├── history.ts    任务历史：每聊天的最近执行记录（提示词摘要与结果）
 │   ├── proxy.ts      HTTP(S)/SOCKS 代理：持久化、连通性测试、dispatcher
 │   ├── messages.ts   长消息切分
 │   ├── store.ts      会话持久化
 │   └── logger.ts
+├── android/          原生安卓客户端（Kotlin + Jetpack Compose）
 ├── docs/ARCHITECTURE.md 分层、模块边界与新增能力放置规则
-├── tests/            单元测试（node:test）
+├── tests/            单元测试与集成回归测试（node:test）
 ├── install.sh        安装脚本：检查环境、克隆/更新、安装依赖、构建、准备 .env
 ├── deploy/           systemd 单元示例与安装器生成的单元（deploy/generated/ 已 gitignore）
 ├── scripts/          邮件、X、搜图、重启、release 应用/健康检查、cc-switch 安装、安卓发布与源码检查脚本
@@ -869,10 +905,16 @@ FEISHU_CALLBACK_VERIFICATION_TOKEN=开放平台生成的VerificationToken
 - `FEISHU_ALLOW_ALL_USERS`：显式设为 `1` 才允许所有飞书用户使用；生产环境不建议开启。
 - `FEISHU_CALLBACK_ENABLED`：设为 `1` 启用飞书卡片回调 HTTP 服务，默认 `0`。不启用时普通消息、命令和附件仍可用，但面板按钮不会响应；启用后需在开放平台配置回调地址。
 - `FEISHU_CALLBACK_BIND` / `FEISHU_CALLBACK_PORT` / `FEISHU_CALLBACK_PATH`：回调服务的监听地址、端口与路径，默认 `127.0.0.1:3081/feishu/card`。放在 nginx/Caddy 后时通常保持回环监听，仅暴露反向代理路径。
-- `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY`：开放平台回调配置中的验签凭据，至少配置一项；属于密钥，不能经 `/env` 查看。
+- `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY`：开放平台回调配置中的验签凭据，至少配置一项；属于密钥，不能经 `/env` 查看。配置了 `ENCRYPT_KEY` 时会强制要求回调载荷加密并校验签名。
+- `OPENCODE_ON_DEMAND` / `OPENCODE_IDLE_STOP_MS`：OpenCode 按需启动开关（默认 `1`，设为 `0` 保持常驻）与空闲自动停止时长（默认 `600000` 即 10 分钟，设为 `0` 启动后不自动停止）。
+- `DEFAULT_ENGINE`：新会话默认使用的引擎 ID（如 `opencode`、`claude`、`codex`）；优先级低于 App 保存的设置，高于「第一个已安装引擎」自动回落。
+- `AGENT_CLI_SAFE_MODE`：设为 `1` 时，从内置 Agent CLI 的启动参数中移除 `--dangerously-*` / `--approval-mode yolo` 等跳过权限确认的标志，改为人工确认模式（注意：无人值守场景可能等待交互而卡住）。
+- `APPROVAL_MODE`：高危操作审批中心默认模式（`auto` / `strict` / `off`，默认 `auto`）；聊天中发送 `/approvals` 或在 App 切换后会持久化写入 `data/approvals.json`。
+- `USAGE_DAILY_BUDGET_USD` / `USAGE_MONTHLY_BUDGET_USD`：每日/每月估算费用预算上限（美元，默认关闭）；达到 80% 与 100% 时各推送一次告警。通过 `/budget` 或 App 修改后持久化在 `data/budget.json`（显式设为 `0` 会持久化关闭，重启不会反弹回环境变量值）。
+- `ALLOW_PLAINTEXT_SECRETS`：默认 `0`，通过 HTTP API 保存或查看账号库密码时必须走 `API_ENCRYPTION=1` 或 `https://` 公网地址；仅在受信任局域网调试时显式设为 `1` 放开明文传输。
 - `TASK_TIMEOUT_MS` / `TASK_MAX_TIMEOUT_MS`：无活动超时默认 10 分钟，所有引擎共用；任务总耗时兜底默认 24 小时，设为 `0` 可关闭。OpenCode 会轮询 `/session/status`，会话仍在 `busy`/`retry` 时视为活跃，即使暂时没有新的输出事件也不会误判超时。
 - `MAX_MEDIA_MB` / `MAX_INPUT_MB`：前者限制出站媒体下载/发送，默认 20MB；后者是**项目级**入站下载上限，默认 `0` 表示关闭（可设 `0–100000`）。项目不再按 10MB/15MB 或附件总字节数拒绝单视频、图片和普通文件，单条消息只限制最多 4 个附件。实际平台边界仍然存在：Telegram Bot API 的 `getFile` 约 20MB；飞书图片超过约 10MB 会自动改按文件发送，文件超过约 30MB 无法发送；OpenCode 对单个直连附件有约 20MB 限制，超过时文件完整落盘并以绝对路径交给模型。
-- `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接访问本机/内网地址；仅在本地调试时设为 `1`。
+- `MEDIA_ALLOW_PRIVATE_URLS`：默认 `0`，拒绝远程媒体链接与 `/models/test` 探测请求访问本机/内网地址；仅在本地调试时设为 `1`。
 - `REMINDER_TIMEZONE`：提醒时间解析所用 IANA 时区，默认 `Asia/Shanghai`；无效时拒绝启动。
 - `STT_BASE_URL` / `STT_API_KEY` / `STT_MODEL` / `STT_LANGUAGE`：可选的语音转写服务（OpenAI 兼容 `/audio/transcriptions`，如 OpenAI、Groq 或本地 whisper）。`STT_BASE_URL` 留空关闭；配置后，当前模型不支持音频输入时，发来的语音自动转写为文字交给模型（`STT_API_KEY` 属密钥，只能写 `.env`，不能经 `/env` 查看或修改）。
 - `USAGE_DAILY_REPORT` / `USAGE_DAILY_REPORT_TIME`：每日用量报告开关（默认 `0`）与推送时间（默认 `21:00`，24 小时制，按 `REMINDER_TIMEZONE` 解析）；到点向白名单第一位用户推送一次，重启当天会补发、不会重复发。也可用 `/env` 修改。
@@ -920,7 +962,7 @@ npm run bot -- logs bot 100     # 查看最近 100 行日志
 
 ### Docker 部署（可选）
 
-仓库提供 Dockerfile 与 docker-compose.yml：容器内同时运行 opencode serve 与 Bot，`data/` 与 `.env` 挂载到宿主机持久化。
+仓库提供多阶段构建 `Dockerfile` 与 `docker-compose.yml`：构建层先安装生产依赖（`npm ci --omit=dev`）再复制编译产物以充分复用构建缓存；内置 `HEALTHCHECK`（每 30 秒调用 `scripts/release-health.mjs --live` 探活）；容器内同时运行 `opencode serve` 与 Bot，`data/` 与 `.env` 挂载到宿主机持久化。
 
 ```bash
 cp .env.example .env && vim .env   # 先填好至少一个控制端的凭据与白名单（容器内为非交互环境，不会进入连接向导）
@@ -953,12 +995,12 @@ npm run clients    # 只管理控制端，适合安装完成后添加其他控�
 
 > 仅安卓 App 也能启动并使用聊天、附件、引擎/模型、目录、历史、运维、快捷指令、提醒与定时任务。快捷指令在连接 Telegram 或飞书时与所有者会话共享，仅安卓端时保存在本 App 会话中。没有绑定聊天时，提醒与定时任务的结果写入 App 信箱（`data/app-notices.json`），App 打开时通过 `GET /notices` 取回并插入会话——**这是在 App 里补看，不是锁屏推送**；需要到点就在手机上弹通知，仍需配置 Telegram 或飞书（App 没有常驻进程，Android 会杀后台并延迟闹钟）。
 
-启动时会自动扫描 `PATH` 并打印 `agent CLI detection: n/14 installed (...)`；首次在聊天发送 `/start` 或 `/agents` 即可查看检测结果并安装新 CLI。
+启动时会自动扫描 `PATH` 并打印 `agent CLI detection: n/10 installed (...)`；首次在聊天发送 `/start` 或 `/agents` 即可查看检测结果并安装新 CLI。
 
 `npm run bot -- start` / `restart` 会在启动后检查本次启动自检与健康状态。Bot 通过 `BOT_LOG_FILE` 获得日志路径：进程每分钟检查一次，超过 10MB 时复制并清空（copytruncate），长期运行也不会无限增长；轮转文件只保留最近 7 个。
 重复启动会被 `data/bot.lock` 拒绝，提示已有实例的 PID；锁文件同时记录进程启动时间，PID 被系统复用后不会误判为仍在运行。
 
-开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + lint + 文件体积门禁 + 无用文件/依赖检查 + 类型检查 + 测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
+开发模式：`npm run dev`；完整检查：`npm run check`（安卓源码静态检查 + 文档生成校验 `check:docs` + lint + 文件体积门禁 + 无用文件/依赖检查 `knip` + 主代码与测试代码类型检查 `typecheck` / `typecheck:tests` + 单元测试 + 构建）。其中 `npm run check:android` 在没有 Android SDK 的环境里替编译器兜底：确认构建应用所必需的 Kotlin 源文件仍在仓库里、没有被 `.gitignore` 规则吞掉，并逐个检查括号与字符串/注释是否闭合。
 
 ### systemd 常驻（可选）
 
@@ -1093,7 +1135,7 @@ npm run bot -- start
 
 Telegram/飞书凭据、API Key、密码与账号凭据等永远不会在 `/env`、`/logs`、`/diag` 中显示，也不能通过聊天修改。
 
-**运行检查**：`/ops` 中的「运行检查」执行 `npm run check`（android 静态检查 + lint + knip + 类型检查 + 单元测试 + 构建），适合在修改自定义 agent 档案或模型配置后验证。所有运维操作均为固定命令，不接受任意 shell 输入，并有并发锁避免同时执行多个重任务。
+**运行检查**：`/ops` 中的「运行检查」执行 `npm run check`（安卓源码静态检查 + 文档校验 `check:docs` + lint + 文件体积门禁 + knip + 主代码与测试类型检查 + 单元测试 + 构建），适合在修改自定义 agent 档案或模型配置后验证。所有运维操作均为固定命令，不接受任意 shell 输入，并有并发锁避免同时执行多个重任务。
 
 **一次性确认**：更新项目、重启 Bot、停止/重启 OpenCode、cc-switch 安装/更新、`/agents` 安装/更新/卸载的确认按钮使用随机一次性令牌，点击「✅ 确认」后立即失效；「取消」按钮同样携带该令牌，点击即**撤销**这次请求（不会留下一个 5 分钟内仍可按下的确认按钮），再点确认会提示「已过期或已被使用」。超过 5 分钟未点击也会自动过期。执行前还会重新检查前置条件（是否 systemd 托管、是否有任务正在跑），因此确认时的状态比弹出提示时更新。
 
@@ -1337,16 +1379,59 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 
 同一时间只允许一个 magpie 变更操作；只读视图与命令走同一份 `src/apiMagpieSpecs.ts` 白名单，聊天端与 API 不会脱节。
 
-## 使用统计
+## 工作区改动与撤销
 
 ```text
-/usage
+/diff                    # 查看当前 Git 仓库改动汇总、文件 Patch 与撤销栈
+/undo                    # 撤销最近一次任务改动（支持重启后多步撤销）
+/commit 修复登录边界条件  # 暂存并提交当前仓库改动（需点击确认按钮）
 ```
 
-- 统计每个会话的任务总数、成功 / 失败 / 取消、成功率、平均耗时、今日任务与引擎使用次数。
+- 每次任务（OpenCode 或 Agent CLI）执行前，Bot 会通过 `git stash create` 生成无侵入工作区快照（不改动工作树、暂存区或用户的 `git stash` 列表）；任务完成后自动在回复下方附上修改文件与增删行数摘要，并将快照持久化至 `data/workspace-changes.json`（权限 `0600`）。
+- **防误删与防覆盖保护**：撤销前会校验工作区状态与任务新增文件的 SHA-256 哈希；如果用户在任务结束后手工做过二次修改，`/undo` 会拒绝覆盖并提示先处理冲突。通过 `/dir` 切换目录后，撤销栈按 Git 仓库根目录隔离。
+- **确认提交**：`/commit <说明>` 走一次性按钮确认；如果 `git commit` 因钩子失败、无改动或配置缺失而出错，Bot 会自动执行 `git reset --mixed HEAD` 取消暂存，避免留下脏暂存区。
+- 安卓端「工作区改动」页面与聊天端共用 `GET /api/v1/diff`、`POST /api/v1/undo`、`POST /api/v1/commit`。
+
+## 高危操作审批中心
+
+```text
+/approvals               # 查看当前模式与待审批卡片
+/approvals auto          # 默认：拦截不可逆删除/破坏性 Git/DDL/磁盘格式化等高危操作
+/approvals strict        # 严格：额外拦截 sudo 提权与 npm publish / kubectl delete / git push 等发布操作
+/approvals off           # 关闭高危拦截（仅建议在完全隔离的沙箱内使用）
+```
+
+- 触发拦截时，任务会暂停并在聊天端（Telegram / 飞书）或安卓 App「审批中心」弹出待审批卡片，提供三种操作：**仅本次允许（`once`）**、**本会话同类始终允许（`always`）**、**拒绝（`reject`）**。
+- 卡片包含命令风险原因与脱敏片段，单次审批超时时间为 **5 分钟**（超时自动按拒绝处理）；审批模式持久化保存在 `data/approvals.json`（可通过环境变量 `APPROVAL_MODE` 设初始值）。
+- 执行 `/new` / `/reset` 开启新会话时，本会话的「始终允许」授权会自动清空；聊天端审批按钮严格校验归属会话，防止跨聊操作。
+
+## 入站 Webhook 事件触发器
+
+```text
+/hooks                                     # 查看所有 Webhook 触发器与最近状态
+/hooks add GitHub告警 | 分析事件 {{event}} 并总结异常原因
+```
+
+- 用于将 GitHub Actions、CI/CD、监控告警等外部系统的 HTTP 推送接入 Bot，由指定引擎和模型在后台自动分析并汇报结果（配置保存在 `data/webhooks.json`，权限 `0600`，最多 30 条）。
+- **独立签名鉴权**：外部系统调用 `POST <API_PUBLIC_URL>/api/v1/hooks/<id>/trigger`，无需提供 Bot 的 Bearer Token，而是通过每条钩子独立密钥校验请求头 `X-Webhook-Secret: <secret>` 或标准 HMAC `X-Hub-Signature-256: sha256=<hex>`（与 API 共享失败限流器）。
+- **模板变量与静默过滤**：提示词支持 `{{name}}`、`{{event}}`、`{{payload}}`、`{{silentToken}}`（载荷自动脱敏，最大 256KB）；默认静默词为 `[[silent]]`，当 AI 判断事件正常并回复静默词时，只记录状态而不打扰用户。
+- **并发与背压保护**：同一钩子使用独立会话键 `hook:<id>` 并按 FIFO 串行执行，单钩子待处理队列上限为 8 条（超出返回 HTTP `429`）。异常分析结果会同时推送到 owner 聊天与 App 信箱。
+
+## 使用统计与费用预算
+
+```text
+/usage                         # 查看任务量、成功率、耗时、Token 与估算费用
+/budget                        # 查看当前每日/每月费用预算与消耗进度
+/budget 5                      # 设置每日预算 $5
+/budget month 50               # 设置每月预算 $50
+/budget off                    # 持久化关闭预算限制（重启后不回弹环境变量）
+```
+
+- 统计每个会话的任务总数、成功 / 失败 / 取消、成功率、平均耗时、输入/输出 Token、估算费用（USD）、今日任务与引擎使用次数。
 - 数据保存在 `data/usage.json`（权限 600），按 `REMINDER_TIMEZONE` 划分自然日，仅保留最近 31 个有记录的日子。
+- **费用预算与告警**：可通过环境变量 `USAGE_DAILY_BUDGET_USD` / `USAGE_MONTHLY_BUDGET_USD`、`/budget` 命令或安卓 App 设置每日/每月上限（持久化至 `data/budget.json`）。达到 **80%**（预警）与 **100%**（超额）时每个周期各向 owner 聊天与 App 信箱推送一次提醒，不会重复刷屏。
 - 超过 31 天没有任何任务的会话会在下一次任务记录时被清理（每小时最多扫描一次），`data/usage.json` 与 `data/history.json` 不会随开放白名单的使用无限增长；代价是长期沉默的会话统计与历史会从头开始。
-- 只记录任务结果与耗时，不保存提示词或回复内容。
+- 只记录任务结果、耗时与 Token/费用，不保存提示词或回复内容。
 - `/status` 也会显示今日任务数；面板与状态页均可点击「刷新」查看最新数据。
 - 面板上的「📩 每日报告」随时生成全局汇总（跨所有聊天聚合）；`USAGE_DAILY_REPORT=1` 后每天 `USAGE_DAILY_REPORT_TIME`（默认 21:00）自动向白名单第一位用户推送一份，当天只发一次（状态存于 `data/usage-report.json`，重启补发、不重复）。
 
@@ -1374,7 +1459,7 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 | 首次启动没有出现向导 | 当前不是交互式终端（systemd/CI），或已有任一可用控制端；按输出提示手动配置，或在终端运行 `npm run setup` / `npm run clients` |
 | Telegram 向导识别不到用户 ID | 确认已给 Bot 发送消息；若提示 409 Conflict，先停止其他轮询实例或移除 Webhook，再手动输入 ID |
 | 安卓 App 无法连接或二维码指向回环地址 | 设置手机可达的 `API_PUBLIC_URL`（局域网写 `http://192.168.1.10:3080`，反向代理写 `https://bot.example.com`，Instabox 用 `instabox-port publish 3080` 输出的 HTTPS 地址）；仅监听 `127.0.0.1` 或 `0.0.0.0` 无法自动推断手机该连的地址。提供公网入口时务必保持 Bearer Token 鉴权，并优先走 HTTPS / VPN / SSH 隧道 |
-| 仅安卓端时提醒或定时任务返回 409 | 这些功能需要向 Telegram 或飞书 owner 聊天推送。运行 `npm run clients` 添加聊天控制端，并与 Bot 私聊发送一次 `/start` |
+| 仅安卓端时提醒或定时任务没有手机推送 | 未绑定 Telegram / 飞书时，提醒与定时任务的结果会自动落入 App 信箱（`data/app-notices.json`），打开 App 后自动补看；若需锁屏实时推送，可运行 `npm run clients` 增配 Telegram 或飞书 |
 | 启动提示已有实例（PID） | 说明旧进程仍在运行；用 `npm run bot -- restart` 重启，或先结束该 PID（锁文件会校验 PID 启动时间，不会误杀复用 PID 的进程） |
 | 群组中发消息无响应 | 预期行为：Bot 只处理私聊 |
 | 图片/视频/语音提示不支持 | 当前模型未声明对应输入能力；换用多模态模型或在 `opencode.json` 中开启 `attachment` 并声明 `video`/`audio` 能力 |
@@ -1384,15 +1469,16 @@ MAGPIE_URL=http://127.0.0.1:3425   # 面板做健康检查用
 ## 安全说明
 
 - `.env`、`data/`、`dist/` 已在 `.gitignore` 中。
-- 首次连接向导中，Telegram Bot Token 与飞书 App Secret 只显示掩码；安卓配对所需的新 `API_TOKEN` 会在终端完整显示一次供手动填写。`.env` 原子写入且权限为 `0600`，Bot Token 与 API Token 不会进入日志或聊天消息（终端输入行仍会回显）。
-- `opencode.json` 不再包含明文密钥；密钥统一放在 `.env`。
-- 若密钥曾以明文形式存放或分享，请在供应商后台轮换 `GROK_API_KEY` / `MY_API_KEY`。
-- Agent CLI 引擎默认以各家的免确认参数运行（如 Claude Code 的 `--dangerously-skip-permissions`、Codex 的 `--dangerously-bypass-approvals-and-sandbox`），且 OpenCode agent 允许 bash/edit，请在可信环境中使用。
-- 子进程环境会先剥离 Bot 自身的访问控制变量：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOW_USERS`、`TELEGRAM_ALLOW_ALL_USERS`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOW_OPEN_IDS`、`FEISHU_ALLOW_ALL_USERS`、`OPENCODE_SERVER_USERNAME`、`OPENCODE_SERVER_PASSWORD`、`API_TOKEN`、`STT_API_KEY` 不会传给任何 Agent CLI、运维命令或安装器（否则一个被劫持的 CLI 就能以 Bot 身份操作全部白名单会话）。运行中的 Agent 仍保留自己的供应商 Key；`/agents install` 用的安装器额外剥离所有名称形似密钥的变量，因为 npm 会执行包作者写的 lifecycle 脚本。
-- `/agents install` 只执行内置白名单中的 npm/pip 包，不接受用户自定义命令；`/agents update` 只对 `data/agent-cli-installs.json` 中由 Bot 安装的包重跑同一条白名单安装命令；`/agents uninstall` 只删除由 Bot 安装的版本，不会动系统预装 CLI。
-- `/ops` 的更新、重启、服务启停、cc-switch 安装都只执行固定命令并要求确认；不接受任意 shell 输入。`/env` 只开放非密钥配置，密钥字段永远不读取、不显示、不写入。日志输出会统一去除 ANSI 并脱敏 Token、API Key、密码与 URL 凭据。发往聊天端的文本与写入日志的错误信息也会统一脱敏，其中 Telegram Bot Token 还会额外替换为 `***`。
-- 飞书回调的 `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY` 只从 `.env` 读取；未通过验签的请求返回 403，这些凭据不会出现在 `/env`、`/logs`、`/diag` 或聊天回复中。
-- 会话、用量、历史、代理这几份 JSON 数据文件都是“临时文件 + 原子重命名”写入，权限 `0600`。若启动时发现文件内容无法解析（手动改坏、旧版本残留等），Bot 会把它改名为 `<文件名>.corrupt-<时间戳>` 留作排查，再以空数据继续运行，而不是在下次保存时直接覆盖——损坏前的记录仍可从该文件恢复。
+- 首次连接向导中，Telegram Bot Token 与飞书 App Secret 只显示掩码；安卓配对所需的新 `API_TOKEN` 会在终端完整显示一次供手动填写。`.env` 原子写入且权限为 `0600`，Bot Token 与 API Token 不会进入日志或聊天消息（终端输入行仍会回显）。隔离更新构建（`ReleaseManager`）不会将 `.env` 复制进 release 暂存目录。
+- `opencode.json` 不再包含明文密钥；密钥统一放在 `.env`。若密钥曾以明文形式存放或分享，请在供应商后台轮换 `GROK_API_KEY` / `MY_API_KEY`。
+- Agent CLI 引擎默认以各家的免确认参数运行（如 Claude Code 的 `--dangerously-skip-permissions`、Codex 的 `--dangerously-bypass-approvals-and-sandbox`），且 OpenCode agent 允许 bash/edit，请在可信环境中使用；如需更保守的权限策略，可开启 `AGENT_CLI_SAFE_MODE=1`（移除跳过权限参数）并配合 `/approvals auto` 或 `/approvals strict` 高危审批拦截。
+- **子进程环境变量隔离**：启动任何 Agent CLI、运维命令、安装器或由 Bot 托管的 `opencode serve` 时，都会先剥离 Bot 自身的控制凭据（`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOW_USERS`、`TELEGRAM_ALLOW_ALL_USERS`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_ALLOW_OPEN_IDS`、`FEISHU_ALLOW_ALL_USERS`、`FEISHU_CALLBACK_VERIFICATION_TOKEN`、`FEISHU_CALLBACK_ENCRYPT_KEY`、`API_TOKEN`、`STT_API_KEY` 等；Agent CLI 还会额外剥离 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`，而 `opencode serve` 仅保留自身鉴权与模型 Provider 密钥）。`/agents install` 使用的安装器还会额外剥离所有名称形似密钥的变量，防止第三方包 lifecycle 脚本窃取凭据。
+- `/agents install` 只执行内置白名单中的 npm/pip 包，不接受用户自定义命令；`/agents update` 只对 `data/agent-cli-installs.json` 中由 Bot 安装的包重跑同一条白名单安装命令；`/agents uninstall` 卸载由 Bot 托管的 CLI 需确认，卸载非托管的 npm/pip 全局安装版本前会明确展示实际要执行的包管理器卸载命令并要求二次确认。
+- `/ops` 的更新、重启、服务启停、cc-switch 安装都只执行固定命令并要求一次性令牌确认，不接受任意 shell 输入；`/env` 只开放非密钥配置。日志、聊天输出与错误信息（含崩溃退出提示）统一去除 ANSI 并脱敏 Token、API Key、密码与 URL 凭据。
+- **SSRF 与媒体下载防护**：远程媒体下载与 `/models/test` 中转站探活默认均拒绝指向回环/私网/链路本地地址（含重定向后的每一跳，并钉死 DNS 解析结果防重绑定）；调试本地端点需显式设置 `MEDIA_ALLOW_PRIVATE_URLS=1`。`GET /api/v1/task/:id/media/:index` 统一附加 `Content-Security-Policy: sandbox` 与 `X-Content-Type-Options: nosniff`，对 SVG 等可携带脚本的内容强制按附件下载。
+- **传输加密与账号库保护**：开启 `API_ENCRYPTION=1` 时，App 与服务端使用 AES-256-GCM 加密请求/响应体，Android 客户端对敏感接口或 AEAD 校验失败绝不静默降级为明文重试；账号库密码读写与任务密钥提交需走加密通道或 `https://`（除非显式设置 `ALLOW_PLAINTEXT_SECRETS=1`）。`/ops backup` 打包的备份包含 `data/accounts.key`（以便恢复后解密已存账号与中转站密钥，但不含 `api-token.json` 与 `api-enc-key.json`），请像保管密码一样保管备份文件。
+- 飞书回调的 `FEISHU_CALLBACK_VERIFICATION_TOKEN` / `FEISHU_CALLBACK_ENCRYPT_KEY` 只从 `.env` 读取；配置了 `ENCRYPT_KEY` 时强制要求加密回调载荷并验签，未通过校验的请求返回 `403`，这些凭据不会出现在 `/env`、`/logs`、`/diag` 或聊天回复中。
+- 会话、用量、历史、代理、审批、Webhook、预算等 JSON 数据文件均采用「临时文件 + 原子重命名」写入，权限 `0600`。若启动时发现文件内容无法解析（手动改坏、旧版本残留等），Bot 会把它改名为 `<文件名>.corrupt-<时间戳>` 留作排查，再以空数据继续运行，而不是在下次保存时直接覆盖——损坏前的记录仍可从该文件恢复。
 
 ## 辅助脚本
 

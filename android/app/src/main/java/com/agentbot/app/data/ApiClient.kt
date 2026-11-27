@@ -4,6 +4,7 @@ import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -116,6 +117,13 @@ class ApiClient {
     /** The saved pairing key this server refuses because it no longer encrypts; see [executeEncryptedFallback]. */
     @Volatile
     private var refusedEncKey: String? = null
+
+    fun clearRefusedEncKey() {
+        refusedEncKey = null
+    }
+
+    fun isEncryptionRefused(encKey: String?): Boolean =
+        !encKey.isNullOrBlank() && encKey == refusedEncKey
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -231,12 +239,20 @@ class ApiClient {
         return cipher.doFinal(raw, 12, raw.size - 12).toString(Charsets.UTF_8)
     }
 
+    private fun isSensitivePath(path: String): Boolean {
+        val segments = path.split('?').first().split('/').filter { it.isNotEmpty() }
+        val first = segments.firstOrNull() ?: return false
+        if (first in setOf("accounts", "config", "proxies", "proxy", "hooks")) return true
+        if (first == "models" && segments.any { it == "provider" || it == "custom" }) return true
+        return segments.contains("secret") || segments.contains("secrets")
+    }
+
     private fun request(connection: Connection, method: String, path: String, body: JsonObject? = null): Request {
         val builder = Request.Builder()
             .url(url(connection, path))
             .header("Authorization", "Bearer ${connection.token}")
         val encKey = connection.encKey?.takeIf {
-            it.isNotBlank() && it != refusedEncKey && !encryptionSkipped(path)
+            it.isNotBlank() && (it != refusedEncKey || isSensitivePath(path)) && !encryptionSkipped(path)
         }
         if (encKey != null) {
             builder.header("x-enc", "v1")
@@ -285,11 +301,9 @@ class ApiClient {
     }
 
     /**
-     * Sends with the plaintext fallback applied: the key on this phone has stopped matching the
-     * server's — encryption switched off (`API_ENCRYPTION=0`), a reinstall that regenerated it, or
-     * simply a different one. Every way that shows up is answered the same way: drop the key for
-     * this session and repeat the call once, which happens before routing, so the retried POST
-     * cannot start a second task. Without it the App is bricked until the user think to re-scan.
+     * Falls back to plaintext only when the server explicitly reports `API_ENCRYPTION=0` on
+     * non-sensitive requests. Credential/secret endpoints and AEAD tag mismatches never downgrade
+     * silently: a tampered response or rotated key requires the user to re-pair.
      */
     private suspend fun executeEncryptedFallback(
         connection: Connection,
@@ -300,31 +314,31 @@ class ApiClient {
     ): String = try {
         execute(request(connection, method, path, body), client)
     } catch (err: EncryptionRefused) {
+        if (isSensitivePath(path)) {
+            throw ApiException(400, "服务端未启用消息加密，已拒绝自动降级明文传输敏感凭据；请开启加密或重新配对")
+        }
         refusedEncKey = err.encKey
         execute(request(connection, method, path, body), client)
     }
 
     /**
-     * The two 400s that mean *this key* is the problem: the server turned message encryption off
-     * and lectures about a request header the user cannot remove, or it could not decrypt the body
-     * we sent because its own key changed. Both say what to do, and both are returned in plaintext.
+     * Only match an explicit server notice that message encryption is disabled (`API_ENCRYPTION=0`).
+     * Key mismatches ("解密请求体失败") and AEAD failures must not auto-downgrade to cleartext.
      */
     private fun encKeyRejected(body: String): Boolean =
-        (body.contains("x-enc") && body.contains("API_ENCRYPTION")) || body.contains("解密请求体失败")
+        body.contains("x-enc") && body.contains("API_ENCRYPTION")
 
     private class EncryptionRefused(val encKey: String) : Exception()
 
     /**
-     * 解密失败统一转成 ApiException，避免裸 crypto 异常冒泡到界面；已经说明白的密钥问题原样抛出。
-     * 认证标签对不上是另一回事：那把密钥确实不是服务器那把，所以交给 [EncryptionRefused] 走明文
-     * 重试，界面才不会停在「解密响应失败：Tag mismatch」上——GET 没有请求体，服务器那句提示永远
-     * 到不了手机，历史上每一个界面都会这样死掉。
+     * 解密失败统一转成 ApiException，避免裸 crypto 异常冒泡到界面；认证标签对不上（密钥不匹配或
+     * 密文被篡改）绝不静默降级明文，直接提示用户在「设置」重新扫码配对。
      */
     private fun decryptWithGuard(encKey: String, payload: String): String =
         runCatching { decryptBody(encKey, payload) }.getOrElse {
             if (it is ApiException) throw it
             if (it is javax.crypto.AEADBadTagException || it is javax.crypto.BadPaddingException) {
-                throw EncryptionRefused(encKey)
+                throw ApiException(0, "响应密文校验失败（配对密钥不匹配或内容被篡改），请在「设置」重新扫码配对")
             }
             throw ApiException(0, "解密响应失败：${it.message}")
         }
@@ -477,31 +491,42 @@ class ApiClient {
 
     suspend fun streamTask(connection: Connection, id: String, onEvent: suspend (Task) -> Unit): Unit =
         withContext(Dispatchers.IO) {
-            openCall(request(connection, "GET", "/task/$id/events"), streamHttp).use { res ->
-                if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
-                // A task that had already settled when the request arrived answers with one
-                // plain JSON snapshot instead of a stream (src/api.ts), so read that too.
-                if (res.header("content-type")?.contains("text/event-stream") != true) {
-                    val snapshot = json.parseToJsonElement(res.body?.string().orEmpty()).jsonObject
-                    val settled = snapshot["task"]?.jsonObject?.let { json.decodeFromJsonElement(Task.serializer(), it) }
-                        ?: throw ApiException(500, "快照响应缺少 task 字段")
-                    onEvent(settled)
-                    return@use
+            val call = streamHttp.newCall(request(connection, "GET", "/task/$id/events"))
+            val cancelHook = coroutineContext.job.invokeOnCompletion { if (it != null) call.cancel() }
+            try {
+                val response = try {
+                    call.execute()
+                } catch (err: IOException) {
+                    throw IOException(networkHint(err), err)
                 }
-                val source = res.body?.source() ?: throw ApiException(500, "空的事件流")
-                while (true) {
-                    // 阻塞读不响应协程取消:每行之间主动检查,离开页面时线程及时释放
-                    ensureActive()
-                    // Heartbeats arrive as ": ping" comments; data frames as "data: {json}"
-                    val line = source.readUtf8Line() ?: throw java.io.IOException("事件流提前关闭")
-                    if (!line.startsWith("data: ")) continue
-                    val payload = line.removePrefix("data: ")
-                    val obj = json.parseToJsonElement(payload).jsonObject
-                    val task = obj["task"]?.jsonObject?.let { json.decodeFromJsonElement(Task.serializer(), it) }
-                        ?: throw java.io.IOException("事件缺少 task 字段")
-                    onEvent(task)
-                    if (!task.isRunning) return@withContext
+                response.use { res ->
+                    if (!res.isSuccessful) throw ApiException(res.code, serverFailure(res.code, res.body?.string()))
+                    // A task that had already settled when the request arrived answers with one
+                    // plain JSON snapshot instead of a stream (src/api.ts), so read that too.
+                    if (res.header("content-type")?.contains("text/event-stream") != true) {
+                        val snapshot = json.parseToJsonElement(res.body?.string().orEmpty()).jsonObject
+                        val settled = snapshot["task"]?.jsonObject?.let { json.decodeFromJsonElement(Task.serializer(), it) }
+                            ?: throw ApiException(500, "快照响应缺少 task 字段")
+                        onEvent(settled)
+                        return@use
+                    }
+                    val source = res.body?.source() ?: throw ApiException(500, "空的事件流")
+                    while (true) {
+                        // 阻塞读不响应协程取消:每行之间主动检查,离开页面时线程及时释放
+                        ensureActive()
+                        // Heartbeats arrive as ": ping" comments; data frames as "data: {json}"
+                        val line = source.readUtf8Line() ?: throw java.io.IOException("事件流提前关闭")
+                        if (!line.startsWith("data: ")) continue
+                        val payload = line.removePrefix("data: ")
+                        val obj = json.parseToJsonElement(payload).jsonObject
+                        val task = obj["task"]?.jsonObject?.let { json.decodeFromJsonElement(Task.serializer(), it) }
+                            ?: throw java.io.IOException("事件缺少 task 字段")
+                        onEvent(task)
+                        if (!task.isRunning) return@withContext
+                    }
                 }
+            } finally {
+                cancelHook.dispose()
             }
         }
 
@@ -538,9 +563,17 @@ class ApiClient {
         return res["cleared"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
     }
 
+    suspend fun workspaceDiff(connection: Connection): WorkspaceDiff =
+        json.decodeFromJsonElement(WorkspaceDiff.serializer(), getBody(connection, "/diff"))
+
     suspend fun undoChanges(connection: Connection): String {
         val res = send(connection, "POST", "/undo")
         return res["message"]?.jsonPrimitive?.content ?: "已处理撤销请求"
+    }
+
+    suspend fun commitChanges(connection: Connection, message: String): CommitResult {
+        val res = send(connection, "POST", "/commit", buildJsonObject { put("message", message) })
+        return json.decodeFromJsonElement(CommitResult.serializer(), res)
     }
 
     suspend fun archivedSessions(connection: Connection): List<ArchivedSession> =
@@ -849,6 +882,19 @@ class ApiClient {
         return json.decodeFromJsonElement(SettingsView.serializer(), res)
     }
 
+    suspend fun setNotifyChatOnAppTask(connection: Connection, enabled: Boolean): SettingsView {
+        val res = send(connection, "POST", "/settings", buildJsonObject { put("notifyChatOnAppTask", enabled) })
+        return json.decodeFromJsonElement(SettingsView.serializer(), res)
+    }
+
+    suspend fun syncMessages(connection: Connection, scope: String = "app", limit: Int = 60): TranscriptView =
+        json.decodeFromJsonElement(TranscriptView.serializer(), getBody(connection, "/sync/messages?scope=${Uri.encode(scope)}&limit=$limit"))
+
+    suspend fun handoffPeer(connection: Connection, scope: String): HandoffResult {
+        val res = send(connection, "POST", "/sync/handoff", buildJsonObject { put("scope", scope) })
+        return json.decodeFromJsonElement(HandoffResult.serializer(), res)
+    }
+
     // ---- notices ----
 
     /** Notices raised while no chat was bound; [since] is the newest one already inserted. */
@@ -975,12 +1021,13 @@ class ApiClient {
     /** Managed release state plus update channel, shown in the ops screen. */
     suspend fun releaseInfo(connection: Connection): Diagnostics {
         val res = getBody(connection, "/ops/release")
-        val release = res["release"]?.jsonObject
-        val update = res["update"]?.jsonObject
+        val release = res["release"] as? JsonObject
+        val update = res["update"] as? JsonObject
+        val startup = res["startup"] as? JsonObject
         return Diagnostics(
             release = release?.let { json.decodeFromJsonElement(ReleaseInfo.serializer(), it) },
             update = update?.let { json.decodeFromJsonElement(UpdateTarget.serializer(), it) },
-            startup = res["startup"]?.jsonObject?.let { json.decodeFromJsonElement(StartupCheck.serializer(), it) },
+            startup = startup?.let { json.decodeFromJsonElement(StartupCheck.serializer(), it) },
         )
     }
 
@@ -1331,6 +1378,36 @@ class ApiClient {
         return json.decodeFromJsonElement(MagpieExecResult.serializer(), json.parseToJsonElement(text))
     }
 
+    /** Dedicated secret-safe `provider add` route: the server masks the exact key on output and error. */
+    suspend fun magpieAddProvider(connection: Connection, preset: String, key: String): MagpieRunResult {
+        val body = buildJsonObject {
+            put("preset", preset)
+            put("key", key)
+        }
+        val text = executeEncryptedFallback(connection, "POST", "/magpie/provider", body, client = longHttp)
+        return json.decodeFromJsonElement(MagpieRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
+    /** Dedicated `magpie <agent> <model>` route. */
+    suspend fun magpieSetAgent(connection: Connection, agent: String, model: String): MagpieRunResult {
+        val body = buildJsonObject {
+            put("agent", agent)
+            put("model", model)
+        }
+        val text = executeEncryptedFallback(connection, "POST", "/magpie/agent", body, client = longHttp)
+        return json.decodeFromJsonElement(MagpieRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
+    /** Dedicated `magpie group add <name> <pairs...>` route. */
+    suspend fun magpieAddGroup(connection: Connection, name: String, pairs: List<String>): MagpieRunResult {
+        val body = buildJsonObject {
+            put("name", name)
+            put("pairs", buildJsonArray { pairs.forEach { add(it) } })
+        }
+        val text = executeEncryptedFallback(connection, "POST", "/magpie/group", body, client = longHttp)
+        return json.decodeFromJsonElement(MagpieRunResult.serializer(), json.parseToJsonElement(text))
+    }
+
     /**
      * Telegram's `/cc run <argv>`: one non-interactive cc-switch command as the words the
      * server's guard accepts. `confirm` answers the guard's own request for confirmation.
@@ -1501,6 +1578,79 @@ class ApiClient {
         val res = send(connection, "POST", "/schedules/$id/run")
         val schedule = res["schedule"]?.jsonObject ?: throw ApiException(500, "响应缺少 schedule 字段")
         return json.decodeFromJsonElement(Schedule.serializer(), schedule)
+    }
+
+    suspend fun budget(connection: Connection): BudgetStatus {
+        val res = send(connection, "GET", "/budget")
+        return json.decodeFromJsonElement(BudgetStatus.serializer(), res)
+    }
+
+    suspend fun setBudget(connection: Connection, dailyUsd: Double?, monthlyUsd: Double?): BudgetStatus {
+        val body = buildJsonObject {
+            if (dailyUsd != null) put("dailyUsd", dailyUsd)
+            if (monthlyUsd != null) put("monthlyUsd", monthlyUsd)
+        }
+        val res = send(connection, "POST", "/budget", body)
+        return json.decodeFromJsonElement(BudgetStatus.serializer(), res)
+    }
+
+    suspend fun approvals(connection: Connection): ApprovalsView {
+        val res = send(connection, "GET", "/approvals")
+        return json.decodeFromJsonElement(ApprovalsView.serializer(), res)
+    }
+
+    suspend fun setApprovalMode(connection: Connection, mode: String): ApprovalsView {
+        val res = send(connection, "PUT", "/approvals/mode", buildJsonObject { put("mode", mode) })
+        return json.decodeFromJsonElement(ApprovalsView.serializer(), res)
+    }
+
+    suspend fun decideApproval(connection: Connection, id: String, decision: String): ApprovalsView {
+        val res = send(connection, "POST", "/approvals/$id/decide", buildJsonObject { put("decision", decision) })
+        return json.decodeFromJsonElement(ApprovalsView.serializer(), res)
+    }
+
+    suspend fun webhooks(connection: Connection): WebhooksView {
+        val res = send(connection, "GET", "/hooks")
+        return json.decodeFromJsonElement(WebhooksView.serializer(), res)
+    }
+
+    suspend fun createWebhook(
+        connection: Connection,
+        name: String,
+        promptTemplate: String,
+        engine: String? = null,
+        silentToken: String? = null,
+    ): WebhookActionResult {
+        val body = buildJsonObject {
+            put("name", name)
+            put("promptTemplate", promptTemplate)
+            if (!engine.isNullOrBlank()) put("engine", engine)
+            if (!silentToken.isNullOrBlank()) put("silentToken", silentToken)
+        }
+        val res = send(connection, "POST", "/hooks", body)
+        return json.decodeFromJsonElement(WebhookActionResult.serializer(), res)
+    }
+
+    suspend fun toggleWebhook(connection: Connection, id: String): WebhookActionResult {
+        val res = send(connection, "POST", "/hooks/$id/toggle")
+        return json.decodeFromJsonElement(WebhookActionResult.serializer(), res)
+    }
+
+    suspend fun testWebhook(connection: Connection, id: String): WebhookActionResult {
+        val raw = executeEncryptedFallback(
+            connection,
+            "POST",
+            "/hooks/$id/test",
+            buildJsonObject { put("event", "test") },
+            longHttp,
+        )
+        val res = json.parseToJsonElement(raw).jsonObject
+        return json.decodeFromJsonElement(WebhookActionResult.serializer(), res)
+    }
+
+    suspend fun deleteWebhook(connection: Connection, id: String): WebhookActionResult {
+        val res = send(connection, "DELETE", "/hooks/$id")
+        return json.decodeFromJsonElement(WebhookActionResult.serializer(), res)
     }
 }
 

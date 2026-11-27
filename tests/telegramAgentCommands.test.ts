@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { InlineKeyboard } from "grammy"
 import type { AgentCliService } from "../src/agentCli.js"
 import type { AgentCliInstaller } from "../src/agentInstaller.js"
 import type { Logger } from "../src/logger.js"
@@ -12,10 +13,10 @@ const job = { key: "tg:1", chatId: 1, text: "", userId: 1, generation: 1 } as Jo
 
 function harness() {
   const sent: string[] = []
+  let engine = "opencode"
   const store = {
-    engine: "opencode",
-    getEngine() { return this.engine },
-    setEngine(_key: string, engine: string) { this.engine = engine },
+    getEngine: () => engine,
+    setEngine: (_key: string, next: string) => { engine = next },
   } as unknown as SessionStore
   const profile = { id: "claude", label: "Claude Code", bin: "claude", desc: "Claude", supportsModel: false }
   const agents = {
@@ -41,8 +42,8 @@ function harness() {
     log,
     sendText: async (_chatId, text) => { sent.push(text); return true },
     sendPanel: async () => {},
-    agentPanel: () => ({ text: "agents", keyboard: undefined }),
-    agentInstallerPanel: () => ({ text: "installer", keyboard: undefined }),
+    agentPanel: () => ({ text: "agents", keyboard: new InlineKeyboard() }),
+    agentInstallerPanel: () => ({ text: "installer", keyboard: new InlineKeyboard() }),
   })
   return { commands, sent, store }
 }

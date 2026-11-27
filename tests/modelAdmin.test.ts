@@ -382,7 +382,7 @@ test("ModelAdmin.add repairs a provider whose models entry is not an object", ()
     // 否则该 provider 的所有自定义模型注册都会被一个坏结构卡死
     const configPath = join(fx.project, "opencode.json")
     const config = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>
-    ;(config.provider as Record<string, unknown>).custom.models = ["not", "an", "object"]
+    ;(config.provider as Record<string, Record<string, unknown>>).custom!.models = ["not", "an", "object"]
     writeFileSync(configPath, JSON.stringify(config))
 
     fx.admin.add({ key: "repaired", providerID: "custom", modelID: "repaired-model" })

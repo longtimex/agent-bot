@@ -1,4 +1,4 @@
-import { assertMagpieId } from "./magpie.js"
+import { MAGPIE_UPDATE_TIMEOUT_MS, assertMagpieId } from "./magpie.js"
 
 /**
  * One read-only magpie command the console can run. `args` is built only here, from a
@@ -22,6 +22,7 @@ export interface MagpieExecSpec {
   targetLabel?: string
   confirm?: boolean
   long?: boolean
+  timeoutMs?: number
   phrases?: string[][]
 }
 
@@ -55,7 +56,10 @@ export const MAGPIE_VIEWS: Record<string, MagpieViewSpec> = {
   usage: {
     label: "用量",
     targetLabel: "窗口 today/7d/30d/all（可选）",
-    args: (target) => (RANGES.has(target) ? ["usage", target] : ["usage"]),
+    args: (target) => {
+      const range = target.trim().toLowerCase()
+      return RANGES.has(range) ? ["usage", range] : ["usage"]
+    },
     long: true,
     phrases: [["usage"]],
   },
@@ -71,9 +75,17 @@ export const MAGPIE_EXEC: Record<string, MagpieExecSpec> = {
     label: "检查 magpie 更新",
     args: () => ["update", "check"],
     long: true,
+    timeoutMs: MAGPIE_UPDATE_TIMEOUT_MS,
     phrases: [["update", "check"]],
   },
-  update: { label: "升级 magpie", args: () => ["update"], confirm: true, long: true, phrases: [["update"]] },
+  update: {
+    label: "升级 magpie",
+    args: () => ["update"],
+    confirm: true,
+    long: true,
+    timeoutMs: MAGPIE_UPDATE_TIMEOUT_MS,
+    phrases: [["update"]],
+  },
   "daemon-start": {
     label: "启动 magpie 守护进程",
     args: () => ["daemon", "start"],

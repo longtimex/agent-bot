@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { randomBytes } from "node:crypto"
+import { basename } from "node:path"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { res_attachment_binary } from "./apiHttp.js"
 import type { OpsResult, OpsService } from "./ops.js"
@@ -55,6 +56,7 @@ export interface OpsRouteDeps {
   ops: OpsService | undefined
   json: (res: ApiRequestContext["res"], status: number, body: unknown) => void
   runOpsAction: (run: () => Promise<OpsResult>) => Promise<Record<string, unknown>>
+  isOpsActionRunning?: () => boolean
   asyncOps: OpsActionJobs
   hasActiveTask: () => boolean
 }
@@ -89,11 +91,12 @@ export async function routeOps(
   if (method === "GET" && id === "check-update") {
     if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
     if (ctx.url.searchParams.get("async") === "1") {
+      if (deps.isOpsActionRunning?.()) throw new ApiError(409, "已有运维操作在执行，请稍后再试")
       const job = deps.asyncOps.start("check-update", () => deps.runOpsAction(() => ops.checkUpdate()))
       deps.json(ctx.res, 202, { job: { id: job.id, label: job.label, state: job.state } })
       return true
     }
-    deps.json(ctx.res, 200, { result: await ops.checkUpdate() })
+    deps.json(ctx.res, 200, { result: await deps.runOpsAction(() => ops.checkUpdate()) })
     return true
   }
   if (method === "GET" && id === "release") {
@@ -118,7 +121,7 @@ export async function routeOps(
     if (!ops) throw new ApiError(409, "当前运行环境不支持运维操作")
     const result = await ops.backupData()
     if (!result.ok || !result.file) throw new ApiError(500, result.message)
-    const file = result.file.split("/").pop() ?? "backup.tar.gz"
+    const file = basename(result.file) || "backup.tar.gz"
     res_attachment_binary(ctx.res, file, "application/gzip", readFileSync(result.file))
     return true
   }
@@ -160,6 +163,7 @@ export async function routeOps(
     // Long commands outlive reverse proxies (the hosted Instabox tunnel cuts at ~20s).
     // Report an id immediately; old clients still get the synchronous result below.
     if (ctx.url.searchParams.get("async") === "1") {
+      if (deps.isOpsActionRunning?.()) throw new ApiError(409, "已有运维操作在执行，请稍后再试")
       const job = deps.asyncOps.start(label, () => deps.runOpsAction(run!))
       deps.json(ctx.res, 202, { job: { id: job.id, label: job.label, state: job.state } })
       return true

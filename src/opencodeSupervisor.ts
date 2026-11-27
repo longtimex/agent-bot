@@ -107,11 +107,11 @@ export class OpencodeSupervisor {
       this.#log.warn("OpenCode 由 systemd 单元托管，按需模式不会自行启动；请用 systemctl 启动该单元")
       return false
     }
-    this.#starting ??= this.#start()
+    const run = (this.#starting ??= this.#start())
     try {
-      return await this.#starting
+      return await run
     } finally {
-      this.#starting = undefined
+      if (this.#starting === run) this.#starting = undefined
     }
   }
 

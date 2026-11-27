@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { InlineKeyboard } from "grammy"
 import type { ProxyService } from "../src/proxy.js"
 import { TelegramProxyCommands } from "../src/telegramProxyCommands.js"
 
@@ -30,7 +31,7 @@ function harness() {
     proxies,
     sendText: async (_chatId, text) => { sent.push(text); return true },
     sendPanel: async () => {},
-    proxyPanel: () => ({ text: "proxy", keyboard: undefined }),
+    proxyPanel: () => ({ text: "proxy", keyboard: new InlineKeyboard() }),
   })
   return { commands, sent, calls, panels }
 }

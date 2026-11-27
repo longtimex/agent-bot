@@ -9,13 +9,14 @@ import { decodeEncKey, decryptPayload, encryptPayload, ENC_HEADER, ENC_VERSION, 
 import { isModelResetWord, resolveModelKey, type ModelInfo } from "./models.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 import { resolveOpencodeModel } from "./engineCall.js"
-import { redactSecrets, type CcSwitchService } from "./ccswitch.js"
+import { CcSwitchBusyError, redactSecrets, type CcSwitchService } from "./ccswitch.js"
 import { API_PREFIX, ApiError, type ApiRequestContext } from "./apiCore.js"
 import { ApiTaskManager } from "./apiTasks.js"
 import { AuthFailureLimiter } from "./apiRateLimit.js"
 import { routeCc } from "./apiCc.js"
 import { routeMagpie } from "./apiMagpie.js"
-import type { MagpieService } from "./magpie.js"
+import { MagpieBusyError, type MagpieService } from "./magpie.js"
+import { runFailFastLock } from "./writeLock.js"
 import type { Logger } from "./logger.js"
 import type { ReminderService } from "./reminders.js"
 import type { ScheduleService } from "./scheduler.js"
@@ -61,7 +62,15 @@ import { routeAgentModels, routeAgentProvider, routeCustomModels, routeModelTest
 import { ApiAgentActions } from "./apiAgentRoutes.js"
 import { archiveCurrentSession, routeSessions, type SessionRouteDeps } from "./apiSessions.js"
 import { SessionArchiveStore } from "./sessionArchive.js"
-import { workspaceChanges } from "./workspaceChanges.js"
+import { routeWorkspace } from "./apiWorkspace.js"
+import { routeSync } from "./apiSync.js"
+import { routeBudget } from "./apiBudget.js"
+import { routeApprovals } from "./apiApprovals.js"
+import { handleInboundWebhookTrigger, routeWebhooks } from "./apiWebhooks.js"
+import type { ChatTranscriptStore } from "./chatTranscript.js"
+import { UsageBudgetStore } from "./usageBudget.js"
+import { ApprovalManager } from "./approvals.js"
+import { WebhookStore } from "./webhooks.js"
 
 // Attachment uploads are base64 on the same endpoint. There is deliberately no
 // fixed application-level ceiling: the JSON body is still bounded by available
@@ -127,6 +136,16 @@ export interface ApiServerOptions {
   maxJsonBodyBytes?: number
   /** Where 新建会话 parks the old session; defaults to data/session-archive.json. */
   sessionArchive?: SessionArchiveStore
+  /** Cross-client conversation transcript shared with Telegram/Feishu. */
+  transcripts?: ChatTranscriptStore
+  /** Daily/monthly USD budget limits and alert state. */
+  budget?: UsageBudgetStore
+  /** Interactive high-risk approval manager shared with Telegram/Feishu. */
+  approvals?: ApprovalManager
+  /** Inbound webhook store shared with Telegram/Feishu. */
+  webhooks?: WebhookStore
+  /** Sends a completion/alert notice to the paired owner chat when enabled. */
+  notifyOwner?: (text: string) => Promise<void>
 }
 
 /** Base64 inflates by 4/3; the extra megabyte covers the prompt text and JSON framing. */
@@ -213,6 +232,9 @@ export class ApiServer {
   readonly #taskManager: ApiTaskManager
   readonly #agentActions: ApiAgentActions
   readonly #archive: SessionArchiveStore
+  readonly #budget: UsageBudgetStore
+  readonly #approvals: ApprovalManager
+  readonly #webhooks: WebhookStore
   readonly #agentModels: AgentModelCatalog
   /** Per-request encryption keys, stashed at dispatch so #readJsonBody/#json need no new params. */
   readonly #bodyKeys = new WeakMap<IncomingMessage, Buffer>()
@@ -243,6 +265,9 @@ export class ApiServer {
     this.#agentModels = new AgentModelCatalog(options.agents.registry, { log: options.log })
     this.#archive =
       options.sessionArchive ?? new SessionArchiveStore(resolve(options.cfg.dataDir, "session-archive.json"), options.log)
+    this.#budget = options.budget ?? new UsageBudgetStore(resolve(options.cfg.dataDir, "budget.json"), options.log)
+    this.#approvals = options.approvals ?? new ApprovalManager(resolve(options.cfg.dataDir, "approvals.json"), options.log)
+    this.#webhooks = options.webhooks ?? new WebhookStore(resolve(options.cfg.dataDir, "webhooks.json"), options.log)
     this.#taskManager = new ApiTaskManager({
       cfg: options.cfg,
       oc: options.oc,
@@ -256,6 +281,9 @@ export class ApiServer {
       fetchMedia: options.fetchMedia,
       appKey: options.appKey ?? "api:app",
       agentModels: this.#agentModels,
+      transcripts: options.transcripts,
+      settings: options.settings,
+      notifyOwner: options.notifyOwner,
     })
     this.#agentActions = new ApiAgentActions({
       agents: options.agents,
@@ -334,9 +362,15 @@ export class ApiServer {
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`)
+    let url: URL
+    try {
+      url = new URL(req.url ?? "/", "http://localhost")
+    } catch {
+      this.#json(res, 400, { error: "请求路径格式不合法" })
+      return
+    }
     const client = req.socket.remoteAddress ?? "unknown"
-    if (!url.pathname.startsWith(API_PREFIX)) {
+    if (url.pathname !== API_PREFIX && !url.pathname.startsWith(`${API_PREFIX}/`)) {
       this.#json(res, 404, { error: "未知的 API 路径" })
       return
     }
@@ -345,6 +379,11 @@ export class ApiServer {
     // device used to refuse the devices holding the right token: the App went silent for five
     // minutes and re-scanning the QR changed nothing, because the correct answer was being
     // rejected for somebody else's failures. Wrong tokens still pay the full budget.
+    const rawSegments = url.pathname.slice(API_PREFIX.length).split("/").filter(Boolean)
+    if ((req.method ?? "").toUpperCase() === "POST" && rawSegments[0] === "hooks" && rawSegments[1] && rawSegments[2] === "trigger" && rawSegments.length === 3) {
+      await handleInboundWebhookTrigger({ ...this.#webhookDeps(), authLimit: this.#authLimit, json: (r, s, b, h) => this.#json(r, s, b, h) }, req, res, rawSegments[1], client)
+      return
+    }
     if (this.#authorized(req)) {
       this.#authLimit.recordSuccess(client)
     } else {
@@ -483,6 +522,7 @@ export class ApiServer {
       // Parked, not deleted: 历史会话 can switch back to it with its context intact
       const body = await this.#readJsonBody(ctx.req)
       const title = typeof body.title === "string" ? body.title : undefined
+      this.#approvals.clearSessionAllows(this.appKey)
       const archived = await archiveCurrentSession(this.#sessionRouteDeps(), title)
       this.#json(ctx.res, 200, {
         ok: true,
@@ -497,9 +537,8 @@ export class ApiServer {
       return
     }
 
-    if (resource === "undo" && method === "POST") {
-      this.#requireIdle("撤销改动")
-      this.#json(ctx.res, 200, workspaceChanges.undo(this.appKey))
+    if (resource === "diff" || resource === "undo" || resource === "commit") {
+      await routeWorkspace(ctx, { appKey: this.appKey, workDir: () => this.#opts.agents.workDir(this.appKey), requireIdle: (w) => this.#requireIdle(w), readJsonBody: (r) => this.#readJsonBody(r), json: (r, s, b) => this.#json(r, s, b) }, resource)
       return
     }
 
@@ -507,63 +546,24 @@ export class ApiServer {
       if (await routeTasks(this.#taskRouteDeps(), ctx, resource, id, action, segments)) return
     }
 
-    if (resource === "dir") {
-      await this.#routeDir(ctx, id)
+    if (resource === "dir") { await this.#routeDir(ctx, id); return }
+    if (resource === "timezone") { await this.#routeTimezone(ctx); return }
+    if (resource === "proxy") { await this.#routeProxy(ctx, id, action); return }
+    if (resource === "aliases") { await this.#routeAliases(ctx, id); return }
+    if (resource === "settings") { await routeSettingsApi(this.#personalDeps(), ctx); return }
+    if (resource === "notices") { await routeNoticesApi(this.#personalDeps(), ctx); return }
+    if (resource === "accounts") { await routeAccountsApi(this.#personalDeps(), ctx, id, action); return }
+    if (resource === "access") { await this.#routeAccess(ctx, id); return }
+    if (resource === "cc") { await this.#routeCc(ctx, id, action); return }
+    if (resource === "magpie") { await this.#routeMagpie(ctx, id, action); return }
+    if (resource === "config") { await this.#routeConfig(ctx, id); return }
+    if (resource === "peers") { await this.#routePeers(ctx, id); return }
+    if (resource === "sync") {
+      await routeSync({ ...this.#personalDeps(), transcripts: this.#opts.transcripts, handoffSession: (from) => this.#handoffSession(from) }, ctx, id)
       return
     }
-
-    if (resource === "timezone") {
-      await this.#routeTimezone(ctx)
-      return
-    }
-
-    if (resource === "proxy") {
-      await this.#routeProxy(ctx, id, action)
-      return
-    }
-
-    if (resource === "aliases") {
-      await this.#routeAliases(ctx, id)
-      return
-    }
-
-    if (resource === "settings") {
-      await routeSettingsApi(this.#personalDeps(), ctx)
-      return
-    }
-
-    if (resource === "notices") {
-      await routeNoticesApi(this.#personalDeps(), ctx)
-      return
-    }
-
-    if (resource === "accounts") {
-      await routeAccountsApi(this.#personalDeps(), ctx, id, action)
-      return
-    }
-
-    if (resource === "access") {
-      await this.#routeAccess(ctx, id)
-      return
-    }
-
-    if (resource === "cc") {
-      await this.#routeCc(ctx, id, action)
-      return
-    }
-
-    if (resource === "magpie") {
-      await this.#routeMagpie(ctx, id, action)
-      return
-    }
-
-    if (resource === "config") {
-      await this.#routeConfig(ctx, id)
-      return
-    }
-
-    if (resource === "peers") {
-      await this.#routePeers(ctx, id)
+    if (resource === "budget") {
+      await routeBudget({ usage: this.#opts.usage, budget: this.#budget, timezone: () => this.#opts.timezone(), readJsonBody: (r) => this.#readJsonBody(r), json: (r, s, b) => this.#json(r, s, b) }, ctx)
       return
     }
 
@@ -630,83 +630,62 @@ export class ApiServer {
       return
     }
 
-    if (resource === "models" && id === "provider") {
-      await routeAgentProvider(this.#modelRouteDeps(), ctx)
-      return
-    }
-
-    if (resource === "models" && id === "test") {
-      await routeModelTest(this.#modelRouteDeps(), ctx)
-      return
-    }
-
-    if (resource === "models" && id === "agent") {
-      await routeAgentModels(this.#modelRouteDeps(), ctx)
-      return
-    }
-
-    if (resource === "models" && id === "custom") {
-      await this.#routeCustomModels(ctx, action)
-      return
-    }
-
+    if (resource === "models" && id === "provider") { await routeAgentProvider(this.#modelRouteDeps(), ctx); return }
+    if (resource === "models" && id === "test") { await routeModelTest(this.#modelRouteDeps(), ctx); return }
+    if (resource === "models" && id === "agent") { await routeAgentModels(this.#modelRouteDeps(), ctx); return }
+    if (resource === "models" && id === "custom") { await this.#routeCustomModels(ctx, action); return }
     if (resource === "models" && method === "GET") {
       const refresh = ctx.url.searchParams.get("refresh") === "1"
-      this.#json(ctx.res, 200, {
-        models: await modelsView(
-          this.#personalDeps(),
-          ctx.url.searchParams.get("engine") ?? undefined,
-          refresh,
-        ),
-      })
+      this.#json(ctx.res, 200, { models: await modelsView(this.#personalDeps(), ctx.url.searchParams.get("engine") ?? undefined, refresh) })
       return
     }
-
     if (resource === "model" && method === "POST") {
       const body = await this.#readJsonBody(ctx.req)
       const raw = typeof body.model === "string" ? body.model.trim() : ""
       if (!raw) throw new ApiError(400, "缺少 model 字段")
-      // `reset` is the App's button: it always drops the selection, even on an engine that
-      // declares a model whose name happens to be a reset word
       const message = await this.#applyModel(raw, body.reset === true)
       this.#json(ctx.res, 200, { ok: true, message, session: this.#sessionView() })
       return
     }
-
-    if (resource === "agents" && id && method === "POST") {
-      await this.#routeAgentAction(ctx, id, action)
-      return
-    }
-
-    if (resource === "ops") {
-      if (await routeOps(this.#opsRouteDeps(), ctx, id, action)) return
-    }
-
+    if (resource === "agents" && id && method === "POST") { await this.#routeAgentAction(ctx, id, action); return }
+    if (resource === "ops") { if (await routeOps(this.#opsRouteDeps(), ctx, id, action)) return }
     if (resource === "android" && this.#opts.androidRelease) {
       if (routeAndroidRelease(this.#opts.androidRelease, ctx, id, action, (res, status, body) => this.#json(res, status, body))) return
     }
-
-    if (resource === "usage" || resource === "history" || resource === "export") {
-      await routeUsageHistoryApi(this.#personalDeps(), ctx, resource, id)
+    if (resource === "usage" || resource === "history" || resource === "export") { await routeUsageHistoryApi(this.#personalDeps(), ctx, resource, id); return }
+    if (resource === "reminders") { await this.#routeReminders(ctx, id, action); return }
+    if (resource === "schedules") { await this.#routeSchedules(ctx, id, action); return }
+    if (resource === "approvals") {
+      await routeApprovals({ approvals: this.#approvals, readJsonBody: (r) => this.#readJsonBody(r), json: (r, s, b) => this.#json(r, s, b) }, ctx, id, action)
       return
     }
-
-    if (resource === "reminders") {
-      await this.#routeReminders(ctx, id, action)
+    if (resource === "hooks") {
+      await routeWebhooks({ ...this.#webhookDeps(), readJsonBody: (r) => this.#readJsonBody(r), json: (r, s, b) => this.#json(r, s, b) }, ctx, id, action)
       return
     }
-
-    if (resource === "schedules") {
-      await this.#routeSchedules(ctx, id, action)
-      return
-    }
-
-    if (resource === "status" && method === "GET") {
-      this.#json(ctx.res, 200, await this.#statusView())
-      return
-    }
+    if (resource === "status" && method === "GET") { this.#json(ctx.res, 200, await this.#statusView()); return }
 
     this.#json(ctx.res, 404, { error: "未知的 API 路径" })
+  }
+
+  #webhookDeps() {
+    return {
+      webhooks: this.#webhooks,
+      engineDeps: {
+        oc: this.#opts.oc,
+        agents: this.#opts.agents,
+        store: this.#opts.store,
+        log: this.#log,
+        opencodeAgent: this.#opts.cfg.opencode.agent ?? "assistant",
+        taskTimeoutMs: this.#opts.cfg.taskTimeoutMs,
+        taskMaxTimeoutMs: this.#opts.cfg.taskMaxTimeoutMs,
+      },
+      store: this.#opts.store,
+      log: this.#log,
+      notices: this.#opts.notices,
+      notifyOwner: this.#opts.notifyOwner,
+      triggerBaseUrl: () => resolvePairingUrl(this.#opts.cfg),
+    }
   }
 
   async #routeCustomModels(ctx: ApiRequestContext, key: string | undefined): Promise<void> {
@@ -758,15 +737,13 @@ export class ApiServer {
     })
   }
 
-  /** Single-flight guard shared by every mutating cc-switch route. */
-  async #withCcLock<T>(run: () => Promise<T>): Promise<T> {
-    if (this.#ccActionRunning) throw new ApiError(409, "已有 cc-switch 操作在执行，请稍后再试")
-    this.#ccActionRunning = true
-    try {
-      return await run()
-    } finally {
-      this.#ccActionRunning = false
-    }
+  #withCcLock<T>(run: () => Promise<T>): Promise<T> {
+    return runFailFastLock(
+      this.#opts.ccswitch,
+      (msg) => new ApiError(409, msg ?? "已有 cc-switch 操作在执行，请稍后再试"),
+      (err) => err instanceof CcSwitchBusyError,
+      () => this.#ccActionRunning, (v) => { this.#ccActionRunning = v }, run,
+    )
   }
 
   async #routeCc(ctx: ApiRequestContext, id: string | undefined, action: string | undefined): Promise<void> {
@@ -779,21 +756,17 @@ export class ApiServer {
         runCcAction: (run) => this.#runCcAction(run),
         withCcLock: (run) => this.#withCcLock(run),
       },
-      ctx,
-      id,
-      action,
+      ctx, id, action,
     )
   }
 
-  /** One magpie CLI call at a time: the gateway reads/writes shared agent config files. */
-  async #withMagpieLock<T>(run: () => Promise<T>): Promise<T> {
-    if (this.#magpieActionRunning) throw new ApiError(409, "已有 magpie 操作在执行，请稍后再试")
-    this.#magpieActionRunning = true
-    try {
-      return await run()
-    } finally {
-      this.#magpieActionRunning = false
-    }
+  #withMagpieLock<T>(run: () => Promise<T>): Promise<T> {
+    return runFailFastLock(
+      this.#opts.magpie,
+      (msg) => new ApiError(409, msg ?? "已有 magpie 操作在执行，请稍后再试"),
+      (err) => err instanceof MagpieBusyError,
+      () => this.#magpieActionRunning, (v) => { this.#magpieActionRunning = v }, run,
+    )
   }
 
   async #routeMagpie(ctx: ApiRequestContext, id: string | undefined, action: string | undefined): Promise<void> {
@@ -803,10 +776,9 @@ export class ApiServer {
         json: (res, status, body) => this.#json(res, status, body),
         readJsonBody: (req) => this.#readJsonBody(req),
         magpieQuery: (run) => this.#withMagpieLock(run),
+        magpieRead: (run) => run(),
       },
-      ctx,
-      id,
-      action,
+      ctx, id, action,
     )
   }
 
@@ -910,6 +882,7 @@ export class ApiServer {
       ops: this.#opts.ops,
       json: (res: ServerResponse, status: number, body: unknown) => this.#json(res, status, body),
       runOpsAction: (run: () => Promise<OpsResult>) => this.#runOpsAction(run),
+      isOpsActionRunning: () => this.#opsActionRunning,
       asyncOps: this.#opsJobs,
       hasActiveTask: () => this.#taskManager.hasActiveTask(),
     }
@@ -992,6 +965,29 @@ export class ApiServer {
       this.#resetCliSessions()
       changed.push(`工作目录 ${sourceDir}`)
     }
+    return changed
+  }
+
+  /** Like #adoptSession, plus carries over the live engine session id and title for seamless handoff. */
+  #handoffSession(from: string): string[] {
+    const changed = this.#adoptSession(from)
+    const store = this.#opts.store
+    const engine = store.getEngine(from)
+    if (engine === "opencode") {
+      const sid = store.get(from)
+      if (sid && store.get(this.appKey) !== sid) {
+        store.set(this.appKey, sid)
+        changed.push("延续 OpenCode 上下文")
+      }
+    } else {
+      const sid = store.getCliSession(from, engine)
+      if (sid && store.getCliSession(this.appKey, engine) !== sid) {
+        store.setCliSession(this.appKey, engine, sid)
+        changed.push(`延续 ${this.#opts.agents.registry.label(engine)} 上下文`)
+      }
+    }
+    const title = store.getTitle(from)
+    if (title && !store.getTitle(this.appKey)) store.setTitle(this.appKey, title)
     return changed
   }
 

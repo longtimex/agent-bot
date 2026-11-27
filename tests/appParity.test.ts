@@ -353,7 +353,7 @@ test("the drawer keeps every screen reachable and the chat bar stays uncluttered
   const drawer = readFileSync(`${UI_DIR}/AppDrawer.kt`, "utf8")
   const chat = readFileSync(`${UI_DIR}/ChatScreen.kt`, "utf8")
   const routes = [
-    "History", "Sessions", "Reminders", "Schedules", "Session", "Queue", "Agents", "Ops", "Proxy",
+    "History", "Sessions", "Workspace", "Reminders", "Schedules", "Approvals", "Webhooks", "Session", "Queue", "Agents", "Ops", "Proxy",
     "Aliases", "Access", "Models", "Cc", "Magpie", "Hermes", "Config", "Status", "Help", "Settings",
   ]
   assert.deepEqual(
@@ -1225,28 +1225,31 @@ test("the App caps its stored chat without losing the newest bubbles", () => {
  * every screen of the App failing on a header or a key the user cannot remove.
  */
 const ENC_FALLBACK_STEPS = [
-  'it.isNotBlank() && it != refusedEncKey && !encryptionSkipped(path)',
+  'it.isNotBlank() && (it != refusedEncKey || isSensitivePath(path)) && !encryptionSkipped(path)',
   'if (res.code == 400 && encKey != null && encKeyRejected(plain)) {',
-  '(body.contains("x-enc") && body.contains("API_ENCRYPTION")) || body.contains("解密请求体失败")',
+  'body.contains("x-enc") && body.contains("API_ENCRYPTION")',
   "private class EncryptionRefused(val encKey: String) : Exception()",
   "if (it is javax.crypto.AEADBadTagException || it is javax.crypto.BadPaddingException) {",
 ]
 
-test("the App retries in plaintext whenever the server stops accepting its key", () => {
+test("the App retries non-sensitive calls on explicit API_ENCRYPTION=0 and never silently downgrades secrets or AEAD failures", () => {
   const client = readFileSync(CLIENT_SOURCE, "utf8")
   for (const step of ENC_FALLBACK_STEPS) {
     assert.ok(client.includes(step), `the encrypted-request path no longer matches its pin:\n${step}`)
   }
-  // One retry, and it is the same call with the header dropped: the refusal happens before routing,
-  // so repeating it cannot start a second task.
+  // One retry on non-sensitive paths; sensitive paths must refuse auto-downgrade.
   assert.match(
     client,
-    /catch \(err: EncryptionRefused\) \{\n\s*refusedEncKey = err\.encKey\n\s*execute\(request\(connection, method, path, body\), client\)/,
+    /catch \(err: EncryptionRefused\) \{\r?\n\s*if \(isSensitivePath\(path\)\) \{[\s\S]*?\r?\n\s*\}\r?\n\s*refusedEncKey = err\.encKey\r?\n\s*execute\(request\(connection, method, path, body\), client\)/,
   )
   assert.doesNotMatch(client, /while \(.*EncryptionRefused/, "the fallback must not loop behind a proxy that keeps refusing")
-  // Every endpoint goes through that helper. The long-running ones (cc-switch, ops, agent installs)
-  // used to call execute() directly, so a server with encryption off failed exactly those screens
-  // and no amount of refreshing recovered them.
+  // AEAD tag mismatch must throw ApiException instead of throwing EncryptionRefused to downgrade.
+  assert.doesNotMatch(
+    client,
+    /AEADBadTagException[\s\S]{0,120}throw EncryptionRefused/,
+    "AEAD tag failures must never silently downgrade to plaintext",
+  )
+  // Every endpoint goes through that helper.
   const bypassing = client.match(/execute\(request\(connection, [^)]*\)/g) ?? []
   assert.equal(bypassing.length, 2, `only executeEncryptedFallback may call execute(request(...)): ${bypassing.join(" | ")}`)
 
@@ -1256,9 +1259,6 @@ test("the App retries in plaintext whenever the server stops accepting its key",
   for (const trigger of ["x-enc", "API_ENCRYPTION"]) {
     assert.ok(reply.includes(trigger), `${trigger} is what ApiClient.encKeyRejected() keys on`)
   }
-  // A regenerated pairing key: the App holds the old one, so a POST body cannot be decrypted. A GET
-  // never reaches this reply, which is why the response-side tag mismatch carries the same fallback.
-  assert.match(server, /`解密请求体失败[^`]*`/, "the server has to keep naming the decrypt failure the App falls back past")
 })
 
 test("the App gives large streamed uploads a long write timeout", () => {

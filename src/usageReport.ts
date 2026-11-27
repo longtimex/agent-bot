@@ -4,6 +4,7 @@ import { readJsonObject } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
 import { zonedParts } from "./reminders.js"
 import { dateKey, type UsageDay, type UsageStore, type UsageTrendDay } from "./usage.js"
+import { formatTokens, formatUsd, roundUsd } from "./tokenUsage.js"
 
 export interface DailyReportData {
   day: string
@@ -32,13 +33,17 @@ export function sourceLabel(key: string): string {
 }
 
 function sumDays(rows: Array<{ usage: UsageDay }>): UsageDay {
-  const totals: UsageDay = { tasks: 0, ok: 0, failed: 0, cancelled: 0, totalMs: 0 }
+  const totals: UsageDay = { tasks: 0, ok: 0, failed: 0, cancelled: 0, totalMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }
   for (const { usage } of rows) {
     totals.tasks += usage.tasks
     totals.ok += usage.ok
     totals.failed += usage.failed
     totals.cancelled += usage.cancelled
     totals.totalMs += usage.totalMs
+    totals.inputTokens = (totals.inputTokens ?? 0) + (usage.inputTokens ?? 0)
+    totals.outputTokens = (totals.outputTokens ?? 0) + (usage.outputTokens ?? 0)
+    totals.cacheReadTokens = (totals.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
+    totals.costUsd = roundUsd((totals.costUsd ?? 0) + (usage.costUsd ?? 0))
   }
   return totals
 }
@@ -88,6 +93,12 @@ export function formatDailyReport(data: DailyReportData): string {
     `今日任务：${totals.tasks} · ✅ ${totals.ok} · ❌ ${totals.failed} · 🚫 ${totals.cancelled}`,
   ]
   if (totals.tasks > 0) lines.push(`平均耗时：${formatDuration(totals.totalMs / totals.tasks)}`)
+  const todayTokens = (totals.inputTokens ?? 0) + (totals.outputTokens ?? 0)
+  if (todayTokens > 0 || (totals.costUsd ?? 0) > 0) {
+    lines.push(
+      `今日 Token / 费用：${formatTokens(todayTokens)}（入 ${formatTokens(totals.inputTokens ?? 0)} / 出 ${formatTokens(totals.outputTokens ?? 0)}）· ${formatUsd(totals.costUsd ?? 0)}`,
+    )
+  }
   if (data.byChat.length > 0) {
     lines.push(
       `来源：${data.byChat.map((row) => `${sourceLabel(row.key)} ${row.usage.tasks}`).join(" · ")}`,

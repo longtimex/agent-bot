@@ -99,11 +99,35 @@ export class JobJournal<T> {
   }
 
   /** Hands over what the previous process left, once; later calls return an empty plan. */
-  takeRecovery(now = Date.now(), maxAgeMs = RESUME_MAX_AGE_MS): RecoveryPlan<T> {
-    const previous = this.#previous
-    this.#previous = []
-    if (previous.length > 0 && !this.#frozen) this.#save()
-    return planRecovery(previous, now, maxAgeMs)
+  takeRecovery(
+    now = Date.now(),
+    maxAgeMs = RESUME_MAX_AGE_MS,
+    match?: (payload: T) => boolean,
+  ): RecoveryPlan<T> {
+    const matched = match ? this.#previous.filter((entry) => match(entry.payload)) : this.#previous
+    this.#previous = match ? this.#previous.filter((entry) => !match(entry.payload)) : []
+    if (matched.length > 0 && !this.#frozen) this.#save()
+    return planRecovery(matched, now, maxAgeMs)
+  }
+
+  /** Peeks matching entries from the previous process without removing them from disk yet. */
+  peekRecovery(
+    now = Date.now(),
+    maxAgeMs = RESUME_MAX_AGE_MS,
+    match?: (payload: T) => boolean,
+  ): RecoveryPlan<T> {
+    const matched = match ? this.#previous.filter((entry) => match(entry.payload)) : this.#previous
+    return planRecovery(matched, now, maxAgeMs)
+  }
+
+  /** Removes recovered previous-process entries after they have been handed off or reported. */
+  completeRecovery(ids: Iterable<string>): void {
+    const done = new Set(ids)
+    if (done.size === 0 || this.#previous.length === 0) return
+    const next = this.#previous.filter((entry) => !done.has(entry.id))
+    if (next.length === this.#previous.length) return
+    this.#previous = next
+    if (!this.#frozen) this.#save()
   }
 
   #save(): void {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { delimiter, join } from "node:path"
 import { test } from "node:test"
 import { childEnv, extendedEnv, extendedPath, installerChildEnv, releaseChildEnv, scrubEnv } from "../src/binPath.js"
 
@@ -35,9 +35,10 @@ test("extendedEnv extends PATH without touching the other variables", () => {
   const home = mkdtempSync(join(tmpdir(), "bot-path-env-"))
   try {
     mkdirSync(join(home, "bin"), { recursive: true })
-    const env = extendedEnv({ PATH: `/usr/bin${":"}${home}/bin`, FOO: "bar", HOME: home })
+    // PATH uses the platform delimiter; a hardcoded ":" only splits on POSIX
+    const env = extendedEnv({ PATH: ["/usr/bin", join(home, "bin")].join(delimiter), FOO: "bar", HOME: home })
     assert.equal(env.FOO, "bar")
-    const parts = (env.PATH ?? "").split(":")
+    const parts = (env.PATH ?? "").split(delimiter)
     assert.equal(parts.filter((part) => part === join(home, "bin")).length, 1, env.PATH)
   } finally {
     rmSync(home, { recursive: true, force: true })

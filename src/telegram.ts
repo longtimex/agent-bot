@@ -30,7 +30,12 @@ import type { ModelInfo } from "./models.js"
 import { callEngine, type EngineCallDeps } from "./engineCall.js"
 import { OpencodeHealth, resolveUsableEngine } from "./engineFallback.js"
 import { ChatTaskOutcomeRecorder, chatTaskOutcomeRecorder } from "./telegramTaskOutcome.js"
-import { resolveEncKey } from "./api.js"
+import { resolveEncKey, resolvePairingUrl } from "./api.js"
+import { ApprovalManager, configureApprovalManager } from "./approvals.js"
+import { WebhookStore } from "./webhooks.js"
+import { executeWebhook } from "./apiWebhooks.js"
+import { TelegramApprovalCommands } from "./telegramApprovalCommands.js"
+import { TelegramWebhookCommands } from "./telegramWebhookCommands.js"
 import { Opencode, type PromptFile } from "./opencode.js"
 import { OpsService } from "./ops.js"
 import { ProgressTracker } from "./progress.js"
@@ -39,6 +44,8 @@ import { describeRepeat, ReminderService, type Reminder } from "./reminders.js"
 import { scheduleTargetLabel, ScheduleService, type ScheduledTask } from "./scheduler.js"
 import type { BackendEngine, SessionStore } from "./store.js"
 import { UsageStore, type UsageOutcome } from "./usage.js"
+import { UsageBudgetStore } from "./usageBudget.js"
+import { configureModelPricing, type TokenUsage } from "./tokenUsage.js"
 import { DailyReportService } from "./usageReport.js"
 import {
   USER_ID_RE,
@@ -56,7 +63,8 @@ import { TelegramModelCommands } from "./telegramModelCommands.js"
 import { TelegramOpsCommands } from "./telegramOpsCommands.js"
 import { AGENT_ACTION_VERB, AGENT_CONFIRM_TTL_MS, TelegramAgentCommands, type AgentAction } from "./telegramAgentCommands.js"
 import { TelegramSessionCommands } from "./telegramSessionCommands.js"
-import { workspaceChanges } from "./workspaceChanges.js"
+import { TelegramWorkspaceCommands } from "./telegramWorkspaceCommands.js"
+import { ChatTranscriptStore } from "./chatTranscript.js"
 import { handlePanelCallback, type PanelCallbackDeps } from "./telegramPanelCallbacks.js"
 import { handleQueueButton, TelegramJobJournal } from "./telegramJobQueue.js"
 import { TelegramSecretInput } from "./telegramSecretInput.js"
@@ -103,7 +111,7 @@ function isFatalTelegramCredentialError(err: unknown): boolean {
 
 // Control commands routed through the per-chat queue (they touch session state);
 // everything else that reaches the queue is a prompt and must respect the cap.
-const QUEUED_COMMANDS = new Set(["/agent", "/new", "/reset", "/id", "/model", "/cc", "/retry"])
+const QUEUED_COMMANDS = new Set(["/agent", "/new", "/reset", "/id", "/dir", "/model", "/cc", "/retry"])
 
 /** Monotonic queue-entry ids, because a plain index would shift under a button press. */
 let jobSequence = 0
@@ -160,6 +168,16 @@ export class TelegramBridge {
   readonly accountStore: AccountStore
   /** Reminders and scheduled results for an App-only deployment; see APP_CHAT_ID. */
   readonly noticeStore: NoticeStore
+  /** Shared cross-client transcript log so App can restore/handoff chat history. */
+  readonly transcriptStore: ChatTranscriptStore
+  /** Daily/monthly token & USD budget tracker shared with the HTTP API. */
+  readonly budgetStore: UsageBudgetStore
+  /** Interactive high-risk approval coordinator shared with the HTTP API. */
+  readonly approvalManager: ApprovalManager
+  /** Inbound webhook triggers shared with the HTTP API. */
+  readonly webhookStore: WebhookStore
+  readonly #approvalCommands: TelegramApprovalCommands
+  readonly #webhookCommands: TelegramWebhookCommands
   readonly #schedules: ScheduleService
   readonly #cc: CcSwitchService
   readonly #models: ModelAdmin
@@ -173,6 +191,7 @@ export class TelegramBridge {
   readonly #opsCommands: TelegramOpsCommands
   readonly #agentCommands: TelegramAgentCommands
   readonly #sessionCommands: TelegramSessionCommands
+  readonly #workspaceCommands: TelegramWorkspaceCommands
   readonly #proxyCommands: TelegramProxyCommands
   readonly #adminCommands: TelegramAdminCommands
   readonly #attachments: TelegramAttachments
@@ -235,10 +254,20 @@ export class TelegramBridge {
     this.#feishuResourceClient = feishuResourceClient
     this.#cc =
       ccswitch ??
-      new CcSwitchService({ bin: cfg.ccswitch?.bin, app: cfg.ccswitch?.app ?? "opencode", projectDir: process.cwd() })
+      new CcSwitchService({
+        bin: cfg.ccswitch?.bin,
+        app: cfg.ccswitch?.app ?? "opencode",
+        projectDir: process.cwd(),
+        proxyEnv: () => proxies.env(),
+      })
     this.#magpie =
       magpie ??
-      new MagpieService({ bin: cfg.magpie?.bin, gatewayUrl: cfg.magpie?.gatewayUrl, projectDir: process.cwd() })
+      new MagpieService({
+        bin: cfg.magpie?.bin,
+        gatewayUrl: cfg.magpie?.gatewayUrl,
+        projectDir: process.cwd(),
+        proxyEnv: () => proxies.env(),
+      })
     this.#models =
       models ??
       new ModelAdmin(
@@ -277,9 +306,57 @@ export class TelegramBridge {
     this.#aliases = new AliasStore(resolve(cfg.dataDir, "aliases.json"), log)
     this.accountStore = new AccountStore(resolve(cfg.dataDir, "accounts.json"), resolve(cfg.dataDir, "accounts.key"), log)
     this.noticeStore = new NoticeStore(resolve(cfg.dataDir, "app-notices.json"), log)
+    this.transcriptStore = new ChatTranscriptStore(resolve(cfg.dataDir, "transcripts.json"), log)
+    configureModelPricing(resolve(cfg.dataDir, "model-pricing.json"), log)
+    this.budgetStore = new UsageBudgetStore(resolve(cfg.dataDir, "budget.json"), log)
+    this.#usage.setOnRecord((now) => {
+      const alert = this.budgetStore.checkAndConsumeAlert(this.#usage, this.#timezone, now)
+      if (!alert) return
+      this.noticeStore.push({ kind: "system", text: alert })
+      void this.notifyOwner(alert).catch(() => {})
+    })
+    this.approvalManager = new ApprovalManager(resolve(cfg.dataDir, "approvals.json"), log)
+    configureApprovalManager(this.approvalManager)
+    this.webhookStore = new WebhookStore(resolve(cfg.dataDir, "webhooks.json"), log)
+    this.#approvalCommands = new TelegramApprovalCommands({
+      approvals: this.approvalManager, ownerChatId: () => this.ownerChatId,
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel), editPanel: (ctx, panel) => this.#editPanel(ctx, panel),
+    })
+    this.#webhookCommands = new TelegramWebhookCommands({
+      webhooks: this.webhookStore,
+      triggerBaseUrl: () => resolvePairingUrl(this.#cfg),
+      runTest: (hook) =>
+        executeWebhook(
+          {
+            webhooks: this.webhookStore,
+            engineDeps: this.#engineDeps,
+            store: this.#store,
+            log: this.#log,
+            notices: this.noticeStore,
+            notifyOwner: (text) => this.notifyOwner(text),
+          },
+          hook,
+          "test",
+          JSON.stringify({ test: true, hook: hook.name, at: new Date().toISOString() }, null, 2),
+        ),
+      sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
+      sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
+      editPanel: (ctx, panel) => this.#editPanel(ctx, panel),
+    })
+    this.approvalManager.onRequest((item) => {
+      this.noticeStore.push({ kind: "system", text: `🚨 需要审批：${item.title}\n${item.detail}` })
+      const m = /^(?:tg|fs):(-?\d+)$/.exec(item.key)
+      const targetChat = m ? Number(m[1]) : this.ownerChatId
+      if (targetChat !== undefined) {
+        void this.#approvalCommands.sendRequestCard(targetChat, item).catch((err: unknown) => {
+          this.#log.warn("failed to send approval card:", err instanceof Error ? err.message : String(err))
+        })
+      }
+    })
     this.#accountCommands = new TelegramAccountCommands({
       accounts: this.accountStore, sendText: async (chatId, text) => { await this.#sendTextMessage(chatId, text) },
-      sendSecret: async (chatId, text) => { const sent = await this.#bot.api.sendMessage(chatId, this.#maskToken(text), { parse_mode: "Markdown" }); setTimeout(() => void this.#bot.api.deleteMessage(chatId, sent.message_id).catch(() => undefined), 60_000) },
+      sendSecret: async (chatId, text) => { const sent = await this.#bot.api.sendMessage(chatId, this.#maskToken(text)); setTimeout(() => void this.#bot.api.deleteMessage(chatId, sent.message_id).catch(() => undefined), 60_000).unref() },
     })
     this.#reminders = new ReminderService(
       resolve(cfg.dataDir, "reminders.json"),
@@ -360,6 +437,7 @@ export class TelegramBridge {
       currentModel: (key) => this.#modelCommands.getCurrentModel(key),
       cliModelLabel: (engine, model) => this.#cliModelLabel(engine, model),
       agentModels: this.#agentModels,
+      openIdForUser: (userId) => this.#channel?.openIdForUser?.(userId),
     })
     this.#personalCommands = new TelegramPersonalCommands({
       reminders: this.#reminders,
@@ -423,6 +501,7 @@ export class TelegramBridge {
       busy: (key) => this.#runningSince.has(key) || this.#pending.has(key),
       formatTime: (at) => formatReminderTime(at, this.#timezone),
     })
+    this.#workspaceCommands = new TelegramWorkspaceCommands({ workDir: (key) => this.#agents.workDir(key), busy: (key) => this.#runningSince.has(key) || this.#pending.has(key), sendText: (chatId, text, kb) => this.#sendTextMessage(chatId, text, kb), sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel) })
     this.#proxyCommands = new TelegramProxyCommands({
       proxies: this.#proxies,
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
@@ -432,7 +511,7 @@ export class TelegramBridge {
     this.#adminCommands = new TelegramAdminCommands({
       cfg: this.#cfg,
       ops: this.#ops,
-      ownerChatId: this.ownerChatId,
+      ownerChatId: () => this.ownerChatId,
       timezone: () => this.#timezone,
       applyLiveEnv: (key, value) => this.#applyLiveEnv(key, value),
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
@@ -457,6 +536,7 @@ export class TelegramBridge {
       cfg: this.#cfg,
       proxies: this.#proxies,
       log: this.#log,
+      maskToken: (text) => this.#maskToken(text),
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
     })
     this.#infoCommands = new TelegramInfoCommands({
@@ -464,6 +544,8 @@ export class TelegramBridge {
       log: this.#log,
       bot: this.#bot,
       history: this.#history,
+      usage: this.#usage,
+      budget: this.budgetStore,
       timezone: () => this.#timezone,
       sendText: (chatId, text, keyboard) => this.#sendTextMessage(chatId, text, keyboard),
       sendPanel: (chatId, panel) => this.#sendPanel(chatId, panel),
@@ -555,6 +637,12 @@ export class TelegramBridge {
     return resolveOwnerUserId(this.#cfg, this.#channel, this.ownerChatId)
   }
 
+  /** Sends a plain notification (escaped for Markdown) to the paired owner chat when available. */
+  async notifyOwner(text: string): Promise<void> {
+    const owner = this.ownerChatId
+    if (owner !== undefined) await this.#sendTextMessage(owner, escapeMarkdown(this.#maskToken(text)))
+  }
+
   /** Feishu and Telegram share one command stack; adapters submit synthetic updates here. */
   async handleUpdate(update: Parameters<Bot["handleUpdate"]>[0]): Promise<void> {
     if (!this.#cfg.telegram.token) seedFeishuBotInfo(this.#bot)
@@ -562,8 +650,8 @@ export class TelegramBridge {
   }
 
   /** Starts reminders, schedules and the daily report once for whichever transport is up. */
-  startBackgroundServices(): void {
-    this.#startServices()
+  startBackgroundServices(channel?: Channel): void {
+    this.#startServices(channel)
   }
 
   /** Sends the boot ping once per transport/chat, including Feishu-only starts. */
@@ -639,7 +727,7 @@ export class TelegramBridge {
           this.#bot.api
             .setMyCommands(BOT_MENU_COMMANDS)
             .catch((err: unknown) => this.#log.warn("failed to register Telegram command menu:", (err as Error).message))
-          this.#startServices()
+          this.#startServices("telegram")
           void this.#sendStartupNotice(botInfo.username)
         },
       })
@@ -654,17 +742,21 @@ export class TelegramBridge {
 
   /** Reminders, schedules and the usage report all deliver into Telegram, so they wait for the
    * first successful connect — and only run once, however many reconnects follow. */
-  #startServices(): void {
+  #startServices(channel?: Channel): void {
     if (!this.#coreServicesStarted) {
       this.#coreServicesStarted = true
       this.#reminders.start()
       this.#schedules.start()
-      // Messages queued before a restart: the recent ones resume, the rest are reported
+    }
+    for (const ch of channel ? [channel] : (["telegram", "feishu"] as Channel[])) {
+      if (this.#announcedStartups.has(`recover:${ch}`)) continue
+      this.#announcedStartups.add(`recover:${ch}`)
+      const match = (job: { chatId: number }) => (ch === "feishu" ? Boolean(this.#channel?.isFeishuId(job.chatId)) : !this.#channel?.isFeishuId(job.chatId))
       void this.#jobs.recover({
         enqueue: (job) => this.#enqueue({ ...job, generation: this.#generation.get(job.key) ?? 0 }),
         send: (chatId, text) => this.#sendTextMessage(chatId, text),
         remember: (key, prompt) => this.#lastPrompts.set(key, prompt),
-      })
+      }, Date.now(), match)
     }
     // Feishu has no owner chat until its first whitelisted private message
     // creates the identity mapping. Re-check on every transport event rather
@@ -740,14 +832,19 @@ export class TelegramBridge {
         if (sessionID) aborts.push(this.#oc.abortSession(sessionID).catch(() => {}))
       }
     }
+    for (const jobs of this.#pending.values()) {
+      for (const job of jobs) job.dropped = true
+    }
     for (const key of new Set([...this.#queues.keys(), ...this.#pending.keys()])) {
       this.#generation.set(key, (this.#generation.get(key) ?? 0) + 1)
     }
     this.#pending.clear()
     // A restart must not leave live one-shot confirm tokens or cached prompts behind
     this.#ccCommands.clearPending()
+    this.#magpieCommands.clearPending()
     this.#opsCommands.clearPending()
     this.#agentCommands.clearPending()
+    this.#workspaceCommands.clearPending()
     this.#lastPrompts.clear()
     this.#retryPrompts.clear()
     this.#ccCommands.clearProviders()
@@ -812,130 +909,50 @@ export class TelegramBridge {
       // Control commands bypass the per-chat queue, otherwise they wait for the running task
       const { command, arg } = parseBotCommand(text)
 
-      if (command === "/stop") {
-        await this.#handleStop(chatId, key)
-        return
-      }
-      if (command === "/start") {
-        await this.#sendTextMessage(chatId, this.#welcomeText(key, userId), this.#menuKeyboard())
-        return
-      }
-      if (command === "/menu") {
-        await this.#sendPanel(chatId, this.#menuPanel(chatId, key))
-        return
-      }
-      if (command === "/help") {
-        await this.#sendTextMessage(chatId, helpFor(arg), this.#menuKeyboard())
-        return
-      }
-      if (command === "/status") {
-        await this.#handleStatus(chatId, key)
-        return
-      }
-      if (command === "/usage") {
-        await this.#handleUsage(chatId, key)
-        return
-      }
+      if (command === "/stop") { await this.#handleStop(chatId, key); return }
+      if (command === "/start") { await this.#sendTextMessage(chatId, this.#welcomeText(key, userId), this.#menuKeyboard()); return }
+      if (command === "/menu") { await this.#sendPanel(chatId, this.#menuPanel(chatId, key)); return }
+      if (command === "/help") { await this.#sendTextMessage(chatId, helpFor(arg), this.#menuKeyboard()); return }
+      if (command === "/status") { await this.#handleStatus(chatId, key); return }
+      if (command === "/usage") { await this.#handleUsage(chatId, key); return }
+      if (command === "/budget") { await this.#infoCommands.handleBudget(chatId, arg); return }
       if (command === "/report") {
-        this.#offLoop(chatId, "每日报告", async () => {
-          await this.#sendTextMessage(chatId, escapeMarkdown(this.#usageReport.preview()), this.#reportKeyboard())
-        })
+        this.#offLoop(chatId, "每日报告", async () => { await this.#sendTextMessage(chatId, escapeMarkdown(this.#usageReport.preview()), this.#reportKeyboard()) })
         return
       }
-      if (command === "/export") {
-        this.#offLoop(chatId, "导出", () => this.#handleExport(chatId, key, arg))
-        return
-      }
+      if (command === "/export") { this.#offLoop(chatId, "导出", () => this.#handleExport(chatId, key, arg)); return }
       if (command === "/history") {
         const requested = Number(arg)
-        const count = Number.isInteger(requested) && requested > 0 ? Math.min(50, requested) : 10
-        await this.#sendPanel(chatId, this.#historyPanel(key, count))
+        await this.#sendPanel(chatId, this.#historyPanel(key, Number.isInteger(requested) && requested > 0 ? Math.min(50, requested) : 10))
         return
       }
-      if (command === "/queue") {
-        await this.#handleQueue(chatId, key)
-        return
-      }
-      if (command === "/sessions") {
-        await this.#sendPanel(chatId, this.#sessionCommands.command(key, arg))
-        return
-      }
-      if (command === "/undo") {
-        const busy = this.#runningSince.has(key) || this.#pending.has(key)
-        await this.#sendTextMessage(chatId, busy ? "任务执行中，请先 /stop 再撤销。" : workspaceChanges.undo(key).message)
-        return
-      }
-      if (command === "/proxy") {
-        // `add` runs a connectivity test that can take seconds: keep it off the
-        // update loop so /stop stays responsive in every chat
-        this.#offLoop(chatId, "代理命令", () => this.#handleProxyCommand(chatId, arg))
-        return
-      }
-      if (command === "/remind") {
-        await this.#handleRemind(chatId, userId, arg)
-        return
-      }
-      if (command === "/schedule") {
-        await this.#handleScheduleCommand(chatId, userId, key, arg)
-        return
-      }
-      if (command === "/reminders") {
-        await this.#handleReminders(chatId)
-        return
-      }
-      if (command === "/agents") {
-        await this.#handleAgentsCommand(
-          { key, text, chatId, userId, generation: this.#generation.get(key) ?? 0 },
-          arg,
-        )
-        return
-      }
-      if (isBotCommand(command, "ops")) {
-        this.#offLoop(chatId, "运维面板", async () => this.#sendPanel(chatId, await this.#opsPanel()))
-        return
-      }
-      if (command === "/diag") {
-        this.#offLoop(chatId, "诊断", () => this.#handleDiagnostics(chatId))
-        return
-      }
-      if (command === "/logs") {
-        this.#offLoop(chatId, "日志", () => this.#handleLogs(chatId, arg))
-        return
-      }
-      if (command === "/restart") {
-        await this.#confirmRestart(chatId)
-        return
-      }
-      if (command === "/update") {
-        await this.#confirmUpdate(chatId)
-        return
-      }
-      if (isBotCommand(command, "service")) {
-        await this.#handleServiceCommand(chatId, arg)
-        return
-      }
-      if (command === "/env") {
-        await this.#handleEnvCommand(chatId, arg)
-        return
-      }
-      if (command === "/access") {
-        await this.#handleAccessCommand(chatId, userId, arg)
-        return
-      }
-      if (isBotCommand(command, "timezone")) {
-        await this.#handleTimeZone(chatId, arg)
-        return
-      }
-      if (command === "/cancel") {
-        await this.#handleCancelReminder(chatId, arg)
-        return
-      }
-      if (command === "/alias") {
-        await this.#handleAliasCommand(chatId, arg)
-        return
-      }
-      if (command === "/account") {
-        await this.#accountCommands.handle(chatId, arg)
+      if (command === "/queue") { await this.#handleQueue(chatId, key); return }
+      if (command === "/api") { await this.#handleApiInfo(chatId); return }
+      if (command === "/sessions") { await this.#sendPanel(chatId, this.#sessionCommands.command(key, arg)); return }
+      if (await this.#workspaceCommands.handleCommand(chatId, key, command, arg)) return
+      if (await this.#approvalCommands.handleCommand(chatId, command, arg)) return
+      if (await this.#webhookCommands.handleCommand(chatId, command, arg)) return
+      if (command === "/proxy") { this.#offLoop(chatId, "代理命令", () => this.#handleProxyCommand(chatId, arg)); return }
+      if (command === "/remind") { await this.#handleRemind(chatId, userId, arg); return }
+      if (command === "/schedule") { await this.#handleScheduleCommand(chatId, userId, key, arg); return }
+      if (command === "/reminders") { await this.#handleReminders(chatId); return }
+      if (command === "/agents") { await this.#handleAgentsCommand({ key, text, chatId, userId, generation: this.#generation.get(key) ?? 0 }, arg); return }
+      if (isBotCommand(command, "ops")) { this.#offLoop(chatId, "运维面板", async () => this.#sendPanel(chatId, await this.#opsPanel())); return }
+      if (command === "/diag") { this.#offLoop(chatId, "诊断", () => this.#handleDiagnostics(chatId)); return }
+      if (command === "/logs") { this.#offLoop(chatId, "日志", () => this.#handleLogs(chatId, arg)); return }
+      if (command === "/restart") { await this.#confirmRestart(chatId); return }
+      if (command === "/update") { await this.#confirmUpdate(chatId); return }
+      if (isBotCommand(command, "service")) { await this.#handleServiceCommand(chatId, arg); return }
+      if (command === "/env") { await this.#handleEnvCommand(chatId, arg); return }
+      if (command === "/access") { await this.#handleAccessCommand(chatId, userId, arg); return }
+      if (isBotCommand(command, "timezone")) { await this.#handleTimeZone(chatId, arg); return }
+      if (command === "/cancel") { await this.#handleCancelReminder(chatId, arg); return }
+      if (command === "/alias") { await this.#handleAliasCommand(chatId, arg); return }
+      if (command === "/account") { await this.#accountCommands.handle(chatId, arg); return }
+      if (command === "/magpie") {
+        // Every magpie call shells out to the CLI; dispatch off-loop immediately without
+        // waiting behind a running AI task or consuming prompt queue capacity.
+        this.#offLoop(chatId, "magpie 操作", () => this.#magpieCommands.handleCommand(chatId, key, arg))
         return
       }
       if (!QUEUED_COMMANDS.has(command) && !(await this.#ensureCapacity(chatId, key))) return
@@ -1033,16 +1050,11 @@ export class TelegramBridge {
       }
 
       if (data.startsWith("aliasdel:")) {
-        const name = data.slice("aliasdel:".length)
-        const removed = this.#aliases.remove(chatId, name)
-        if (!removed) {
-          await answer("该快捷指令已不存在")
-        } else {
-          await answer(`已删除 /${removed.name}`)
-        }
-        const message = ctx.callbackQuery?.message
-        const messageId = message && "message_id" in message ? message.message_id : undefined
-        if (messageId !== undefined) await this.#editPanelRef(chatId, messageId, this.#aliasPanel(chatId))
+        const removed = this.#aliases.remove(chatId, data.slice("aliasdel:".length))
+        await answer(removed ? `已删除 /${removed.name}` : "该快捷指令已不存在")
+        const msg = ctx.callbackQuery?.message
+        const msgId = msg && "message_id" in msg ? msg.message_id : undefined
+        if (msgId !== undefined) await this.#editPanelRef(chatId, msgId, this.#aliasPanel(chatId))
         else await this.#sendPanel(chatId, this.#aliasPanel(chatId))
         return
       }
@@ -1051,43 +1063,17 @@ export class TelegramBridge {
       const refresh = (panel: Panel): Promise<void> =>
         message && "message_id" in message ? this.#editPanelRef(chatId, message.message_id, panel) : this.#sendPanel(chatId, panel)
       if (await this.#sessionCommands.callback(data, key, answer, (text) => this.#sendTextMessage(chatId, text), refresh)) return
+      if (await this.#workspaceCommands.handleCallback(data, chatId, key, answer, refresh)) return
+      if (await this.#approvalCommands.handleCallback(ctx, data, answer)) return
+      if (await this.#webhookCommands.handleCallback(ctx, data, answer)) return
 
       const snoozeMatch = /^snooze:([0-9a-f]+):(\d+)$/.exec(data)
-      if (snoozeMatch) {
-        await this.#reminderDelivery.snooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer)
-        return
-      }
-
-      // 纯展示按钮（如分页指示「2/3」）：点了只确认，不做任何事
-      if (data.startsWith("noop:")) {
-        await answer()
-        return
-      }
-
-      if (data.startsWith("tz:")) {
-        await answer()
-        await this.#handleTimeZone(chatId, data.slice("tz:".length))
-        return
-      }
-
-      if (data.startsWith("magpie:")) {
-        const rest = data.slice("magpie:".length)
-        this.#offLoop(chatId, "magpie 操作", () => this.#magpieCommands.handleCallback(ctx, chatId, rest, answer))
-        return
-      }
-
-      if (data.startsWith("cc:")) {
-        const rest = data.slice("cc:".length)
-        // Every cc action shells out to cc-switch (up to 20s per call): keep the
-        // update loop free so other chats' /stop and buttons stay responsive
-        this.#offLoop(chatId, "cc 操作", () => this.#ccCommands.handleCallback(ctx, chatId, rest, answer))
-        return
-      }
-
-      if (data.startsWith("ops:")) {
-        await this.#handleOpsCallback(chatId, data.slice("ops:".length), answer)
-        return
-      }
+      if (snoozeMatch) { await this.#reminderDelivery.snooze(chatId, snoozeMatch[1]!, Number(snoozeMatch[2]), answer); return }
+      if (data.startsWith("noop:")) { await answer(); return }
+      if (data.startsWith("tz:")) { await answer(); await this.#handleTimeZone(chatId, data.slice("tz:".length)); return }
+      if (data.startsWith("magpie:")) { this.#offLoop(chatId, "magpie 操作", () => this.#magpieCommands.handleCallback(ctx, chatId, data.slice("magpie:".length), answer)); return }
+      if (data.startsWith("cc:")) { this.#offLoop(chatId, "cc 操作", () => this.#ccCommands.handleCallback(ctx, chatId, data.slice("cc:".length), answer)); return }
+      if (data.startsWith("ops:")) { await this.#handleOpsCallback(chatId, data.slice("ops:".length), answer); return }
 
       if (data === "task:stop") {
         await answer("正在停止…")
@@ -1340,8 +1326,12 @@ export class TelegramBridge {
 
   async #handleStop(chatId: number, key: string): Promise<void> {
     this.#generation.set(key, (this.#generation.get(key) ?? 0) + 1)
-    const queued = this.#pending.get(key)?.length ?? 0
-    if (queued > 0) this.#pending.delete(key)
+    const pending = this.#pending.get(key)
+    const queued = pending?.length ?? 0
+    if (pending) {
+      for (const job of pending) job.dropped = true
+      this.#pending.delete(key)
+    }
     this.#jobs.dropQueued(key)
     const controller = this.#cancels.get(key)
     if (controller) {
@@ -1509,13 +1499,19 @@ export class TelegramBridge {
 
   async #process(job: Job): Promise<void> {
     this.#dequeue(job)
-    this.#jobs.started(job)
     if (job.dropped) {
-      // Removed from the queue panel: never reaches the engine and stays silent
+      // Removed from the queue panel, /stop, or shutdown: never reaches commands or engine
       this.#log.debug(`dropped queued message [${job.key}] on request`)
       job.onOutcome?.("cancelled")
       return
     }
+    // A /stop bumps the generation; discard queued commands AND prompts from before it.
+    if (job.generation !== (this.#generation.get(job.key) ?? 0)) {
+      this.#log.debug(`dropped stale message [${job.key}]`)
+      job.onOutcome?.("cancelled")
+      return
+    }
+    this.#jobs.started(job)
     // Scheduled prompts are executed verbatim, even if they start with "/"
     const parts = job.scheduled ? [] : job.text.split(/\s+/)
     const rawCommand = parts[0]?.toLowerCase() ?? ""
@@ -1545,14 +1541,17 @@ export class TelegramBridge {
     if (isBotCommand(command, "new")) {
       // Parked rather than deleted, titled by the last prompt: /sessions can switch back to it
       const title = this.#lastPrompts.get(job.key)?.text.split("\n", 1)[0]?.trim().slice(0, 60)
+      this.approvalManager.clearSessionAllows(job.key)
       await this.#sendTextMessage(job.chatId, await this.#sessionCommands.newSession(job.key, title || undefined))
       return
     }
 
     if (command === "/id") {
       const engine = this.#store.getEngine(job.key)
+      const chatLabel = this.#channel?.receiveIdForChat?.(job.chatId) ?? String(job.chatId)
+      const userLabel = this.#channel?.openIdForUser?.(job.userId) ?? String(job.userId)
       let infoText =
-        `🆔 *会话信息*\n• 聊天 ID: \`${job.chatId}\`\n• 用户 ID: \`${job.userId}\`\n` +
+        `🆔 *会话信息*\n• 聊天 ID: \`${chatLabel}\`\n• 用户 ID: \`${userLabel}\`\n` +
         `• 当前 Agent: *${escapeMarkdown(this.#agents.registry.label(engine))}*\n` +
         `• 提醒时区: \`${this.#timezone}\`\n`
 
@@ -1608,13 +1607,6 @@ export class TelegramBridge {
         await this.#sendTextMessage(job.chatId, "⚠️ 还没有可重试的任务。")
         return
       }
-      // /stop bumps the generation, so a /retry that was queued before it must not
-      // resurrect the work the user just discarded
-      if (job.generation !== (this.#generation.get(job.key) ?? 0)) {
-        this.#log.debug(`dropped stale retry [${job.key}]`)
-        job.onOutcome?.("cancelled")
-        return
-      }
       await this.#sendTextMessage(job.chatId, "🔁 已重新提交上一条任务。")
       await this.#process({ ...job, text: last.text, attachments: last.attachments })
       return
@@ -1623,13 +1615,6 @@ export class TelegramBridge {
     if (job.text.length > MAX_INPUT_LENGTH) {
       await this.#sendTextMessage(job.chatId, `⚠️ 消息太长了（上限 ${MAX_INPUT_LENGTH} 字），请分段发送。`)
       job.onOutcome?.("failed")
-      return
-    }
-
-    // A /stop bumps the generation; queued prompts from before it are discarded
-    if (job.generation !== (this.#generation.get(job.key) ?? 0)) {
-      this.#log.debug(`dropped stale message [${job.key}]`)
-      job.onOutcome?.("cancelled")
       return
     }
 
@@ -1664,8 +1649,7 @@ export class TelegramBridge {
       registry: this.#agents.registry,
       opencodeHealthy: () => this.#opencodeHealth.isHealthy(),
     })
-    // No abort controller exists yet while the health probe runs, so a /stop sent now only bumps
-    // the generation; without this check the prompt still ran after the user stopped it
+    // Drop if /stop bumped generation while resolving engine health.
     if (job.generation !== (this.#generation.get(job.key) ?? 0)) {
       this.#log.debug(`dropped message stopped while choosing its engine [${job.key}]`)
       job.onOutcome?.("cancelled")
@@ -1676,12 +1660,11 @@ export class TelegramBridge {
     const isOpencode = engine === "opencode"
     const activeModel = isOpencode ? (job.model ?? this.#modelCommands.getCurrentModel(job.key)) : undefined
     // A CLI model belongs to the engine it was chosen for, so a fallback drops it
-    const cliModel = isOpencode
-      ? undefined
-      : (switched ? undefined : job.cliModel) ?? this.#store.getCliModel(job.key, engine)
+    const cliModel = isOpencode ? undefined : (switched ? undefined : job.cliModel) ?? this.#store.getCliModel(job.key, engine)
     const taskStarted = Date.now()
     let outcome: UsageOutcome = "failed"
     let failureDetail: string | undefined
+    let tokenUsage: TokenUsage | undefined
 
     const controller = new AbortController()
 
@@ -1701,7 +1684,7 @@ export class TelegramBridge {
       this.#cancels.set(job.key, controller)
       this.#runningSince.set(job.key, Date.now())
       const input = job.attachments?.length
-        ? await this.#buildAttachmentInput(job, activeModel, controller.signal)
+        ? await this.#buildAttachmentInput(job, activeModel, controller.signal, isOpencode)
         : { text: job.text, files: [] as PromptFile[] }
       const attachmentInfo = job.attachments?.length ? ` attachments=${job.attachments.length}` : ""
       const promptLabel = isOpencode ? `OpenCode: ${activeModel?.label ?? "engine config"}` : this.#agents.registry.label(engine)
@@ -1718,6 +1701,7 @@ export class TelegramBridge {
         signal: controller.signal,
         onProgress: (status) => tracker.update(maskSecretValues(status)),
         onDraft: (text) => tracker.draft(maskSecretValues(text)),
+        onUsage: (u) => { tokenUsage = u },
       })
 
       typingActive = false
@@ -1730,6 +1714,11 @@ export class TelegramBridge {
       // `[[secret: NAME]]` turns into a 安全输入 card after the reply instead of text
       const asked = this.#secretInput.fromReply(job, note ? `ℹ️ ${note}\n\n${reply}` : reply)
       await this.#sendReply(job, asked.text)
+      if (!job.scheduled) {
+        const modelLabel = isOpencode ? activeModel?.label : (cliModel ? this.#agentModels.label(engine, cliModel) : undefined)
+        this.transcriptStore.append(job.key, { role: "user", text: job.text, engine, model: modelLabel })
+        this.transcriptStore.append(job.key, { role: "assistant", text: asked.text, engine, model: modelLabel })
+      }
       await asked.ask()
       outcome = "ok"
     } catch (err) {
@@ -1737,7 +1726,7 @@ export class TelegramBridge {
       void typingPromise
       await tracker.finish()
       const detail = err instanceof Error ? err.message : String(err)
-      if (/已取消当前任务/.test(detail)) {
+      if (controller.signal.aborted || /已取消当前任务/.test(detail)) {
         outcome = "cancelled"
         failureDetail = redactSecrets(this.#maskToken(detail)).replace(/\s+/g, " ").slice(0, 300)
         return
@@ -1752,7 +1741,7 @@ export class TelegramBridge {
       this.#rememberRetry(job)
       await this.#sendTextMessage(
         job.chatId,
-        `抱歉，处理这条消息时出错了：\n${escapeMarkdown(redactSecrets(detail))}${hint}`,
+        `抱歉，处理这条消息时出错了：\n${escapeMarkdown(this.#maskToken(redactSecrets(detail)))}${hint}`,
         !job.scheduled && job.id ? new InlineKeyboard().text("🔁 重试", `retry:${job.id}`) : undefined,
       )
     } finally {
@@ -1762,7 +1751,7 @@ export class TelegramBridge {
           ? this.#agentModels.label(engine, cliModel)
           : undefined
       const ms = Date.now() - taskStarted
-      this.#outcomes.record({ task: job, engine, model: modelLabel, outcome, detail: failureDetail, ms, startedAt: taskStarted })
+      this.#outcomes.record({ task: job, engine, model: modelLabel, outcome, detail: failureDetail, ms, startedAt: taskStarted, tokens: tokenUsage })
       if (this.#cancels.get(job.key) === controller) this.#cancels.delete(job.key)
       this.#runningSince.delete(job.key)
       this.#pruneChatState()
@@ -1787,8 +1776,13 @@ export class TelegramBridge {
     if (removed > 0) this.#log.debug(`pruned ${removed} idle chat state entries`)
   }
 
-  async #buildAttachmentInput(job: Job, model?: ModelRef, signal?: AbortSignal): Promise<{ text: string; files: PromptFile[] }> {
-    return this.#attachments.buildAttachmentInput(job, model, signal)
+  async #buildAttachmentInput(
+    job: Job,
+    model?: ModelRef,
+    signal?: AbortSignal,
+    isOpencode = true,
+  ): Promise<{ text: string; files: PromptFile[] }> {
+    return this.#attachments.buildAttachmentInput(job, model, signal, isOpencode)
   }
 
   async #handleAgentCommand(job: Job, target?: string): Promise<void> {
@@ -2091,7 +2085,12 @@ export class TelegramBridge {
   /** redactSecrets does not know the Telegram token shape, so mask it separately. */
   #maskToken(text: string): string {
     const token = this.#cfg.telegram.token
-    return maskSecretValues(token && text.includes(token) ? text.split(token).join("***") : text)
+    let out = token && text.includes(token) ? text.split(token).join("***") : text
+    if (token) {
+      const escaped = escapeMarkdown(token)
+      if (escaped !== token && out.includes(escaped)) out = out.split(escaped).join("***")
+    }
+    return maskSecretValues(out)
   }
 
   async #sendTextMessage(

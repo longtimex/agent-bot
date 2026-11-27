@@ -47,7 +47,7 @@ jobs:
           exit "$status"
       - name: Typecheck and build
         if: matrix.full != true
-        run: npm run typecheck && npm run build
+        run: npm run typecheck && npm run typecheck:tests && npm run build
 
   # `check:android` only balances braces and greps rules; it cannot see an unresolved
   # reference or a Compose scope error. Compiling here means a Kotlin change that never

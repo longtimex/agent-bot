@@ -14,6 +14,7 @@ import {
 } from "./media.js"
 import { escapeMarkdown, splitMessage } from "./messages.js"
 import type { ProxyService } from "./proxy.js"
+import { maskSecretValues } from "./secretVault.js"
 import type { Job } from "./telegram.js"
 import { sleep } from "./telegramSupport.js"
 
@@ -25,6 +26,7 @@ export interface MediaSenderDeps {
   cfg: BotConfig
   proxies: ProxyService
   log: Logger
+  maskToken?: (text: string) => string
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
 }
 
@@ -128,10 +130,11 @@ export class TelegramMediaSender {
         }
       }
     } catch (err) {
-      // The detail is CLI/HTTP text: it can carry Markdown markers and a signed URL
-      const detail = escapeMarkdown(redactSecrets(err instanceof Error ? err.message : String(err)))
-      this.#deps.log.error(`media failed [${job.key}] ${part.kind}:`, detail)
-      await this.#deps.sendText(job.chatId, `⚠️ ${mediaLabel(part.kind)}发送失败：${detail}`)
+      // Mask tokens and vault secrets BEFORE Markdown escaping so escaped markers never bypass masking.
+      const raw = redactSecrets(err instanceof Error ? err.message : String(err))
+      const masked = maskSecretValues(this.#deps.maskToken ? this.#deps.maskToken(raw) : raw)
+      this.#deps.log.error(`media failed [${job.key}] ${part.kind}:`, masked)
+      await this.#deps.sendText(job.chatId, `⚠️ ${mediaLabel(part.kind)}发送失败：${escapeMarkdown(masked)}`)
     }
   }
 
@@ -187,6 +190,7 @@ export class TelegramMediaSender {
   async readCappedBody(res: {
     headers: { get(name: string): string | null }
     body: {
+      cancel?: (reason?: unknown) => Promise<void>
       getReader(): {
         read(): Promise<{ done: boolean; value?: Uint8Array }>
         cancel(reason?: unknown): Promise<void>
@@ -197,6 +201,7 @@ export class TelegramMediaSender {
     const limit = this.#deps.cfg.maxMediaBytes
     const declared = Number(res.headers.get("content-length"))
     if (Number.isFinite(declared) && declared > limit) {
+      await res.body?.cancel?.().catch(() => {})
       throw new Error(`远程文件超过 ${Math.round(limit / 1024 / 1024)}MB 限制`)
     }
     if (!res.body) throw new Error("远程响应为空")

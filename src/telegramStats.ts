@@ -9,6 +9,7 @@ import type { ScheduleService } from "./scheduler.js"
 import type { SessionStore } from "./store.js"
 import { formatDateTime, formatDuration } from "./telegramSupport.js"
 import type { UsageStore } from "./usage.js"
+import { formatTokens, formatUsd } from "./tokenUsage.js"
 
 export interface StatsPanelDeps {
   cfg: BotConfig
@@ -94,13 +95,19 @@ export class TelegramStatsPanels {
       otherSources.length > 0
         ? `\n• 全局今日：${globalToday.reduce((sum, row) => sum + row.usage.tasks, 0)} 次（含 ${otherSources.length} 个其他来源，点「📩 每日报告」看明细）`
         : ""
+    const totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+    const todayTokens = (usage.today.inputTokens ?? 0) + (usage.today.outputTokens ?? 0)
+    const costLine =
+      totalTokens > 0 || (usage.costUsd ?? 0) > 0
+        ? `\n• Token / 费用：累计 ${formatTokens(totalTokens)}（${formatUsd(usage.costUsd ?? 0)}）· 今日 ${formatTokens(todayTokens)}（${formatUsd(usage.today.costUsd ?? 0)}）`
+        : ""
     return {
       text:
         `📈 *使用统计*\n\n` +
         `• 总任务：${usage.tasks}（成功 ${usage.ok} / 失败 ${usage.failed} / 取消 ${usage.cancelled}）\n` +
         `• 成功率：${rate}%\n` +
         `• 平均耗时：${formatDuration(avg)}\n` +
-        `• 今日任务：${usage.today.tasks}（成功 ${usage.today.ok} / 失败 ${usage.today.failed} / 取消 ${usage.today.cancelled}）${globalLine}\n` +
+        `• 今日任务：${usage.today.tasks}（成功 ${usage.today.ok} / 失败 ${usage.today.failed} / 取消 ${usage.today.cancelled}）${globalLine}${costLine}\n` +
         `• 近 7 天：${week.tasks} 任务（成功 ${week.ok} / 失败 ${week.failed} / 取消 ${week.cancelled}）\n` +
         `  \`${spark}\` ${range}\n` +
         `• 引擎使用：${engineUsage}` +

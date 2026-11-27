@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { InlineKeyboard } from "grammy"
 import type { BotConfig } from "../src/config.js"
 import type { OpsService } from "../src/ops.js"
 import { TelegramAdminCommands } from "../src/telegramAdminCommands.js"
@@ -31,7 +32,7 @@ function harness(users: string[], owner: number | undefined, envOk = true) {
     },
     sendText: async (_chatId, text) => { sent.push(text); return true },
     sendPanel: async () => {},
-    accessPanel: () => ({ text: "access", keyboard: undefined }),
+    accessPanel: () => ({ text: "access", keyboard: new InlineKeyboard() }),
     timezonePanel: () => "timezone",
   })
   return { commands, cfg, sent, env, applied }

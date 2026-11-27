@@ -4,8 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import { assertFileMode } from "./support/platform.js"
-import { formatHistoryMarkdown } from "../src/history.js"
-import { MAX_HISTORY_PER_CHAT, TaskHistoryStore } from "../src/history.js"
+import { formatHistoryMarkdown, MAX_HISTORY_PER_CHAT, TaskHistoryStore, type HistoryEntry } from "../src/history.js"
 import type { Logger } from "../src/logger.js"
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} }
@@ -209,7 +208,7 @@ test("TaskHistoryStore keeps a recent entry in a chat that also has stale ones",
 })
 
 test("formatHistoryMarkdown renders a standalone document with quoted prompts", () => {
-  const entries = [
+  const entries: HistoryEntry[] = [
     { at: Date.UTC(2026, 0, 2, 3, 30), prompt: "第一行\n第二行", engine: "opencode", model: "Gemini 3.8", ms: 12_345, outcome: "ok" },
     { at: Date.UTC(2026, 0, 1, 9, 0), prompt: "```json\n{}\n```", engine: "claude", ms: 500, outcome: "failed", errorCode: "CLI_ARGUMENT_INVALID", detail: "unexpected argument '-C'", scheduled: true },
   ]

@@ -12,9 +12,9 @@ interface ProbeResult {
   stderr: string
 }
 
-function runProbe(cwd: string, env: NodeJS.ProcessEnv): Promise<ProbeResult> {
+function runProbe(cwd: string, env: NodeJS.ProcessEnv, args: string[] = []): Promise<ProbeResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(process.cwd(), "scripts", "release-health.mjs")], {
+    const child = spawn(process.execPath, [join(process.cwd(), "scripts", "release-health.mjs"), ...args], {
       cwd,
       env: { PATH: process.env.PATH, HOME: cwd, ...env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -189,5 +189,24 @@ test("release health loads API settings from .env when the caller did not source
     })
     assert.equal(result.code, 0, result.stderr)
     assert.match(result.stdout, /local startup ok/)
+  })
+})
+
+test("release health --live validates liveness for container healthchecks without RELEASE_START_AT", async () => {
+  await withDir(async (dir) => {
+    writeStartup(dir, { release: "checkout", pid: process.pid })
+    const alive = await runProbe(dir, { API_ENABLED: "0", DATA_DIR: "data" }, ["--live"])
+    assert.equal(alive.code, 0, alive.stderr)
+    assert.match(alive.stdout, /live startup ok/)
+
+    writeStartup(dir, { release: "checkout", pid: 999_999_999 })
+    const dead = await runProbe(dir, { API_ENABLED: "0", DATA_DIR: "data" }, ["--live"])
+    assert.equal(dead.code, 1)
+    assert.match(dead.stderr, /is not running/)
+
+    writeStartup(dir, { release: "checkout", pid: process.pid, failure: "boot error" })
+    const failed = await runProbe(dir, { API_ENABLED: "0", DATA_DIR: "data" }, ["--live"])
+    assert.equal(failed.code, 1)
+    assert.match(failed.stderr, /boot error/)
   })
 })

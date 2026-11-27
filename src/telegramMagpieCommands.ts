@@ -3,8 +3,9 @@ import type { Context } from "grammy"
 import { InlineKeyboard } from "grammy"
 import { escapeMarkdown, clip, type Panel } from "./messages.js"
 import { MAGPIE_HELP } from "./help.js"
-import { magpieErrorText, type MagpieService } from "./magpie.js"
-import { magpieBlockedReason, magpieConfirmPlan } from "./magpieGuards.js"
+import { redactSecrets } from "./ccswitch.js"
+import { MAGPIE_LONG_TIMEOUT_MS, magpieErrorText, type MagpieService } from "./magpie.js"
+import { isLongMagpieCommand, magpieBlockedReason, magpieConfirmPlan } from "./magpieGuards.js"
 import {
   MAGPIE_EXEC,
   MAGPIE_VIEWS,
@@ -25,6 +26,7 @@ interface PendingAction {
   chatId: number
   args: string[]
   label: string
+  timeoutMs?: number
   createdAt: number
 }
 
@@ -91,6 +93,10 @@ export class MagpieCommands {
     this.#host = host
     this.#magpie = magpie
     this.#log = log
+  }
+
+  clearPending(): void {
+    this.#pending.clear()
   }
 
   async panel(chatId: number, notice?: string): Promise<Panel> {
@@ -317,8 +323,9 @@ export class MagpieCommands {
       return
     }
     const plan = magpieConfirmPlan(args)
-    if (plan && !(await this.#requestConfirm(chatId, args, plan.label))) return
-    await this.#execute(chatId, spec.label, args)
+    const timeoutMs = spec.timeoutMs ?? plan?.timeoutMs ?? (spec.long ? MAGPIE_LONG_TIMEOUT_MS : undefined)
+    if (plan && !(await this.#requestConfirm(chatId, args, plan.label, timeoutMs))) return
+    await this.#execute(chatId, spec.label, args, { timeoutMs, write: true })
   }
 
   async #runRaw(chatId: number, words: string[]): Promise<void> {
@@ -343,29 +350,41 @@ export class MagpieCommands {
       return
     }
     const plan = magpieConfirmPlan(args)
-    if (plan && !(await this.#requestConfirm(chatId, args, plan.label))) return
-    await this.#execute(chatId, `magpie ${args.slice(0, 3).join(" ")}`, args)
+    const timeoutMs = plan?.timeoutMs ?? (isLongMagpieCommand(args) ? MAGPIE_LONG_TIMEOUT_MS : undefined)
+    if (plan && !(await this.#requestConfirm(chatId, args, plan.label, timeoutMs))) return
+    const previewLabel = redactSecrets(`magpie ${args.slice(0, 3).join(" ")}`)
+    await this.#execute(chatId, previewLabel, args, { timeoutMs, write: Boolean(plan) })
   }
 
   /** True when the action may run now; false when a confirmation was sent instead. */
-  async #requestConfirm(chatId: number, args: string[], label: string): Promise<boolean> {
+  async #requestConfirm(chatId: number, args: string[], label: string, timeoutMs?: number): Promise<boolean> {
     this.#prunePending()
     const token = randomBytes(6).toString("hex")
-    this.#pending.set(token, { chatId, args, label, createdAt: Date.now() })
+    this.#pending.set(token, { chatId, args, label, timeoutMs, createdAt: Date.now() })
     const keyboard = new InlineKeyboard()
       .text("✅ 确认执行", `magpie:cfm:${token}`)
       .text("取消", `magpie:cnl:${token}`)
+    const previewArgs = (clip(redactSecrets(args.join(" ")), 200) ?? "").replace(/`/g, "'")
     await this.#host.sendText(
       chatId,
-      `⚠️ *需要确认*\n\n${escapeMarkdown(label)}\n\`${escapeMarkdown(clip(args.join(" "), 200) ?? "")}\`\n\n_5 分钟内有效。_`,
+      `⚠️ *需要确认*\n\n${escapeMarkdown(redactSecrets(label))}\n\`${previewArgs}\`\n\n_5 分钟内有效。_`,
       keyboard,
     )
     return false
   }
 
-  async #execute(chatId: number, label: string, args: string[]): Promise<void> {
+  async #execute(
+    chatId: number,
+    label: string,
+    args: string[],
+    options: { timeoutMs?: number; write?: boolean } = {},
+  ): Promise<void> {
     try {
-      const text = await this.#magpie.runRaw(args)
+      const runCall = () => this.#magpie.runRaw(args, options.timeoutMs)
+      const text =
+        options.write && typeof this.#magpie.runWriteLocked === "function"
+          ? await this.#magpie.runWriteLocked(runCall)
+          : await runCall()
       await this.#sendOutput(chatId, `✅ *${escapeMarkdown(label)}*`, text || "（无输出）")
     } catch (err) {
       this.#log.warn(`magpie command failed: ${magpieErrorText(err)}`)
@@ -400,8 +419,8 @@ export class MagpieCommands {
     if (kind === "cfm" || kind === "cnl") {
       await answer()
       const pending = this.#pending.get(token)
-      this.#pending.delete(token)
       if (!pending || Date.now() - pending.createdAt > CONFIRM_TTL_MS) {
+        this.#pending.delete(token)
         await this.#host.sendText(chatId, "⌛ 操作已过期，请重新发起。")
         return
       }
@@ -409,11 +428,12 @@ export class MagpieCommands {
         await this.#host.sendText(chatId, "⌛ 该确认按钮不属于当前会话。")
         return
       }
+      this.#pending.delete(token)
       if (kind === "cnl") {
         await this.#host.sendText(chatId, "已取消。")
         return
       }
-      await this.#execute(chatId, pending.label, pending.args)
+      await this.#execute(chatId, pending.label, pending.args, { timeoutMs: pending.timeoutMs, write: true })
       return
     }
 

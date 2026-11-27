@@ -456,8 +456,14 @@ export class ScheduleService {
     return this.#store.find(chatId, id) ? this.#store.updateById(id, { paused: true }) : undefined
   }
 
-  resume(chatId: number, id: number): ScheduledTask | undefined {
-    return this.#store.find(chatId, id) ? this.#store.updateById(id, { paused: false }) : undefined
+  resume(chatId: number, id: number, now = Date.now()): ScheduledTask | undefined {
+    const task = this.#store.find(chatId, id)
+    if (!task) return undefined
+    // If a repeating schedule sat paused past its due window, jump ahead to the next
+    // future slot instead of immediately firing a stale catch-up run.
+    const nextDue =
+      task.repeat && task.dueAt < now - TICK_MS ? (nextReminderDue(task, now, this.#timeZone) ?? task.dueAt) : task.dueAt
+    return this.#store.updateById(id, { paused: false, dueAt: nextDue })
   }
 
   remove(chatId: number, id: number): ScheduledTask | undefined {

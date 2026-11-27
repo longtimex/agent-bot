@@ -105,7 +105,8 @@ export async function routeTasks(
         throw new ApiError(410, "任务的附件已从收件目录清理，无法只凭空提示词重试")
       }
       const note = unreadable > 0 ? `${failed.text}\n\n[附件处理失败]\n${unreadable} 个附件已从收件目录清理，本次重试无法读取` : failed.text
-      const task = await deps.tasks.submitSaved(note, failed.engine, failed.model, readable.length > 0 ? readable : undefined)
+      // Pass discardOnError=false so a 409 queue-full rejection never deletes the original task's inbox files.
+      const task = await deps.tasks.submitSaved(note, failed.engine, failed.model, readable.length > 0 ? readable : undefined, [], false)
       deps.json(ctx.res, 202, { ok: true, retriedFrom: id, task: deps.tasks.view(task) })
       return true
     }

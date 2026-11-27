@@ -2,6 +2,7 @@ import type { ModelRef } from "./config.js"
 import { clip } from "./messages.js"
 import { pathToFileURL } from "node:url"
 import { Agent, fetch, type Dispatcher } from "undici"
+import { extractOpencodeUsage, type TokenUsage } from "./tokenUsage.js"
 
 export class OpencodeError extends Error {
   /** HTTP status when the failure came from a responded request, otherwise undefined. */
@@ -24,6 +25,14 @@ interface MessageInfo {
     name?: string
     data?: { message?: string }
   } | null
+  tokens?: {
+    input?: number
+    output?: number
+    reasoning?: number
+    cache?: { read?: number; write?: number }
+  }
+  cost?: number
+  modelID?: string
 }
 
 interface PromptResponse {
@@ -54,11 +63,21 @@ export interface ModelInputs {
   pdf: boolean
 }
 
+export interface PermissionRequest {
+  id: string
+  sessionID: string
+  title: string
+  type?: string
+  pattern?: string
+  metadata?: Record<string, unknown>
+}
+
 interface OpencodeFeedSubscriber {
   sessionID: string
   onUpdate: (summary: string) => void
   /** The answer so far, as OpenCode streams it; only for subscribers that asked for it. */
   onDraft?: (text: string) => void
+  onPermission?: (req: PermissionRequest) => void
   draft?: DraftTracker
 }
 
@@ -95,7 +114,11 @@ class DraftTracker {
       .map((value) => value.trim())
       .filter(Boolean)
       .join("\n\n")
-    return text.length > MAX_DRAFT_CHARS ? `…${text.slice(text.length - MAX_DRAFT_CHARS)}` : text
+    if (text.length <= MAX_DRAFT_CHARS) return text
+    let start = text.length - MAX_DRAFT_CHARS
+    const code = text.charCodeAt(start)
+    if (code >= 0xdc00 && code <= 0xdfff && start + 1 < text.length) start += 1
+    return `…${text.slice(start)}`
   }
 }
 
@@ -137,6 +160,7 @@ export interface PromptOptions {
   /** `0` disables the wall-clock ceiling; the idle watchdog still applies. */
   maxTimeoutMs?: number
   onActivityHook?: (touch: () => void) => void
+  onUsage?: (usage: TokenUsage) => void
   signal?: AbortSignal
   files?: PromptFile[]
 }
@@ -212,6 +236,7 @@ export class Opencode {
   readonly #fetch: typeof fetch
   #capabilities = new Map<string, ModelInputs>()
   #capabilitiesAt = 0
+  #capabilitiesFetch?: Promise<void>
 
   constructor(
     baseUrl: string,
@@ -240,6 +265,8 @@ export class Opencode {
 
   /** Release keep-alive sockets; the process normally lives as long as the bot. */
   async close(): Promise<void> {
+    this.#stopFeed()
+    this.#feedSubs.clear()
     if (this.#ownsDispatcher) await this.#dispatcher.close().catch(() => {})
   }
 
@@ -307,32 +334,55 @@ export class Opencode {
     await this.#request("POST", `/session/${encodeURIComponent(sessionID)}/abort`, undefined, 10_000)
   }
 
+  /** Replies to a live OpenCode permission request (`once` | `always` | `reject`). */
+  async replyPermission(
+    sessionID: string,
+    permissionID: string,
+    response: "once" | "always" | "reject",
+  ): Promise<void> {
+    await this.#request(
+      "POST",
+      `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(permissionID)}`,
+      { response },
+      CONTROL_TIMEOUT_MS,
+    )
+  }
+
   // Best-effort lookup of the modalities a model accepts; used to avoid sending
   // attachments that the current model would silently drop.
   async inputCapabilities(model?: ModelRef): Promise<ModelInputs | undefined> {
     if (!model) return undefined
-    if (Date.now() - this.#capabilitiesAt > 60_000) {
-      // Stamp the attempt even when /provider fails, so a backend that is down or
-      // slow is not re-polled with a fresh 10s timeout on every attachment
-      this.#capabilitiesAt = Date.now()
-      try {
-        const body = await this.#request<ProviderList>("GET", "/provider", undefined, 10_000)
-        const next = new Map<string, ModelInputs>()
-        for (const provider of body?.all ?? []) {
-          for (const [id, info] of Object.entries(provider.models ?? {})) {
-            const input = info.capabilities?.input
-            next.set(`${provider.id}/${id}`, {
-              image: input?.image === true,
-              audio: input?.audio === true,
-              video: input?.video === true,
-              pdf: input?.pdf === true,
-            })
+    if (this.#capabilitiesFetch) {
+      await this.#capabilitiesFetch
+    } else if (Date.now() - this.#capabilitiesAt > 60_000) {
+      // Deduplicate concurrent cold-cache fetches so a second attachment waits for
+      // the in-flight /provider lookup instead of reading an empty map.
+      let pending: Promise<void> | undefined
+      pending = (async () => {
+        try {
+          const body = await this.#request<ProviderList>("GET", "/provider", undefined, 10_000)
+          const next = new Map<string, ModelInputs>()
+          for (const provider of body?.all ?? []) {
+            for (const [id, info] of Object.entries(provider.models ?? {})) {
+              const input = info.capabilities?.input
+              next.set(`${provider.id}/${id}`, {
+                image: input?.image === true,
+                audio: input?.audio === true,
+                video: input?.video === true,
+                pdf: input?.pdf === true,
+              })
+            }
           }
+          this.#capabilities = next
+        } catch {
+          // keep the previous cache; capability detection is best-effort
+        } finally {
+          this.#capabilitiesAt = Date.now()
+          if (this.#capabilitiesFetch === pending) this.#capabilitiesFetch = undefined
         }
-        this.#capabilities = next
-      } catch {
-        // keep the previous cache; capability detection is best-effort
-      }
+      })()
+      this.#capabilitiesFetch = pending
+      await pending
     }
     return this.#capabilities.get(`${model.providerID}/${model.modelID}`)
   }
@@ -350,9 +400,15 @@ export class Opencode {
     sessionID: string,
     onUpdate: (summary: string) => void,
     onDraft?: (text: string) => void,
+    onPermission?: (req: PermissionRequest) => void,
   ): () => void {
     const id = ++this.#feedSeq
-    this.#feedSubs.set(id, { sessionID, onUpdate, ...(onDraft ? { onDraft, draft: new DraftTracker() } : {}) })
+    this.#feedSubs.set(id, {
+      sessionID,
+      onUpdate,
+      ...(onDraft ? { onDraft, draft: new DraftTracker() } : {}),
+      ...(onPermission ? { onPermission } : {}),
+    })
     this.#startFeed()
     return () => {
       this.#feedSubs.delete(id)
@@ -385,8 +441,22 @@ export class Opencode {
       // Snapshot: an onUpdate that unsubscribes would otherwise shrink the Map mid-iteration
       // and silently skip the subscribers behind the one that left.
       const subs = Array.from(this.#feedSubs.values())
+      const isPerm = ev.type === "permission.updated" || ev.type === "permission.asked"
+      const props = ev.properties ?? {}
+      const permId = isPerm && typeof props.id === "string" ? props.id : undefined
+      const permSession = isPerm && typeof props.sessionID === "string" ? props.sessionID : undefined
       for (const sub of subs) {
         try {
+          if (isPerm && permId && permSession === sub.sessionID && sub.onPermission) {
+            sub.onPermission({
+              id: permId,
+              sessionID: permSession,
+              title: typeof props.title === "string" && props.title ? props.title : (typeof props.type === "string" ? props.type : "高危权限请求"),
+              type: typeof props.type === "string" ? props.type : undefined,
+              pattern: typeof props.pattern === "string" ? props.pattern : undefined,
+              metadata: props.metadata && typeof props.metadata === "object" ? (props.metadata as Record<string, unknown>) : undefined,
+            })
+          }
           const draft = sub.draft?.accept(ev, sub.sessionID)
           if (draft !== undefined) sub.onDraft?.(draft)
           const status = eventStatus(ev, sub.sessionID)
@@ -440,15 +510,17 @@ export class Opencode {
                 pending = ""
                 return
               }
-              let ev: { properties?: Record<string, unknown> }
+              let ev: unknown
               try {
-                ev = JSON.parse(candidate) as { properties?: Record<string, unknown> }
+                ev = JSON.parse(candidate)
               } catch {
                 pending = candidate
                 return
               }
               pending = ""
-              dispatch(ev)
+              if (ev && typeof ev === "object" && !Array.isArray(ev)) {
+                dispatch(ev as { type?: unknown; properties?: Record<string, unknown> })
+              }
               return
             }
             if (pending) pending = ""
@@ -654,6 +726,8 @@ export class Opencode {
     if (error) {
       throw new OpencodeError(`model error: ${error.data?.message ?? error.name ?? "unknown"}`)
     }
+    const usage = extractOpencodeUsage(response.info, options.model?.modelID)
+    if (usage) options.onUsage?.(usage)
 
     // Each text part is a whole message ("我先读一下配置", a tool call, then the answer), not a
     // delta of one string: joined with nothing, the paragraphs ran together into one line

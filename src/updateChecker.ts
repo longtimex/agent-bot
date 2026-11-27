@@ -1,4 +1,4 @@
-import { stripAnsi } from "./ccswitch.js"
+import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import type { OpsCommandResult, OpsResult, OpsStep } from "./ops.js"
 import type { ReleaseState } from "./releaseManager.js"
 
@@ -88,7 +88,7 @@ export class UpdateChecker {
       label,
       ok: result.code === 0,
       code: result.code,
-      output: `${result.stdout}\n${result.stderr}`.trim().slice(-1_500),
+      output: redactSecrets(`${result.stdout}\n${result.stderr}`).trim().slice(-1_500),
     })
 
     // Only the branch the update follows, without tags: fetching every branch of the remote

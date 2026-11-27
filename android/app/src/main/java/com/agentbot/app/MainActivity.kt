@@ -39,6 +39,7 @@ import com.agentbot.app.ui.AliasesScreen
 import com.agentbot.app.ui.AppDrawer
 import com.agentbot.app.ui.AppViewModel
 import com.agentbot.app.ui.AppVisibility
+import com.agentbot.app.ui.ApprovalsScreen
 import com.agentbot.app.ui.CcScreen
 import com.agentbot.app.ui.ChatScreen
 import com.agentbot.app.ui.ConfigScreen
@@ -57,6 +58,8 @@ import com.agentbot.app.ui.SessionScreen
 import com.agentbot.app.ui.SessionsScreen
 import com.agentbot.app.ui.SettingsScreen
 import com.agentbot.app.ui.StatusScreen
+import com.agentbot.app.ui.WebhooksScreen
+import com.agentbot.app.ui.WorkspaceScreen
 import com.agentbot.app.ui.theme.AgentBotTheme
 import kotlinx.coroutines.launch
 
@@ -189,6 +192,7 @@ class MainActivity : ComponentActivity() {
                                 connected = vm.session != null && vm.connectionError == null,
                                 sessionLabel = vm.session?.engineLabel,
                                 queueCount = vm.queue.size,
+                                pendingApprovalsCount = vm.approvalsView?.pending?.size ?: 0,
                                 appUpdateAvailable = vm.androidRelease?.updateAvailable == true,
                                 open = drawerState.isOpen,
                             )
@@ -211,8 +215,11 @@ class MainActivity : ComponentActivity() {
                                     Screen.Chat -> ChatScreen(vm = vm, onOpenDrawer = { scope.launch { drawerState.open() } })
                                     Screen.History -> HistoryScreen(vm)
                                     Screen.Sessions -> SessionsScreen(vm)
+                                    Screen.Workspace -> WorkspaceScreen(vm)
                                     Screen.Reminders -> RemindersScreen(vm)
                                     Screen.Schedules -> SchedulesScreen(vm)
+                                    Screen.Approvals -> ApprovalsScreen(vm)
+                                    Screen.Webhooks -> WebhooksScreen(vm)
                                     Screen.Session -> SessionScreen(vm)
                                     Screen.Queue -> QueueScreen(vm)
                                     Screen.Agents -> AgentsScreen(vm)

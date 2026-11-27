@@ -18,15 +18,20 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && npm install -g opencode-ai --no-audit --no-fund
 WORKDIR /app
-COPY package.json package-lock.json opencode.json ./
-COPY .opencode ./.opencode
-COPY scripts ./scripts
-COPY --from=build /app/dist ./dist
+# 先装生产依赖再拷贝应用代码，避免每次改业务代码都击穿 npm ci 缓存层
+COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund \
+  && mkdir -p /app/data \
   && chown -R node:node /app
+COPY --chown=node:node opencode.json ./
+COPY --chown=node:node .opencode ./.opencode
+COPY --chown=node:node scripts ./scripts
+COPY --chown=node:node --from=build /app/dist ./dist
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 USER node
 # 容器内默认数据目录；docker-compose 会把它挂载到宿主机 ./data
 ENV DATA_DIR=/app/data
 EXPOSE 3080
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "/app/scripts/release-health.mjs", "--live"]
 ENTRYPOINT ["docker-entrypoint.sh"]

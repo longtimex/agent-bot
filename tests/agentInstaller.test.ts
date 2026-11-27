@@ -328,7 +328,7 @@ test("installer retries with user-level flags and reuses them for update and uni
     assert.deepEqual(saved.demo?.extraArgs, [`--prefix=${prefix}`])
 
     for (const action of [() => installer.update("demo"), () => installer.uninstall("demo")]) {
-      const before = f.calls.length
+      const before: number = f.calls.length
       const result = await action()
       assert.equal(result.ok, true)
       assert.ok(f.calls.at(-1)!.args.includes(`--prefix=${prefix}`), "recorded flags must be reused")

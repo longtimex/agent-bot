@@ -5,6 +5,8 @@ import { join } from "node:path"
 import { test } from "node:test"
 
 import {
+  MAGPIE_UPDATE_TIMEOUT_MS,
+  MagpieBusyError,
   MagpieError,
   MagpieRunError,
   MagpieService,
@@ -14,6 +16,8 @@ import {
   type MagpieRunner,
   type MagpieRunResult,
 } from "../src/magpie.js"
+import { routeMagpie } from "../src/apiMagpie.js"
+import { ApiError } from "../src/apiCore.js"
 import { magpieBlockedReason, magpieConfirmPlan, isLongMagpieCommand } from "../src/magpieGuards.js"
 import { MagpieCommands } from "../src/telegramMagpieCommands.js"
 import type { Logger } from "../src/logger.js"
@@ -260,4 +264,214 @@ test("addProvider masks an unlabelled key on success and on failure", async () =
   const { svc, calls } = service(() => ({ code: 0, stdout: "" }))
   await assert.rejects(() => svc.addProvider("deepseek", "--force"), MagpieError)
   assert.equal(calls.length, 0)
+})
+
+test("magpie guards reject leading global flags and preserve hidden command detection", () => {
+  assert.ok(magpieBlockedReason(["-v", "tui"], "Telegram"))
+  assert.ok(magpieBlockedReason(["--config", "/tmp/x", "daemon", "stop"], "App"))
+  assert.ok(magpieBlockedReason(["--json", "provider", "rm", "deepseek"], "App"))
+  assert.equal(magpieBlockedReason(["--version"], "App"), undefined)
+  assert.equal(magpieBlockedReason(["--help"], "App"), undefined)
+  assert.ok(magpieConfirmPlan(["--verbose", "daemon", "stop"]))
+  assert.equal(isLongMagpieCommand(["--verbose", "update"]), true)
+})
+
+test("MagpieService overview reports version errors and healthy() uses custom gateway probe", async () => {
+  const probedUrls: string[] = []
+  const broken = new MagpieService({
+    bin: "magpie",
+    gatewayUrl: "http://127.0.0.1:4555",
+    runner: async () => ({ code: 1, stdout: "", stderr: "permission denied" }),
+    healthProbe: async (url) => {
+      probedUrls.push(url)
+      return true
+    },
+  })
+  const overview = await broken.overview()
+  assert.equal(overview.available, true)
+  assert.equal(overview.version, undefined)
+  assert.match(overview.error ?? "", /permission denied/)
+  assert.equal(overview.healthy, true)
+  assert.deepEqual(probedUrls, ["http://127.0.0.1:4555"])
+})
+
+test("MagpieService.runWriteLocked serializes writes, allows re-entrancy and fails fast on conflict", async () => {
+  const { svc } = service(() => ({ code: 0, stdout: "ok" }))
+  let releaseFirst!: () => void
+  let started!: () => void
+  const firstReady = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const p1 = svc.runWriteLocked(async () => {
+    // Re-entrant nested write inside the same scope must not deadlock
+    await svc.sync()
+    await new Promise<void>((resolve) => {
+      releaseFirst = resolve
+      started()
+    })
+    return "first"
+  })
+  await firstReady
+  await assert.rejects(() => svc.runWriteLocked(async () => "conflict", { failFast: true }), MagpieBusyError)
+  const p2 = svc.runWriteLocked(async () => "second")
+  releaseFirst()
+  assert.equal(await p1, "first")
+  assert.equal(await p2, "second")
+})
+
+test("MAGPIE_VIEWS.usage normalizes range case and runRaw masks unlabelled provider add keys", async () => {
+  assert.deepEqual(MAGPIE_VIEWS.usage!.args("TODAY"), ["usage", "today"])
+  assert.deepEqual(MAGPIE_VIEWS.usage!.args("7D"), ["usage", "7d"])
+
+  const secret = "relayRawKey887766"
+  const timeouts: number[] = []
+  const svc = new MagpieService({
+    bin: "magpie",
+    runner: async (_args, opts) => {
+      timeouts.push(opts.timeoutMs)
+      return { code: 0, stdout: `saved ${secret}`, stderr: "" }
+    },
+  })
+  const out = await svc.runRaw(["provider", "add", "deepseek", secret], MAGPIE_UPDATE_TIMEOUT_MS)
+  assert.ok(!out.includes(secret))
+  assert.equal(timeouts[0], MAGPIE_UPDATE_TIMEOUT_MS)
+})
+
+test("Telegram magpie confirmation protects token from other chats, redacts args and forwards update timeout", async () => {
+  const calls: Array<{ args: string[]; timeoutMs?: number }> = []
+  const sent: Array<{ text: string; keyboard?: unknown }> = []
+  const fake = {
+    available: true,
+    overview: async () => ({
+      available: true,
+      bin: "/usr/local/bin/magpie",
+      version: "1.2.3",
+      gatewayUrl: "http://127.0.0.1:3425",
+      healthy: true,
+    }),
+    runRaw: async (args: string[], timeoutMs?: number) => {
+      calls.push({ args, timeoutMs })
+      return "updated"
+    },
+  } as unknown as MagpieService
+  const host = {
+    sendText: async (_chatId: number, text: string, keyboard?: unknown) => {
+      sent.push({ text, keyboard })
+      return true
+    },
+    sendPanel: async () => {},
+    editPanel: async () => {},
+  }
+  const log = { debug() {}, info() {}, warn() {}, error() {} } as unknown as Logger
+  const cmd = new MagpieCommands(host, fake, log)
+
+  // Confirming an update must carry the 180s MAGPIE_UPDATE_TIMEOUT_MS timeout
+  await cmd.handleCommand(10, "k", "update")
+  const tokenMatch = /magpie:cfm:([0-9a-f]+)/.exec(JSON.stringify(sent.at(-1)!.keyboard))
+  assert.ok(tokenMatch, "update must ask for confirmation")
+  const token = tokenMatch![1]!
+
+  // A different chat clicking the button must NOT delete chat 10's pending token
+  await cmd.handleCallback({} as never, 99, `cfm:${token}`, async () => {})
+  assert.match(sent.at(-1)!.text, /不属于当前会话/)
+  assert.equal(calls.length, 0)
+
+  // Original chat can still confirm after the rejected foreign click
+  await cmd.handleCallback({} as never, 10, `cfm:${token}`, async () => {})
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0]!.args, ["update"])
+  assert.equal(calls[0]!.timeoutMs, MAGPIE_UPDATE_TIMEOUT_MS)
+
+  // Confirmation card redacts secrets from echoed args and clearPending() invalidates tokens
+  await cmd.handleCommand(10, "k", "settings set api_key sk-secret123456789")
+  assert.ok(!sent.at(-1)!.text.includes("sk-secret123456789"))
+  const token2 = /magpie:cfm:([0-9a-f]+)/.exec(JSON.stringify(sent.at(-1)!.keyboard))![1]!
+  cmd.clearPending()
+  await cmd.handleCallback({} as never, 10, `cfm:${token2}`, async () => {})
+  assert.match(sent.at(-1)!.text, /已过期/)
+})
+
+test("routeMagpie preserves 409 lock conflicts, maps MagpieRunError to 502 and forwards update timeout", async () => {
+  const timeouts: number[] = []
+  let failCli = false
+  const svc = new MagpieService({
+    bin: "magpie",
+    runner: async (args, opts) => {
+      timeouts.push(opts.timeoutMs)
+      if (failCli) return { code: 1, stdout: "", stderr: "upstream down" }
+      return { code: 0, stdout: `ok ${args.join(" ")}`, stderr: "" }
+    },
+  })
+
+  const responses: Array<{ status: number; body: unknown }> = []
+  const callRoute = async (
+    method: "GET" | "POST",
+    id: string,
+    body: Record<string, unknown> = {},
+    query = "",
+    busy = false,
+  ) => {
+    const deps = {
+      magpie: svc,
+      json: (_res: unknown, status: number, payload: unknown) => {
+        responses.push({ status, body: payload })
+      },
+      readJsonBody: async () => body,
+      magpieQuery: async <T>(run: () => Promise<T>) => {
+        if (busy) throw new ApiError(409, "已有 magpie 操作在执行，请稍后再试")
+        return run()
+      },
+      magpieRead: async <T>(run: () => Promise<T>) => run(),
+    }
+    await routeMagpie(
+      deps as never,
+      {
+        method,
+        req: {} as never,
+        res: {} as never,
+        url: new URL(`http://localhost/api/v1/magpie/${id}${query}`),
+        segments: ["magpie", id],
+        encrypted: false,
+      },
+      id,
+      undefined,
+    )
+  }
+
+  // 409 conflict must not be swallowed into 502 or 400
+  await assert.rejects(
+    () => callRoute("POST", "exec", { name: "sync" }, "", true),
+    (err: unknown) => err instanceof ApiError && err.status === 409,
+  )
+  await assert.rejects(
+    () => callRoute("POST", "provider", { preset: "deepseek", key: "k1" }, "", true),
+    (err: unknown) => err instanceof ApiError && err.status === 409,
+  )
+
+  // Validation error on /provider stays 400; CLI failure (MagpieRunError) becomes 502
+  await assert.rejects(
+    () => callRoute("POST", "provider", { preset: "bad preset!", key: "k1" }),
+    (err: unknown) => err instanceof ApiError && err.status === 400,
+  )
+  failCli = true
+  await assert.rejects(
+    () => callRoute("POST", "provider", { preset: "deepseek", key: "k1" }),
+    (err: unknown) => err instanceof ApiError && err.status === 502,
+  )
+  failCli = false
+
+  // Read-only /view bypasses the write lock
+  await callRoute("GET", "view", {}, "?name=providers", true)
+  assert.equal(responses.at(-1)!.status, 200)
+
+  // `update` forwards MAGPIE_UPDATE_TIMEOUT_MS (180s)
+  timeouts.length = 0
+  await callRoute("POST", "exec", { name: "update", confirm: true })
+  assert.equal(timeouts.at(-1), MAGPIE_UPDATE_TIMEOUT_MS)
+
+  // Leading flag on /run is blocked with 400
+  await assert.rejects(
+    () => callRoute("POST", "run", { args: ["-v", "tui"], confirm: true }),
+    (err: unknown) => err instanceof ApiError && err.status === 400,
+  )
 })

@@ -139,9 +139,12 @@ export class TelegramSecretInput {
       await this.#close(prompt, "已取消，没有保存任何内容。")
       return true
     }
-    if (prompt && prompt.userId === userId && !text.startsWith("/")) {
-      await this.#removeUserMessage(chatId, messageId)
-      await this.#receive(prompt, text)
+    if (prompt && prompt.userId === userId) {
+      // Detach before any await so concurrent messages cannot double-process or
+      // step a multi-secret prompt past the end of its request list.
+      this.#forget(prompt)
+      const removed = await this.#removeUserMessage(chatId, messageId)
+      await this.#receive(prompt, text, removed)
       return true
     }
     if (text.startsWith("/")) {
@@ -210,6 +213,7 @@ export class TelegramSecretInput {
   }
 
   async #open(prompt: Prompt, title: string, footer: string): Promise<void> {
+    this.#expired.delete(prompt.chatId)
     const previous = this.#prompts.get(prompt.chatId)
     if (previous) await this.#close(previous, "已被新的安全输入替代。")
     const manual = this.#host.isFeishu(prompt.chatId)
@@ -234,47 +238,56 @@ export class TelegramSecretInput {
     prompt.timer = setTimeout(() => {
       if (this.#prompts.get(prompt.chatId) !== prompt) return
       this.#expired.set(prompt.chatId, Date.now())
-      void this.#close(prompt, "⌛ 已过期，没有保存任何内容。")
+      void this.#close(prompt, "⌛ 已过期，没有保存任何内容。", true)
     }, PROMPT_TTL_MS)
     prompt.timer.unref()
   }
 
-  async #receive(prompt: Prompt, raw: string): Promise<void> {
+  #restorePrompt(prompt: Prompt): void {
+    if (this.#prompts.has(prompt.chatId)) return
+    this.#arm(prompt)
+    this.#prompts.set(prompt.chatId, prompt)
+  }
+
+  async #receive(prompt: Prompt, raw: string, removed: boolean): Promise<void> {
     const value = raw.trim()
+    const deletionNote = removed ? "原消息已删除" : "请手动撤回原消息"
     if (prompt.kind === "command") {
       const problem = secretValueProblem(value) ?? prompt.slot.check?.(value)
       if (problem) {
-        await this.#say(prompt.chatId, `⚠️ ${problem}，请重新发送（原消息已删除）。`)
+        this.#restorePrompt(prompt)
+        await this.#say(prompt.chatId, `⚠️ ${problem}，请重新发送（${deletionNote}）。`)
         return
       }
       await this.#close(prompt, `✅ 已收到${prompt.slot.label}，正在执行命令…`)
       await this.#runner?.(prompt.chatId, prompt.userId, prompt.slot.fill(value))
       return
     }
-    const request = prompt.requests[prompt.index]!
+    const request = prompt.requests[prompt.index]
+    if (!request) return
     const vault = activeSecretVault()
     try {
       if (!vault) throw new Error("安全输入未启用")
       vault.set(prompt.key, request.name, value, request.purpose)
     } catch (err) {
-      await this.#say(prompt.chatId, `⚠️ 没有保存：${(err as Error).message}。请重新发送（原消息已删除）。`)
+      this.#restorePrompt(prompt)
+      await this.#say(prompt.chatId, `⚠️ 没有保存：${(err as Error).message}。请重新发送（${deletionNote}）。`)
       return
     }
-    await this.#edit(prompt, `✅ 已安全保存 ${request.name}，你的消息已删除。`)
-    if (prompt.index + 1 < prompt.requests.length) {
-      prompt.index += 1
-      this.#prompts.delete(prompt.chatId)
-      if (prompt.timer) clearTimeout(prompt.timer)
-      await this.#open({ ...prompt, timer: undefined, messageId: undefined }, ...this.#agentCardText(prompt.requests, prompt.index))
+    await this.#edit(prompt, `✅ 已安全保存 ${request.name}，${removed ? "你的消息已删除" : "请手动撤回你的消息"}。`)
+    const nextIndex = prompt.index + 1
+    if (nextIndex < prompt.requests.length) {
+      const nextPrompt: Prompt = { ...prompt, index: nextIndex, timer: undefined, messageId: undefined }
+      await this.#open(nextPrompt, ...this.#agentCardText(prompt.requests, nextIndex))
       return
     }
-    this.#forget(prompt)
+    this.#expired.delete(prompt.chatId)
     const names = prompt.requests.map((item) => item.name)
     this.#host.enqueue({
       key: prompt.key,
       chatId: prompt.chatId,
       userId: prompt.userId,
-      text: secretContinuationPrompt(names, vault!.dirFor(prompt.key)),
+      text: secretContinuationPrompt(names, vault.dirFor(prompt.key)),
     })
   }
 
@@ -302,7 +315,8 @@ export class TelegramSecretInput {
     await this.#say(chatId, `🔐 本会话保存的密钥（值不显示）：\n${lines.join("\n")}\n\n发送 /secrets clear 立即清除。`)
   }
 
-  async #close(prompt: Prompt, status: string): Promise<void> {
+  async #close(prompt: Prompt, status: string, expired = false): Promise<void> {
+    if (!expired) this.#expired.delete(prompt.chatId)
     this.#forget(prompt)
     await this.#edit(prompt, status)
   }

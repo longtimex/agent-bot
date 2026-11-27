@@ -27,6 +27,7 @@ import { rotateLogIfNeeded } from "./logger.js"
 import type { Logger } from "./logger.js"
 import { clipTail } from "./messages.js"
 import { ReleaseManager, type ReleaseState } from "./releaseManager.js"
+import { processCommandLine } from "./runtime.js"
 import { buildReleaseDiagnostics, resolveUpdateTarget, UpdateChecker, type ReleaseDiagnostics } from "./updateChecker.js"
 import { UpdateOrchestrator } from "./updateOrchestrator.js"
 import { readStartupSelfCheck, type StartupSelfCheck } from "./startupSelfCheck.js"
@@ -155,7 +156,7 @@ function intRule(min: number, max: number): EnvRule {
     hint: `${min} ~ ${max} 的整数`,
     validate: (value) => {
       const parsed = Number(value)
-      return Number.isInteger(parsed) && parsed >= min && parsed <= max ? undefined : `需要 ${min} ~ ${max} 的整数`
+      return /^-?\d+$/.test(value) && Number.isInteger(parsed) && parsed >= min && parsed <= max ? undefined : `需要 ${min} ~ ${max} 的整数`
     },
   }
 }
@@ -304,7 +305,7 @@ export const OPS_HOT_ENV_KEYS: ReadonlySet<string> = new Set([
   "FEISHU_ALLOW_OPEN_IDS",
 ])
 
-const SECRET_KEY_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|AUTH|_KEY$|API_KEY)/i
+const SECRET_KEY_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|CREDENTIAL|AUTH|_KEY$|API_KEY)/i
 const ENV_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/
 
 function unquoteEnv(value: string): string {
@@ -527,9 +528,11 @@ export class OpsService {
     const backupDir = join(this.#dataDir, "backups")
     mkdirSync(backupDir, { recursive: true, mode: 0o700 })
     chmodSync(backupDir, 0o700)
-    // Milliseconds in the name: two backups in the same second must not overwrite each other
-    const out = join(backupDir, `backup-${fileStamp(Date.now(), { millis: true })}${label ? `-${label}` : ""}.tar.gz`)
-    const tar = await this.#runCommand("tar", ["-czf", out, "-C", this.#dataDir, ...files], 60_000)
+    // Milliseconds in the name: two backups in the same second must not overwrite each other.
+    // Keep tar paths relative to dataDir so Windows bsdtar does not mistake `E:\...` for a host.
+    const archiveName = `backup-${fileStamp(Date.now(), { millis: true })}${label ? `-${label}` : ""}.tar.gz`
+    const out = join(backupDir, archiveName)
+    const tar = await this.#runCommandIn(this.#dataDir, "tar", ["-czf", `backups/${archiveName}`, "--", ...files], 60_000)
     steps.push(this.#step("打包状态文件", tar))
     if (tar.code !== 0) {
       return { ok: false, message: "打包失败，请根据输出排查。", steps }
@@ -862,7 +865,7 @@ export class OpsService {
       const secret = SECRET_KEY_RE.test(key)
       entries.push({
         key,
-        value: secret ? undefined : unquoteEnv(match[2] ?? ""),
+        value: secret ? undefined : redactSecrets(unquoteEnv(match[2] ?? "")),
         secret,
         editable: Object.hasOwn(ENV_RULES, key) && !OPS_COMMAND_MANAGED_KEYS.has(key),
       })
@@ -1032,13 +1035,9 @@ export class OpsService {
   }
 
   #isOpencodeProcess(pid: number): boolean {
-    try {
-      process.kill(pid, 0)
-      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ")
-      return /\bopencode\b/.test(cmdline) && /\bserve\b/.test(cmdline)
-    } catch {
-      return false
-    }
+    if (!this.#alive(pid)) return false
+    const cmdline = processCommandLine(pid)
+    return cmdline === undefined || (/\bopencode\b/i.test(cmdline) && /\bserve\b/i.test(cmdline))
   }
 
   #alive(pid: number): boolean {

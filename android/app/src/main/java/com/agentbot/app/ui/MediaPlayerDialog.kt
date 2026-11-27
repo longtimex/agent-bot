@@ -199,9 +199,11 @@ private fun AudioPane(file: File, title: String, onError: () -> Unit) {
         }
         val tick = object : Runnable {
             override fun run() {
-                player?.let {
-                    position = runCatching { it.currentPosition }.getOrDefault(position)
-                    duration = runCatching { it.duration }.getOrDefault(duration).coerceAtLeast(0)
+                if (ready) {
+                    player?.let {
+                        position = runCatching { it.currentPosition }.getOrDefault(position)
+                        duration = runCatching { it.duration }.getOrDefault(duration).coerceAtLeast(0)
+                    }
                 }
                 handler.postDelayed(this, 400)
             }

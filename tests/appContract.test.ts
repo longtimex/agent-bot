@@ -125,7 +125,7 @@ function walk(model: string, value: unknown, where: string, problems: string[], 
 interface Probe {
   /** ApiClient method + server path, so a failure names both sides. */
   name: string
-  method: "GET" | "POST" | "PUT" | "DELETE"
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
   path: string
   body?: Record<string, unknown>
   /** Kotlin model the App decodes; omit for endpoints whose payload the App reads as text. */
@@ -538,8 +538,18 @@ async function runContract(encKey?: Buffer): Promise<string[]> {
         { name: "deleteSchedule → DELETE /schedules/:id", method: "DELETE", path: `/schedules/${scheduleId}` },
         { name: "clearHistory → DELETE /history", method: "DELETE", path: "/history" },
         { name: "newSession → POST /new", method: "POST", path: "/new", body: { title: "契约探针会话" } },
+        { name: "workspaceDiff → GET /diff", method: "GET", path: "/diff", model: "WorkspaceDiff" },
         { name: "undoChanges → POST /undo", method: "POST", path: "/undo" },
+        { name: "commitChanges → POST /commit", method: "POST", path: "/commit", body: { message: "test commit" }, model: "CommitResult" },
         { name: "followPeer → POST /peers/follow", method: "POST", path: "/peers/follow", body: { scope: "telegram" } },
+        { name: "syncMessages → GET /sync/messages", method: "GET", path: "/sync/messages?scope=app", model: "TranscriptView" },
+        { name: "handoffPeer → POST /sync/handoff", method: "POST", path: "/sync/handoff", body: { scope: "telegram" }, model: "HandoffResult" },
+        { name: "budget → GET /budget", method: "GET", path: "/budget", model: "BudgetStatus" },
+        { name: "setBudget → POST /budget", method: "POST", path: "/budget", body: { dailyUsd: 5, monthlyUsd: 50 }, model: "BudgetStatus" },
+        { name: "approvals → GET /approvals", method: "GET", path: "/approvals", model: "ApprovalsView" },
+        { name: "setApprovalMode → PUT /approvals/mode", method: "PUT", path: "/approvals/mode", body: { mode: "auto" }, model: "ApprovalsView" },
+        { name: "webhooks → GET /hooks", method: "GET", path: "/hooks", model: "WebhooksView" },
+        { name: "createWebhook → POST /hooks", method: "POST", path: "/hooks", body: { name: "探针", promptTemplate: "分析 {{payload}}" }, model: "WebhookActionResult" },
         { name: "ccUse → POST /cc/use", method: "POST", path: "/cc/use", body: { id: "p1" }, model: "CcActionResult" },
         { name: "ccTest → POST /cc/test", method: "POST", path: "/cc/test", body: { id: "p1" }, model: "CcTestResult" },
         { name: "ccTest(current) → POST /cc/test", method: "POST", path: "/cc/test", body: {}, model: "CcTestResult" },

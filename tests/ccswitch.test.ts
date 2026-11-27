@@ -1,10 +1,11 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import {
+  CcSwitchBusyError,
   CcSwitchError,
   CcSwitchRunError,
   CcSwitchService,
@@ -20,6 +21,7 @@ import {
   redactSecrets,
   resolveCcSwitchBin,
   shellQuote,
+  toBase64Url,
   toDeeplinkApp,
   stripAnsi,
 } from "../src/ccswitch.js"
@@ -646,4 +648,100 @@ test("redactSecrets masks a bare Telegram bot token", () => {
   const masked = redactSecrets(`grammy call failed: ${token} for chat 1`)
   assert.ok(!masked.includes(token), masked)
   assert.match(masked, /\*\*\*/)
+})
+
+test("toBase64Url emits unpadded URL-safe base64", () => {
+  for (const sample of ["a", "ab", "abc", "hello?world/1+2=3", "中文提示词"]) {
+    const encoded = toBase64Url(sample)
+    assert.ok(!encoded.includes("="), `unexpected '=' padding in ${encoded}`)
+    assert.ok(!/[+/]/.test(encoded), `non-URL-safe char in ${encoded}`)
+    assert.equal(Buffer.from(encoded, "base64url").toString("utf8"), sample)
+  }
+})
+
+test("parseProviderList preserves wrapped names and keeps table checkmarks when Current footer is not an id", () => {
+  const output = `
+┌────┬──────┬──────────┬────────────────────────┐
+│    │ ID   │ Name     │ API URL                │
+╞════╪══════╪══════════╪════════════════════════╡
+│ ✓  │ main │ Team     │ https://api.example    │
+│    │      │ Primary  │ /v1                    │
+└────┴──────┴──────────┴────────────────────────┘
+→ Current: None
+`
+  const providers = parseProviderList(output)
+  assert.equal(providers.length, 1)
+  assert.equal(providers[0]!.name, "Team Primary")
+  assert.equal(providers[0]!.apiUrl, "https://api.example/v1")
+  assert.equal(providers[0]!.current, true, "Current: None must not wipe out the table checkmark")
+
+  const emptyNone = parseProviderList("→ Current: None\n")
+  assert.equal(emptyNone.length, 0, "Current: None must not fabricate a bogus provider")
+})
+
+test("CcSwitchService.runWriteLocked serializes writes, allows re-entrancy and supports failFast", async () => {
+  const order: string[] = []
+  let releaseFirst!: () => void
+  let markStarted!: () => void
+  const firstStarted = new Promise<void>((resolve) => {
+    markStarted = resolve
+  })
+  const service = new CcSwitchService({
+    app: "claude",
+    runner: async () => ({ code: 0, stdout: "ok", stderr: "" }),
+  })
+
+  const p1 = service.runWriteLocked(async () => {
+    order.push("start-1")
+    // Re-entrant nested call inside the same lock must not deadlock
+    await service.useProvider("main")
+    order.push("nested-ok")
+    await new Promise<void>((done) => {
+      releaseFirst = done
+      markStarted()
+    })
+    order.push("end-1")
+    return "one"
+  })
+
+  await firstStarted
+  await assert.rejects(
+    () => service.runWriteLocked(async () => "blocked", { failFast: true }),
+    CcSwitchBusyError,
+  )
+  const p2 = service.runWriteLocked(async () => {
+    order.push("start-2")
+    return "two"
+  })
+  releaseFirst()
+  assert.equal(await p1, "one")
+  assert.equal(await p2, "two")
+  assert.deepEqual(order, ["start-1", "nested-ok", "end-1", "start-2"])
+})
+
+test("CcSwitchService merges dynamic proxyEnv per invocation", { skip: process.platform === "win32" }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-proxy-env-"))
+  try {
+    const bin = join(dir, "cc-switch")
+    writeFileSync(bin, '#!/usr/bin/env node\nprocess.stdout.write(process.env.HTTPS_PROXY ?? "")\n')
+    chmodSync(bin, 0o755)
+    let proxy: NodeJS.ProcessEnv = { HTTPS_PROXY: "http://127.0.0.1:7890" }
+    const service = new CcSwitchService({
+      app: "opencode",
+      bin,
+      projectDir: dir,
+      env: { PATH: `/usr/bin:/bin:${process.env.PATH ?? ""}` },
+      proxyEnv: () => proxy,
+    })
+    assert.equal((await service.run(["env", "check"])).stdout, "http://127.0.0.1:7890")
+    proxy = { HTTPS_PROXY: "http://127.0.0.1:8888" }
+    assert.equal((await service.run(["env", "check"])).stdout, "http://127.0.0.1:8888")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("install-cc-switch.sh wget fallback does not use invalid --fail flag", () => {
+  const script = readFileSync(join(process.cwd(), "scripts", "install-cc-switch.sh"), "utf8")
+  assert.doesNotMatch(script, /\bwget\b[^\n]*--fail\b/)
 })

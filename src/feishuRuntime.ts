@@ -81,14 +81,15 @@ export function createFeishuConnection(cfg: BotConfig, log: Logger): FeishuConne
   })
   const identities = new FeishuIdentityStore(resolve(cfg.dataDir, "feishu-identities.json"), log)
   const outbound = new FeishuOutbound(client)
+  const isAllowedFeishu = (openId: string): boolean => Boolean(feishu.allowAll || feishu.allowOpenIds.has(openId))
   const resolver: ChannelIdResolver = {
     // Range alone is not enough: once a real Telegram id happens to be negative
     // the persisted allocation is the only safe source of truth.
     isFeishuId: (id) => identities.hasNumericId(id),
     receiveIdForChat: (chatId) => identities.chatExternalId(chatId),
     openIdForUser: (userId) => identities.userOpenId(userId),
-    feishuOwnerChatId: () => identities.ownerChatId(),
-    feishuOwnerUserId: () => identities.ownerUserId(),
+    feishuOwnerChatId: () => identities.ownerChatId(isAllowedFeishu),
+    feishuOwnerUserId: () => identities.ownerUserId(isAllowedFeishu),
   }
   return { client: client as unknown as FeishuApiLike, identities, resolver, outbound }
 }
@@ -105,7 +106,11 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
   const connection = deps.connection ?? createFeishuConnection(deps.cfg, deps.log)
   if (!connection) return undefined
 
-  installFeishuTransformer(deps.bridge.bot, connection.outbound, connection.resolver)
+  const isAllowedFeishu = (openId: string): boolean => Boolean(cfg.allowAll || cfg.allowOpenIds.has(openId))
+  installFeishuTransformer(deps.bridge.bot, connection.outbound, {
+    ...connection.resolver,
+    telegramEnabled: Boolean(deps.cfg.telegram.token),
+  })
 
   const dispatcher = options.dispatcher ?? new EventDispatcher({ logger: sdkLogger(deps.log) })
   const ws =
@@ -120,8 +125,8 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
       wsConfig: { pingTimeout: 45 },
       onReady: () => {
         deps.log.info("Feishu long connection ready")
-        deps.bridge.startBackgroundServices()
-        void deps.bridge.announceStartup(connection.identities.ownerChatId(), "feishu")
+        deps.bridge.startBackgroundServices("feishu")
+        void deps.bridge.announceStartup(connection.identities.ownerChatId(isAllowedFeishu), "feishu")
       },
       onError: (err) => {
         deps.log.error("Feishu long connection stopped:", err.message)
@@ -141,8 +146,8 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
     identities: connection.identities,
     outbound: connection.outbound,
     onFirstChat: () => {
-      deps.bridge.startBackgroundServices()
-      void deps.bridge.announceStartup(connection.identities.ownerChatId(), "feishu")
+      deps.bridge.startBackgroundServices("feishu")
+      void deps.bridge.announceStartup(connection.identities.ownerChatId(isAllowedFeishu), "feishu")
     },
     onFatal: options.onFatal,
     seenPath: resolve(deps.cfg.dataDir, "feishu-seen"),
@@ -169,6 +174,15 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
         config: callbackConfig,
         log: deps.log,
         handle: async (raw) => {
+          const payload = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : undefined
+          // When encryption is configured (or verificationToken is absent), require an
+          // encrypted envelope so a v1 plaintext body cannot bypass CardActionHandler's
+          // signature check.
+          if (callbackConfig.encryptKey) {
+            if (typeof payload?.encrypt !== "string" || !payload.encrypt) return undefined
+          } else if (!callbackConfig.verificationToken) {
+            return undefined
+          }
           // Generate the challenge first: it validates the verification token
           // (or decrypts an encrypted body) before reflecting any value. Card
           // actions fall through to the SDK handler, which verifies signatures.
@@ -207,7 +221,7 @@ export function createFeishuRuntime(deps: FeishuRuntimeDeps, options: FeishuRunt
       })
       // Feishu-only deployments cannot wait for Telegram polling to start
       // reminders and schedules; they are transport-neutral shared services.
-      deps.bridge.startBackgroundServices()
+      deps.bridge.startBackgroundServices("feishu")
     },
     stop: async () => {
       service.close()

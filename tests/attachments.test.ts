@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { isAbsolute, join, sep } from "node:path"
 import test from "node:test"
 import { assertFileMode } from "./support/platform.js"
 import { buildAttachmentSections } from "../src/attachmentInput.js"
@@ -157,7 +157,8 @@ test("the manifest names attachments by absolute path so any engine cwd resolves
     const listed = [...input.text.matchAll(/^- (?:文件|图片|音频): (\S+) /gm)].map((m) => m[1]!)
     assert.equal(listed.length, 2, "both attachments are listed for the engine")
     assert.ok(listed.every((p) => isAbsolute(p)), `manifest paths must be absolute, got ${listed.join(", ")}`)
-    assert.ok(input.text.includes(`<file name="${text.path}">`), "the inlined copy carries the same path")
+    const shownPath = text.path.split(sep).join("/")
+    assert.ok(input.text.includes(`<file name="${shownPath}">`), "the inlined copy carries the same path")
     assert.equal(input.files.length, 1, "the image still rides as a file reference")
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -194,7 +195,7 @@ test("a model that rejects video is told where the saved file is instead of losi
     })
     assert.equal(input.files.length, 0)
     assert.match(input.text, /不支持视频输入/)
-    assert.ok(input.text.includes(video.path), "the model can still inspect the file by absolute path")
+    assert.ok(input.text.includes(video.path.split(sep).join("/")), "the model can still inspect the file by absolute path")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -262,7 +263,7 @@ test("a file above OpenCode's own 20MB attachment ceiling keeps its path", () =>
       modelCapabilities: { video: true },
     })
     assert.equal(input.files.length, 0, "OpenCode's platform limit still applies to direct attachments")
-    assert.ok(input.text.includes(videoPath), "the whole file stays available through its absolute path")
+    assert.ok(input.text.includes(videoPath.split(sep).join("/")), "the whole file stays available through its absolute path")
     assert.match(input.text, /OpenCode 单附件 20MB/)
   } finally {
     rmSync(dir, { recursive: true, force: true })

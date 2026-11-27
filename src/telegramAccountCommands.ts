@@ -209,9 +209,9 @@ export class TelegramAccountCommands {
       await this.#deps.sendText(chatId, `ℹ️ ${escapeMarkdown(revealed.entry.name)} 没有保存密码。`)
       return
     }
-    const body = `🔑 *${escapeMarkdown(revealed.entry.name)}*\n\n\`${revealed.password.replace(/`/g, "'")}\`\n\n_60 秒后自动删除这条消息_`
+    const body = `🔑 ${revealed.entry.name}\n\n${revealed.password}\n\n60 秒后自动删除这条消息`
     if (this.#deps.sendSecret) await this.#deps.sendSecret(chatId, body)
-    else await this.#deps.sendText(chatId, body)
+    else await this.#deps.sendText(chatId, escapeMarkdown(body))
   }
 
 

@@ -31,15 +31,31 @@ export interface FeishuCard {
  * the visual result close without a full Markdown rewriter; unsupported markup
  * still renders as literal text and never blocks delivery.
  */
-export function telegramMarkdownToFeishu(text: string): string {
+function transformMarkdownProse(text: string): string {
   let out = text
   // Backslash escapes are Telegram-specific; Feishu renders the backslash itself.
   out = out.replace(/\\([_*`[\]\\])/g, "$1")
   // Telegram bold *text* -> Feishu bold **text**. Do not touch **text** or
-  // fenced code, and require a non-space on both sides.
+  // code segments, and require a non-space on both sides.
   out = out.replace(/(^|[^*])\*(?!\*)(\S(?:[^*\n]*?\S)?)\*(?!\*)/g, "$1**$2**")
   // A horizontal rule written as --- must not be swallowed as three dashes.
   out = out.replace(/^---+$/gm, "---")
+  return out
+}
+
+export function telegramMarkdownToFeishu(text: string): string {
+  // Preserve fenced code blocks and inline code spans verbatim so backslashes and
+  // asterisks inside code are never altered.
+  const codePattern = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`)/g
+  let out = ""
+  let lastIndex = 0
+  for (const match of text.matchAll(codePattern)) {
+    const start = match.index ?? 0
+    if (start > lastIndex) out += transformMarkdownProse(text.slice(lastIndex, start))
+    out += match[0]
+    lastIndex = start + match[0].length
+  }
+  if (lastIndex < text.length) out += transformMarkdownProse(text.slice(lastIndex))
   return out
 }
 

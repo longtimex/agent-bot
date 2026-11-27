@@ -31,7 +31,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.AccountEntry
 import com.agentbot.app.ui.theme.AppSpacing
@@ -171,6 +170,7 @@ fun AccountsScreen(vm: AppViewModel) {
         AccountDetailDialog(
             entry = entry,
             password = vm.revealedAccounts[entry.id],
+            error = vm.accountError,
             onReveal = { vm.revealAccount(entry.id) },
             onHide = { vm.hideAccount(entry.id) },
             onEdit = {
@@ -185,6 +185,7 @@ fun AccountsScreen(vm: AppViewModel) {
             },
             onDismiss = {
                 vm.hideAccount(entry.id)
+                vm.accountError = null
                 detail = null
             },
         )
@@ -293,6 +294,7 @@ private fun AccountCard(entry: AccountEntry, onOpen: () -> Unit) {
 private fun AccountDetailDialog(
     entry: AccountEntry,
     password: String?,
+    error: String?,
     onReveal: () -> Unit,
     onHide: () -> Unit,
     onEdit: () -> Unit,
@@ -305,6 +307,13 @@ private fun AccountDetailDialog(
         title = { Text(entry.name, style = MaterialTheme.typography.titleLarge) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (error != null) {
+                    Text(
+                        error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 DetailRow("分类", entry.category)
                 DetailRow("账号", entry.username.ifBlank { "（空）" })
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -409,13 +418,10 @@ private fun AccountFormDialog(
                     placeholder = "me@example.com / 13800138000",
                     singleLine = true,
                 )
-                AppTextField(
+                SecretTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = "密码",
-                    placeholder = if (initial == null) "" else "留空则不修改",
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    placeholder = if (initial == null) "密码" else "密码（留空则不修改）",
                 )
                 AppTextField(
                     value = category,

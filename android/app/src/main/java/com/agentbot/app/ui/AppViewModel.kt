@@ -82,6 +82,10 @@ import com.agentbot.app.data.TaskMedia
 import com.agentbot.app.data.TaskNotifier
 import com.agentbot.app.data.Usage
 import com.agentbot.app.data.UsageTrendDay
+import com.agentbot.app.data.WorkspaceDiff
+import com.agentbot.app.data.BudgetStatus
+import com.agentbot.app.data.ApprovalsView
+import com.agentbot.app.data.WebhooksView
 import com.agentbot.app.data.decodeMediaFile
 import com.agentbot.app.data.mediaMime
 import kotlinx.coroutines.CancellationException
@@ -127,6 +131,8 @@ data class ChatMessage(
     val outboxId: String? = null,
     /** Secrets the Agent asked for in this reply; each shows a 安全输入 card. */
     val secretRequests: List<SecretRequest> = emptyList(),
+    /** Stable per-bubble identity so Compose LazyColumn never collides on same-millisecond timestamps. */
+    val localId: String = java.util.UUID.randomUUID().toString(),
 ) {
     enum class Role { USER, ASSISTANT }
 }
@@ -139,8 +145,11 @@ sealed interface Screen {
     data object History : Screen
     data object Reminders : Screen
     data object Schedules : Screen
+    data object Approvals : Screen
+    data object Webhooks : Screen
     data object Session : Screen
     data object Sessions : Screen
+    data object Workspace : Screen
     data object Queue : Screen
     data object Agents : Screen
     data object Ops : Screen
@@ -375,7 +384,9 @@ class AppViewModel(
 
     // ---- magpie ----
     var magpie by mutableStateOf<MagpieOverview?>(null)
-    var magpieBusy by mutableStateOf(false)
+    private var magpieRefreshing by mutableStateOf(false)
+    private var magpieRunning by mutableStateOf(false)
+    val magpieBusy: Boolean get() = magpieRefreshing || magpieRunning
 
     /** A failed overview read must not render as "not installed" or "not loaded yet". */
     var magpieError by mutableStateOf<String?>(null)
@@ -483,6 +494,28 @@ class AppViewModel(
     var dailyReport by mutableStateOf<DailyReport?>(null)
         private set
 
+    /** Daily/monthly USD budget limits and alert status from `/budget`. */
+    var budgetStatus by mutableStateOf<BudgetStatus?>(null)
+        private set
+
+    /** Live interactive high-risk approvals state from `/approvals`. */
+    var approvalsView by mutableStateOf<ApprovalsView?>(null)
+        private set
+    var approvalsBusy by mutableStateOf(false)
+        private set
+    var approvalsError by mutableStateOf<String?>(null)
+        private set
+    var approvalsActionError by mutableStateOf<String?>(null)
+
+    /** Inbound Webhook trigger definitions from `/hooks`. */
+    var webhooksView by mutableStateOf<WebhooksView?>(null)
+        private set
+    var webhooksBusy by mutableStateOf(false)
+        private set
+    var webhooksError by mutableStateOf<String?>(null)
+        private set
+    var webhooksActionError by mutableStateOf<String?>(null)
+
     var status by mutableStateOf<Status?>(null)
         private set
 
@@ -518,6 +551,10 @@ class AppViewModel(
 
     var archivedError by mutableStateOf<String?>(null)
         private set
+
+    fun clearArchivedError() {
+        archivedError = null
+    }
 
     /** The entry a resume or delete is waiting on, so its row can show progress and ignore taps. */
     var archivedBusyId by mutableStateOf<String?>(null)
@@ -903,7 +940,7 @@ class AppViewModel(
     }
 
     val oneOffModelLabel: String?
-        get() = oneOffModel?.let { value -> oneOffModels.firstOrNull { it.value == value }?.label ?: value }
+        get() = oneOffModel?.let { value -> pinPickerModels.firstOrNull { it.value == value }?.label ?: value }
 
     /** Silent engine list for the chat picker; the Agents screen owns the error-banner version. */
     fun refreshAgentsQuietly() {
@@ -1006,6 +1043,8 @@ class AppViewModel(
         // A task may still be running after the process was killed: resume polling it
         if (settings.connection() != null) {
             startOutbox()
+            loadSettings()
+            refreshApprovalsQuietly()
             messages.filter { it.taskId != null && (it.status == "queued" || it.status == "running") }
                 .forEach { message -> message.taskId?.let { pollTask(it) } }
             // The release check runs once here and then on a timer: opening the App should be
@@ -1157,10 +1196,13 @@ class AppViewModel(
             Screen.History -> refreshHistory()
             Screen.Reminders -> refreshReminders()
             Screen.Schedules -> refreshSchedules()
+            Screen.Approvals -> refreshApprovals()
+            Screen.Webhooks -> refreshWebhooks()
             Screen.Session -> {
                 refreshSessionSettings()
             }
             Screen.Sessions -> refreshArchivedSessions()
+            Screen.Workspace -> refreshWorkspace()
             Screen.Queue -> refreshQueue()
             Screen.Agents -> refreshAgents()
             Screen.Ops -> {
@@ -1173,7 +1215,10 @@ class AppViewModel(
             Screen.Aliases -> refreshAliases()
             Screen.Accounts -> refreshAccounts()
             Screen.Access -> refreshAccess()
-            Screen.Models -> refreshCustomModels()
+            Screen.Models -> {
+                refreshCustomModels()
+                if (agents.isEmpty()) refreshAgentsQuietly()
+            }
             Screen.Cc -> refreshCc()
             Screen.Magpie -> refreshMagpie()
             Screen.Hermes -> refreshHermes()
@@ -1193,6 +1238,7 @@ class AppViewModel(
      */
     suspend fun saveConnection(baseUrl: String, token: String, encKey: String? = null): Result<Unit> {
         val candidate = Connection(baseUrl.trim(), token.trim(), encKey?.trim()?.ifBlank { null })
+        api.clearRefusedEncKey()
         return try {
             val probedHealth = api.health(candidate)
             val probedSession = api.session(candidate)
@@ -1205,6 +1251,8 @@ class AppViewModel(
             serverInfo = runCatching { api.info(candidate) }.getOrNull()
             connectionError = null
             connectionProbeError = null
+            loadSettings()
+            refreshApprovalsQuietly()
             Result.success(Unit)
         } catch (err: CancellationException) {
             throw err
@@ -1260,7 +1308,7 @@ class AppViewModel(
         }
     }
 
-    /** Reloads the four reads behind 会话设置 together so Retry means the whole page. */
+    /** Reloads the reads behind 会话设置 together so Retry means the whole page. */
     fun refreshSessionSettings() {
         if (sessionBusy) return
         sessionBusy = true
@@ -1273,6 +1321,13 @@ class AppViewModel(
                 dirInfo = loadedDir
                 timezone = loadedTimezone
                 peers = loadedPeers
+                runCatching { api.settings(conn()) }.getOrNull()?.let { view ->
+                    defaultEngine = view.defaultEngine
+                    effectiveDefaultEngine = view.effective
+                    opencodeUrl = view.opencodeUrl
+                    opencodeUrlEffective = view.opencodeUrlEffective
+                    notifyChatOnAppTask = view.notifyChatOnAppTask
+                }
                 sessionError = null
             } catch (err: CancellationException) {
                 throw err
@@ -1308,12 +1363,19 @@ class AppViewModel(
     fun onForeground() {
         resumePendingInstall()
         refreshConnectionQuietly()
+        pollNotices()
+        refreshApprovalsQuietly()
         startOutbox()
         outboxWake.trySend(Unit)
         when (screen) {
             Screen.History -> refreshHistoryQuietly()
             Screen.Reminders -> refreshRemindersQuietly()
             Screen.Schedules -> refreshSchedulesQuietly()
+            Screen.Approvals -> refreshApprovals()
+            Screen.Webhooks -> refreshWebhooks()
+            Screen.Workspace -> refreshWorkspace()
+            Screen.Accounts -> refreshAccounts()
+            Screen.Hermes -> refreshHermes()
             Screen.Queue -> pollQueue()
             Screen.Agents -> refreshAgents()
             Screen.Models -> refreshCustomModels()
@@ -1420,9 +1482,13 @@ class AppViewModel(
                 testModelConnection(baseURL, apiKey ?: "", model ?: "")
                 return
             }
-            toast = "JSON 里没有找到 provider.options.baseURL，无法测试"
+            val msg = "JSON 里没有找到 provider.options.baseURL，无法测试"
+            modelTestResult = ModelTestResult(ok = false, message = msg)
+            toast = msg
         } catch (err: Exception) {
-            toast = "JSON 解析失败：${err.message}"
+            val msg = "JSON 解析失败：${err.message}"
+            modelTestResult = ModelTestResult(ok = false, message = msg)
+            toast = msg
         }
     }
 
@@ -1452,13 +1518,20 @@ class AppViewModel(
     var agentProvider by mutableStateOf<AgentProviderConfig?>(null)
         private set
 
+    fun clearLoadedAgentProvider() {
+        agentProvider = null
+    }
+
     fun loadAgentProvider(engine: String = agentModelEngine) {
         if (engine == "opencode") {
             agentProvider = null
             return
         }
-        guarded("加载中转站", onError = { agentModelError = "无法加载中转站配置：${it.message}" }) {
-            agentProvider = api.agentProvider(conn(), engine)
+        val target = engine
+        agentProvider = null
+        guarded("加载中转站", onError = { if (agentModelEngine == target) agentModelError = "无法加载中转站配置：${it.message}" }) {
+            val loaded = api.agentProvider(conn(), target)
+            if (agentModelEngine == target) agentProvider = loaded
         }
     }
 
@@ -1466,7 +1539,8 @@ class AppViewModel(
         val engine = agentModelEngine
         if (engine == "opencode") return
         guarded("保存中转站", onError = { toast = "保存失败：${it.message}" }) {
-            agentProvider = api.setAgentProvider(conn(), engine, baseURL.trim(), apiKey.trim())
+            val saved = api.setAgentProvider(conn(), engine, baseURL.trim(), apiKey.trim())
+            if (agentModelEngine == engine) agentProvider = saved
             toast = "中转站已保存：${baseURL.trim()}"
         }
     }
@@ -1476,7 +1550,7 @@ class AppViewModel(
         if (engine == "opencode") return
         guarded("清除中转站", onError = { toast = "清除失败：${it.message}" }) {
             api.clearAgentProvider(conn(), engine)
-            agentProvider = null
+            if (agentModelEngine == engine) agentProvider = null
             toast = "已恢复使用官方端点"
         }
     }
@@ -1491,6 +1565,8 @@ class AppViewModel(
         if (engine == agentModelEngine) return
         agentModelEngine = engine
         agentModelError = null
+        agentProvider = null
+        agentCustomModels = emptyList()
         if (engine != "opencode") loadAgentCustomModels(engine)
     }
 
@@ -1499,9 +1575,11 @@ class AppViewModel(
             agentCustomModels = emptyList()
             return
         }
-        guarded("加载自定义模型", onError = { agentModelError = "无法加载自定义模型：${it.message}" }) {
-            agentModelError = null
-            agentCustomModels = api.agentCustomModels(conn(), engine)
+        val target = engine
+        guarded("加载自定义模型", onError = { if (agentModelEngine == target) agentModelError = "无法加载自定义模型：${it.message}" }) {
+            if (agentModelEngine == target) agentModelError = null
+            val loaded = api.agentCustomModels(conn(), target)
+            if (agentModelEngine == target) agentCustomModels = loaded
         }
     }
 
@@ -1575,6 +1653,9 @@ class AppViewModel(
     var opencodeUrlEffective by mutableStateOf("")
         private set
 
+    var notifyChatOnAppTask by mutableStateOf(false)
+        private set
+
     /** Reads the settings the ops card displays; failures are silent, the card falls back. */
     fun loadSettings() {
         viewModelScope.launch {
@@ -1584,8 +1665,74 @@ class AppViewModel(
                 effectiveDefaultEngine = view.effective
                 opencodeUrl = view.opencodeUrl
                 opencodeUrlEffective = view.opencodeUrlEffective
+                notifyChatOnAppTask = view.notifyChatOnAppTask
             } catch (_: Exception) {
                 // older server without /settings
+            }
+        }
+    }
+
+    fun toggleNotifyChatOnAppTask(enabled: Boolean) {
+        guarded("跨端完成提醒", onError = { toast = "保存失败：${it.message}" }) {
+            val view = api.setNotifyChatOnAppTask(conn(), enabled)
+            notifyChatOnAppTask = view.notifyChatOnAppTask
+            toast = if (view.notifyChatOnAppTask) "已开启 App 任务完成同步提醒聊天端" else "已关闭跨端完成提醒"
+        }
+    }
+
+    fun restoreServerTranscript(scope: String = "app") {
+        guarded("恢复对话记录") {
+            val view = api.syncMessages(conn(), scope)
+            if (view.messages.isEmpty()) {
+                toast = "服务端暂无可恢复的对话记录"
+            } else {
+                messages = view.messages.mapIndexed { idx, item ->
+                    ChatMessage(
+                        role = if (item.role == "user") ChatMessage.Role.USER else ChatMessage.Role.ASSISTANT,
+                        text = item.text,
+                        status = if (item.role == "assistant") "done" else null,
+                        at = if (item.at > 0) item.at else System.currentTimeMillis(),
+                        localId = "tr-$idx-${item.id.ifBlank { item.at.toString() }}",
+                    )
+                }
+                persistMessages()
+                toast = "已从服务端恢复 ${view.messages.size} 条对话记录"
+                navigate(Screen.Chat)
+            }
+        }
+    }
+
+    fun handoffPeer(scope: String, onDone: (Boolean) -> Unit = {}) {
+        if (hasLiveTask) {
+            sessionActionError = "任务执行中，请先停止当前任务再接管对端会话"
+            onDone(false)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val res = api.handoffPeer(conn(), scope)
+                session = res.session
+                if (res.messages.isNotEmpty()) {
+                    messages = res.messages.mapIndexed { idx, item ->
+                        ChatMessage(
+                            role = if (item.role == "user") ChatMessage.Role.USER else ChatMessage.Role.ASSISTANT,
+                            text = item.text,
+                            status = if (item.role == "assistant") "done" else null,
+                            at = if (item.at > 0) item.at else System.currentTimeMillis(),
+                            localId = "ho-$idx-${item.id.ifBlank { item.at.toString() }}",
+                        )
+                    }
+                    persistMessages()
+                }
+                sessionActionError = null
+                toast = res.message.ifBlank { "已接管对端会话" }
+                onDone(true)
+                navigate(Screen.Chat)
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                sessionActionError = if (err is NotConfiguredException) err.message else "接管失败：${err.message}"
+                onDone(false)
             }
         }
     }
@@ -1863,7 +2010,7 @@ class AppViewModel(
             try {
                 ccProviderMeta = api.ccProviderMeta(conn())
             } catch (err: Exception) {
-                connectionError = "读取 Provider 模板失败：${err.message}"
+                toast = "读取 Provider 模板失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -2142,7 +2289,7 @@ class AppViewModel(
                 ccPanelTitle = "🔍 会话搜索 · $trimmed"
                 ccPanelText = result.text
             } catch (err: Exception) {
-                connectionError = "搜索会话失败：${err.message}"
+                toast = "搜索会话失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -2167,7 +2314,7 @@ class AppViewModel(
                 // A link can add providers, so the console should show the new state at once
                 refreshCcAfterMutation()
             } catch (err: Exception) {
-                connectionError = "Deep Link 导入失败：${err.message}"
+                toast = "Deep Link 导入失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -2184,7 +2331,7 @@ class AppViewModel(
                 ccPanelTitle = "配额 · $id"
                 ccPanelText = result.text
             } catch (err: Exception) {
-                connectionError = "读取配额失败：${err.message}"
+                toast = "读取配额失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -2225,10 +2372,10 @@ class AppViewModel(
                 if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
                     ccRawConfirmation = words
                 } else {
-                    connectionError = "cc-switch 执行失败：${err.message}"
+                    toast = "cc-switch 执行失败：${err.message}"
                 }
             } catch (err: Exception) {
-                connectionError = "cc-switch 执行失败：${err.message}"
+                toast = "cc-switch 执行失败：${err.message}"
             } finally {
                 ccBusy = false
             }
@@ -2291,8 +2438,8 @@ class AppViewModel(
     // ---- magpie ----
 
     fun refreshMagpie() {
-        if (magpieBusy) return
-        magpieBusy = true
+        if (magpieRefreshing) return
+        magpieRefreshing = true
         magpieError = null
         guarded("加载 magpie", onError = { magpieError = "无法加载 magpie 状态：${it.message}" }) {
             try {
@@ -2303,14 +2450,14 @@ class AppViewModel(
                 magpieError = if (err is NotConfiguredException) err.message else "无法加载 magpie 状态：${err.message}"
                 throw err
             } finally {
-                magpieBusy = false
+                magpieRefreshing = false
             }
         }
     }
 
     private fun refreshMagpieQuietly() {
-        if (magpieBusy) return
-        magpieBusy = true
+        if (magpieRefreshing) return
+        magpieRefreshing = true
         viewModelScope.launch {
             try {
                 reloadMagpie()
@@ -2320,7 +2467,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 magpieError = if (err is NotConfiguredException) err.message else "无法加载 magpie 状态：${err.message}"
             } finally {
-                magpieBusy = false
+                magpieRefreshing = false
             }
         }
     }
@@ -2331,45 +2478,127 @@ class AppViewModel(
 
     /** Runs one read-only view; the server owns the argv, so only a listed name is accepted. */
     fun showMagpieView(name: String, target: String? = null) {
-        if (magpieBusy) return
+        if (magpieRunning) return
         viewModelScope.launch {
-            magpieBusy = true
+            magpieRunning = true
+            magpieError = null
             try {
                 val result = api.magpieView(conn(), name, target)
                 magpieTitle = result.label.ifBlank { name }
                 magpieOutput = result.text.ifBlank { "（无输出）" }
-                connectionError = null
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
+                magpieError = "读取 magpie 视图失败：${err.message}"
                 magpieTitle = "magpie 错误"
                 magpieOutput = err.message ?: "读取失败"
             } finally {
-                magpieBusy = false
+                magpieRunning = false
+            }
+        }
+    }
+
+    /** Adds a magpie provider through the dedicated secret-safe route (exact-value masking). */
+    fun addMagpieProvider(preset: String, apiKey: String) {
+        if (magpieRunning) return
+        val safePreset = preset.trim()
+        val safeKey = apiKey.trim()
+        if (safePreset.isEmpty() || safeKey.isEmpty()) {
+            toast = "请填写预设名称与 API Key"
+            return
+        }
+        viewModelScope.launch {
+            magpieRunning = true
+            magpieError = null
+            try {
+                val result = api.magpieAddProvider(conn(), safePreset, safeKey)
+                magpieTitle = "添加 Provider · $safePreset"
+                magpieOutput = result.text.ifBlank { "已添加 Provider $safePreset" }
+                toast = "已添加 Provider $safePreset"
+                try {
+                    reloadMagpie()
+                } catch (err: CancellationException) {
+                    throw err
+                } catch (_: Exception) {
+                }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                magpieError = "添加 Provider 失败：${err.message}"
+            } finally {
+                magpieRunning = false
             }
         }
     }
 
     /**
-     * Telegram's `/magpie run <argv>`. A refusal that asks for confirmation opens the dialog
-     * instead of failing; confirming re-sends the identical words with `confirm`.
+     * Telegram's `/magpie <cmd>` and `/magpie run <argv>`. Routes `provider add`,
+     * `agent <agent> <model>`, and `group add` to their dedicated server endpoints so
+     * secrets never touch raw passthrough and Telegram shorthand syntax works identically.
      */
     fun runMagpie(words: String, confirm: Boolean = false) {
-        if (magpieBusy) return
-        val argv = words.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-        if (argv.isEmpty()) {
+        if (magpieRunning) return
+        val rawTokens = tokenizeShellWords(words)
+        if (rawTokens.isEmpty()) {
             toast = "没有要执行的 magpie 参数"
             return
         }
+        val first = rawTokens[0].lowercase()
+        // Telegram-style `/magpie status|panel` refreshes the overview instead of failing in CLI.
+        if (rawTokens.size == 1 && (first == "status" || first == "panel")) {
+            refreshMagpie()
+            return
+        }
+        if (rawTokens.size == 1 && first == "help") {
+            magpieTitle = "magpie 帮助"
+            magpieOutput = "常用参数：providers、presets、agents、ls、models [agent]、groups、quota、usage [today|7d|30d|all]、claude deepseek/deepseek-chat、sync"
+            return
+        }
+        // Strip Telegram's optional leading `run` verb.
+        val tokens = if (first == "run") rawTokens.drop(1) else rawTokens
+        if (tokens.isEmpty()) {
+            toast = "用法：输入要传给 magpie 的参数，例如 providers"
+            return
+        }
         viewModelScope.launch {
-            magpieBusy = true
+            magpieRunning = true
+            magpieError = null
             try {
-                val result = api.magpieRun(conn(), argv, confirm)
-                magpieTitle = argv.take(3).joinToString(" ")
+                val cmd = tokens[0].lowercase()
+                val sub = tokens.getOrNull(1)?.lowercase()
+                val (title, result, mutating) = when {
+                    cmd == "provider" && sub == "add" && tokens.size >= 4 -> {
+                        val preset = tokens[2]
+                        val key = tokens.drop(3).joinToString(" ")
+                        Triple("provider add $preset", api.magpieAddProvider(conn(), preset, key), true)
+                    }
+                    cmd == "agent" && tokens.size >= 3 -> {
+                        val agent = tokens[1]
+                        val model = tokens.drop(2).joinToString(" ")
+                        Triple("$agent $model", api.magpieSetAgent(conn(), agent, model), true)
+                    }
+                    cmd == "agent" && tokens.size == 2 -> {
+                        val agent = tokens[1]
+                        Triple(agent, api.magpieRun(conn(), listOf(agent), confirm), false)
+                    }
+                    cmd == "group" && sub == "add" && tokens.size >= 4 -> {
+                        val name = tokens[2]
+                        val pairs = tokens.drop(3)
+                        Triple("group add $name", api.magpieAddGroup(conn(), name, pairs), true)
+                    }
+                    else -> {
+                        Triple(
+                            tokens.take(3).joinToString(" "),
+                            api.magpieRun(conn(), tokens, confirm),
+                            cmd == "provider" || cmd == "group" || cmd == "sync",
+                        )
+                    }
+                }
+                magpieTitle = title
                 magpieOutput = result.text.ifBlank { "（无输出）" }
                 magpieConfirmation = null
                 // The command already succeeded; a refresh hiccup must not turn it into a failure.
-                if (argv.first() == "provider" || argv.first() == "group" || argv.first() == "sync") {
+                if (mutating) {
                     try {
                         reloadMagpie()
                     } catch (err: CancellationException) {
@@ -2383,12 +2612,12 @@ class AppViewModel(
                 if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
                     magpieConfirmation = words
                 } else {
-                    connectionError = "magpie 执行失败：${err.message}"
+                    magpieError = "magpie 执行失败：${err.message}"
                 }
             } catch (err: Exception) {
-                connectionError = "magpie 执行失败：${err.message}"
+                magpieError = "magpie 执行失败：${err.message}"
             } finally {
-                magpieBusy = false
+                magpieRunning = false
             }
         }
     }
@@ -2408,7 +2637,7 @@ class AppViewModel(
      * sent without one, and a destructive one is sent only after the confirmation dialog.
      */
     fun runMagpieCommand(name: String, target: String? = null, confirm: Boolean = false) {
-        if (magpieBusy) return
+        if (magpieRunning) return
         val spec = magpie?.commands?.find { it.name == name } ?: return
         val value = target?.trim()?.takeIf { it.isNotEmpty() }
         if (spec.needsTarget && value == null) {
@@ -2416,7 +2645,8 @@ class AppViewModel(
             return
         }
         viewModelScope.launch {
-            magpieBusy = true
+            magpieRunning = true
+            magpieError = null
             try {
                 val result = api.magpieExec(conn(), name, value, confirm)
                 magpieTitle = result.label.ifBlank { spec.label }
@@ -2429,12 +2659,12 @@ class AppViewModel(
                 if (!confirm && err.code == 400 && err.message.orEmpty().contains("需要确认")) {
                     magpieCommandConfirmation = spec to value
                 } else {
-                    connectionError = "magpie 执行失败：${err.message}"
+                    magpieError = "magpie 执行失败：${err.message}"
                 }
             } catch (err: Exception) {
-                connectionError = "magpie 执行失败：${err.message}"
+                magpieError = "magpie 执行失败：${err.message}"
             } finally {
-                magpieBusy = false
+                magpieRunning = false
             }
         }
     }
@@ -2496,6 +2726,7 @@ class AppViewModel(
     private fun hermesWrite(kind: String, action: String, content: String?) {
         if (hermesBusy) return
         hermesBusy = true
+        hermesError = null
         hermesMessage = null
         viewModelScope.launch {
             try {
@@ -2514,7 +2745,7 @@ class AppViewModel(
                 }
                 hermesMessage = result.message
             } catch (err: Exception) {
-                connectionError = if (err is NotConfiguredException) err.message else "Hermes 记忆操作失败：${err.message}"
+                hermesError = if (err is NotConfiguredException) err.message else "Hermes 记忆操作失败：${err.message}"
             } finally {
                 hermesBusy = false
             }
@@ -2570,6 +2801,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 configActionError = "更新配置失败：${err.message}"
                 configDraftRejected = true
+                if (screen == Screen.Chat) connectionError = configActionError
                 onResult(false)
             } finally {
                 configBusy = false
@@ -2593,6 +2825,7 @@ class AppViewModel(
                 onResult(true)
             } catch (err: Exception) {
                 configActionError = "删除配置失败：${err.message}"
+                if (screen == Screen.Chat) connectionError = configActionError
                 onResult(false)
             } finally {
                 configBusy = false
@@ -2832,12 +3065,174 @@ class AppViewModel(
                 trend = days
                 dailyReport = api.usageReport(conn())
                 serverInfo = api.info(conn())
+                budgetStatus = runCatching { api.budget(conn()) }.getOrNull()
             } catch (err: CancellationException) {
                 throw err
             } catch (err: Exception) {
                 statusError = "无法加载运行状态：${err.message}"
             }
             statusBusy = false
+        }
+    }
+
+    fun updateBudget(dailyUsd: Double?, monthlyUsd: Double?, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val res = api.setBudget(conn(), dailyUsd, monthlyUsd)
+                budgetStatus = res
+                toast = res.message ?: "费用预算已更新"
+                onDone(true)
+            } catch (err: Exception) {
+                toast = "更新预算失败：${err.message}"
+                onDone(false)
+            }
+        }
+    }
+
+    fun refreshApprovals() {
+        if (approvalsBusy) return
+        approvalsBusy = true
+        viewModelScope.launch {
+            try {
+                approvalsView = api.approvals(conn())
+                approvalsError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                approvalsError = "读取审批列表失败：${err.message}"
+            } finally {
+                approvalsBusy = false
+            }
+        }
+    }
+
+    fun refreshApprovalsQuietly() {
+        silent {
+            approvalsView = api.approvals(conn())
+            approvalsError = null
+        }
+    }
+
+    fun setApprovalMode(mode: String, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val res = api.setApprovalMode(conn(), mode)
+                approvalsView = res
+                approvalsActionError = null
+                toast = res.message ?: "审批模式已更新"
+            } catch (err: Exception) {
+                approvalsActionError = "切换审批模式失败：${err.message}"
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    fun decideApproval(id: String, decision: String) {
+        viewModelScope.launch {
+            try {
+                val res = api.decideApproval(conn(), id, decision)
+                approvalsView = res
+                approvalsActionError = null
+                toast = res.message ?: "已处理审批请求"
+            } catch (err: Exception) {
+                approvalsActionError = "处理审批失败：${err.message}"
+            }
+        }
+    }
+
+    fun refreshWebhooks() {
+        if (webhooksBusy) return
+        webhooksBusy = true
+        viewModelScope.launch {
+            try {
+                webhooksView = api.webhooks(conn())
+                webhooksError = null
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                webhooksError = "读取 Webhook 列表失败：${err.message}"
+            } finally {
+                webhooksBusy = false
+            }
+        }
+    }
+
+    fun createWebhook(name: String, promptTemplate: String, onDone: (Boolean) -> Unit = {}) {
+        if (webhooksBusy) {
+            onDone(false)
+            return
+        }
+        webhooksBusy = true
+        viewModelScope.launch {
+            try {
+                val res = api.createWebhook(conn(), name, promptTemplate)
+                webhooksView = WebhooksView(hooks = res.hooks, triggerBaseUrl = res.triggerBaseUrl ?: webhooksView?.triggerBaseUrl)
+                webhooksActionError = null
+                toast = res.message ?: "已创建 Webhook"
+                onDone(true)
+            } catch (err: Exception) {
+                webhooksActionError = "创建 Webhook 失败：${err.message}"
+                onDone(false)
+            } finally {
+                webhooksBusy = false
+            }
+        }
+    }
+
+    fun toggleWebhook(id: String) {
+        if (webhooksBusy) return
+        webhooksBusy = true
+        viewModelScope.launch {
+            try {
+                val res = api.toggleWebhook(conn(), id)
+                webhooksView = WebhooksView(hooks = res.hooks, triggerBaseUrl = webhooksView?.triggerBaseUrl)
+                webhooksActionError = null
+                toast = res.message ?: "已切换状态"
+            } catch (err: Exception) {
+                webhooksActionError = "切换 Webhook 状态失败：${err.message}"
+            } finally {
+                webhooksBusy = false
+            }
+        }
+    }
+
+    fun testWebhook(id: String) {
+        if (webhooksBusy) return
+        webhooksBusy = true
+        viewModelScope.launch {
+            try {
+                val res = api.testWebhook(conn(), id)
+                webhooksView = WebhooksView(hooks = res.hooks, triggerBaseUrl = webhooksView?.triggerBaseUrl)
+                webhooksActionError = null
+                toast = res.message ?: "已触发测试"
+            } catch (err: Exception) {
+                webhooksActionError = "测试 Webhook 失败：${err.message}"
+            } finally {
+                webhooksBusy = false
+            }
+        }
+    }
+
+    fun deleteWebhook(id: String, onDone: (Boolean) -> Unit = {}) {
+        if (webhooksBusy) {
+            onDone(false)
+            return
+        }
+        webhooksBusy = true
+        viewModelScope.launch {
+            try {
+                val res = api.deleteWebhook(conn(), id)
+                webhooksView = WebhooksView(hooks = res.hooks, triggerBaseUrl = webhooksView?.triggerBaseUrl)
+                webhooksActionError = null
+                toast = res.message ?: "已删除 Webhook"
+                onDone(true)
+            } catch (err: Exception) {
+                webhooksActionError = "删除 Webhook 失败：${err.message}"
+                onDone(false)
+            } finally {
+                webhooksBusy = false
+            }
         }
     }
 
@@ -2930,6 +3325,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 sessionActionError = "切换工作目录失败：${err.message}"
                 sessionDraftRejected = true
+                if (screen == Screen.Chat) connectionError = sessionActionError
                 onResult(false)
             }
         }
@@ -2945,6 +3341,7 @@ class AppViewModel(
                 toast = "已恢复默认工作目录"
             } catch (err: Exception) {
                 sessionActionError = "恢复默认目录失败：${err.message}"
+                if (screen == Screen.Chat) connectionError = sessionActionError
             }
         }
     }
@@ -2976,6 +3373,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 sessionActionError = "切换时区失败：${err.message}"
                 sessionDraftRejected = true
+                if (screen == Screen.Chat) connectionError = sessionActionError
                 onResult(false)
             }
         }
@@ -3172,6 +3570,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 accessActionError = "添加白名单失败：${err.message}"
                 accessDraftRejected = true
+                if (screen == Screen.Chat) connectionError = accessActionError
                 onResult(false)
             }
         }
@@ -3189,6 +3588,7 @@ class AppViewModel(
                 onResult(true)
             } catch (err: Exception) {
                 accessActionError = "移除白名单失败：${err.message}"
+                if (screen == Screen.Chat) connectionError = accessActionError
                 accessDraftRejected = true
                 onResult(false)
             }
@@ -3248,10 +3648,20 @@ class AppViewModel(
                                 ChatMessage.Role.ASSISTANT,
                                 "📬 另有 $skipped 条更早的提醒未展开",
                                 at = shown.first().at - 1,
+                                localId = "notice-skip-${shown.first().id.ifBlank { shown.first().at.toString() }}",
                             ),
                         )
                     }
-                    shown.forEach { add(ChatMessage(ChatMessage.Role.ASSISTANT, it.text, at = it.at)) }
+                    shown.forEachIndexed { idx, notice ->
+                        add(
+                            ChatMessage(
+                                ChatMessage.Role.ASSISTANT,
+                                notice.text,
+                                at = notice.at,
+                                localId = "notice-$idx-${notice.id.ifBlank { notice.at.toString() }}",
+                            ),
+                        )
+                    }
                 }
                 persistMessages()
                 noticesCursor = list.maxOf { it.at }
@@ -3396,6 +3806,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 aliasesActionError = "创建快捷指令失败：${err.message}"
                 aliasesDraftRejected = true
+                if (screen == Screen.Chat) connectionError = aliasesActionError
                 onResult(false)
             }
         }
@@ -3413,6 +3824,7 @@ class AppViewModel(
             } catch (err: Exception) {
                 aliasesActionError = "删除快捷指令失败：${err.message}"
                 aliasesDraftRejected = true
+                if (screen == Screen.Chat) connectionError = aliasesActionError
                 onResult(false)
             }
         }
@@ -3525,6 +3937,10 @@ class AppViewModel(
                 toast = api.disableProxy(conn())
                 proxyTestMessage = null
                 refreshProxies()
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                proxyActionError = "停用代理失败：${err.message}"
             } finally {
                 proxyBusy = false
             }
@@ -3964,9 +4380,10 @@ class AppViewModel(
     var secretBusy by mutableStateOf<Set<String>>(emptySet())
         private set
 
-    /** Plain http:// without the pairing key: the value would cross the network readable. */
+    /** Plain http:// without active message encryption: the value would cross the network readable. */
     val secretTransportExposed: Boolean
-        get() = settings.baseUrl.trim().startsWith("http://", ignoreCase = true) && settings.encKey.isBlank()
+        get() = settings.baseUrl.trim().startsWith("http://", ignoreCase = true) &&
+            (settings.encKey.isBlank() || api.isEncryptionRefused(settings.encKey) || health?.encryption == false)
 
     /**
      * Sends one value straight to the server's vault. It is never kept here: the card clears its
@@ -4029,12 +4446,62 @@ class AppViewModel(
         }
     }
 
+    var workspaceDiff by mutableStateOf<WorkspaceDiff?>(null)
+        private set
+
+    var workspaceBusy by mutableStateOf(false)
+        private set
+
+    var workspaceError by mutableStateOf<String?>(null)
+        private set
+
+    fun clearWorkspaceError() {
+        workspaceError = null
+    }
+
+    fun refreshWorkspace() {
+        if (workspaceBusy) return
+        workspaceBusy = true
+        workspaceError = null
+        viewModelScope.launch {
+            try {
+                workspaceDiff = api.workspaceDiff(conn())
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Exception) {
+                workspaceError = if (err is NotConfiguredException) err.message else "读取代码改动失败：${err.message}"
+            } finally {
+                workspaceBusy = false
+            }
+        }
+    }
+
     fun undoChanges() {
         if (hasLiveTask) {
             toast = "任务执行中，请先停止当前任务再撤销"
             return
         }
-        guarded("撤销改动") { toast = api.undoChanges(conn()) }
+        guarded("撤销改动") {
+            toast = api.undoChanges(conn())
+            if (screen == Screen.Workspace) refreshWorkspace()
+        }
+    }
+
+    fun commitChanges(message: String) {
+        if (hasLiveTask) {
+            toast = "任务执行中，请先停止当前任务再提交"
+            return
+        }
+        val text = message.trim()
+        if (text.isEmpty()) {
+            toast = "提交说明不能为空"
+            return
+        }
+        guarded("提交改动") {
+            val res = api.commitChanges(conn(), text)
+            toast = res.message
+            if (screen == Screen.Workspace) refreshWorkspace()
+        }
     }
 
     fun refreshArchivedSessions() {
@@ -4664,15 +5131,18 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 val bytes = api.backupData(conn())
-                val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmssSSS", java.util.Locale.US).format(java.util.Date())
-                val dir = java.io.File(appContext.cacheDir, "backup").apply { mkdirs() }
-                val file = java.io.File(dir, "agentbot-backup-$stamp.tar.gz")
-                file.writeBytes(bytes)
-                // 分享面板只读最新一份；旧归档留给系统回收，最多保留 3 份防止缓存膨胀
-                dir.listFiles { f -> f.name.startsWith("agentbot-backup-") }
-                    ?.sortedByDescending { it.name }
-                    ?.drop(3)
-                    ?.forEach { it.delete() }
+                val file = withContext(Dispatchers.IO) {
+                    val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmssSSS", java.util.Locale.US).format(java.util.Date())
+                    val dir = java.io.File(appContext.cacheDir, "backup").apply { mkdirs() }
+                    val target = java.io.File(dir, "agentbot-backup-$stamp.tar.gz")
+                    target.writeBytes(bytes)
+                    // 分享面板只读最新一份；旧归档留给系统回收，最多保留 3 份防止缓存膨胀
+                    dir.listFiles { f -> f.name.startsWith("agentbot-backup-") }
+                        ?.sortedByDescending { it.name }
+                        ?.drop(3)
+                        ?.forEach { it.delete() }
+                    target
+                }
                 val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.files", file)
                 val share = Intent(Intent.ACTION_SEND).setType("application/gzip")
                     .putExtra(Intent.EXTRA_STREAM, uri)
@@ -4681,6 +5151,8 @@ class AppViewModel(
                     ShareIntents.chooser(appContext, share, "数据备份").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
                 toast = "备份已生成（${bytes.size / 1024} KB），请在分享面板选择保存位置"
+            } catch (err: CancellationException) {
+                throw err
             } catch (err: Exception) {
                 connectionError = "备份失败：${err.message}"
             }
@@ -4713,6 +5185,8 @@ class AppViewModel(
                         ShareIntents.chooser(appContext, share, media.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                     )
                 }
+            } catch (err: CancellationException) {
+                throw err
             } catch (err: Exception) {
                 connectionError = "无法打开 ${media.name}：${err.message}"
             }
@@ -4737,33 +5211,37 @@ class AppViewModel(
             try {
                 val file = mediaFile(taskId, media)
                 val mime = mediaMimeType(media)
-                val (collection, folder) = when {
-                    mime.startsWith("video/") ->
-                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_MOVIES
-                    mime.startsWith("image/") ->
-                        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_PICTURES
-                    else ->
-                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_DOWNLOADS
+                withContext(Dispatchers.IO) {
+                    val (collection, folder) = when {
+                        mime.startsWith("video/") ->
+                            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_MOVIES
+                        mime.startsWith("image/") ->
+                            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_PICTURES
+                        else ->
+                            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_DOWNLOADS
+                    }
+                    val resolver = appContext.contentResolver
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, media.name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "$folder/AgentBot")
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = resolver.insert(collection, values) ?: error("无法创建媒体条目")
+                    try {
+                        resolver.openOutputStream(uri)?.use { out ->
+                            file.inputStream().use { it.copyTo(out) }
+                        } ?: error("无法写入媒体文件")
+                        // IS_PENDING=0 publishes it; until then the gallery ignores the entry
+                        resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                    } catch (err: Exception) {
+                        resolver.delete(uri, null, null)
+                        throw err
+                    }
                 }
-                val resolver = appContext.contentResolver
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, media.name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$folder/AgentBot")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                val uri = resolver.insert(collection, values) ?: error("无法创建媒体条目")
-                try {
-                    resolver.openOutputStream(uri)?.use { out ->
-                        file.inputStream().use { it.copyTo(out) }
-                    } ?: error("无法写入媒体文件")
-                    // IS_PENDING=0 publishes it; until then the gallery ignores the entry
-                    resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-                    toast = "已保存到相册：${media.name.ifBlank { media.label }}"
-                } catch (err: Exception) {
-                    resolver.delete(uri, null, null)
-                    throw err
-                }
+                toast = "已保存到相册：${media.name.ifBlank { media.label }}"
+            } catch (err: CancellationException) {
+                throw err
             } catch (err: Exception) {
                 toast = "保存失败：${err.message}"
             } finally {

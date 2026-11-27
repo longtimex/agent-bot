@@ -723,7 +723,7 @@ test("ReminderService.postpone moves a pending one-shot and refuses repeats", as
     // first so its own schedule does not fire during this window)
     service.cancel(42, repeating.id)
     const sent: string[] = []
-    const firing = new ReminderService(join(dir, "reminders.json"), async (_chatId, text) => sent.push(text), log)
+    const firing = new ReminderService(join(dir, "reminders.json"), async (_chatId, text) => { sent.push(text) }, log)
     await firing.tick(now + 29 * 60_000)
     assert.equal(sent.length, 0)
     await firing.tick(now + 31 * 60_000)

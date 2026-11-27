@@ -117,7 +117,12 @@ export async function routeAccounts(
   }
   if (ctx.method === "POST" && id && action === "reveal") {
     guardSecret()
-    const revealed = accounts.reveal(id)
+    let revealed
+    try {
+      revealed = accounts.reveal(id)
+    } catch (err) {
+      throw new ApiError(409, err instanceof Error ? err.message : "账号密码无法解密")
+    }
     if (!revealed) throw new ApiError(404, "账号不存在")
     deps.json(ctx.res, 200, { ok: true, password: revealed.password })
     return
@@ -149,6 +154,7 @@ export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestCont
       opencodeUrl: settings.opencodeUrl ?? null,
       // What the running server actually dials; a saved value only lands after a restart
       opencodeUrlEffective: deps.opencodeUrlEffective ?? deps.cfg.opencode.url,
+      notifyChatOnAppTask: settings.notifyChatOnAppTask,
     })
     return
   }
@@ -184,7 +190,15 @@ export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestCont
       touched = true
     }
 
-    if (!touched) throw new ApiError(400, "缺少字段，可用：defaultEngine、opencodeUrl")
+    if (body.notifyChatOnAppTask !== undefined) {
+      if (typeof body.notifyChatOnAppTask !== "boolean") {
+        throw new ApiError(400, "notifyChatOnAppTask 必须是 true 或 false")
+      }
+      settings.setNotifyChatOnAppTask(body.notifyChatOnAppTask)
+      touched = true
+    }
+
+    if (!touched) throw new ApiError(400, "缺少字段，可用：defaultEngine、opencodeUrl、notifyChatOnAppTask")
 
     const next = resolveDefaultEngine(deps.registry, settings.defaultEngine, deps.cfg.defaultEngine)
     deps.json(ctx.res, 200, {
@@ -195,6 +209,7 @@ export async function routeSettings(deps: PersonalRouteDeps, ctx: ApiRequestCont
       // A saved value only lands after a restart, so the effective address is the one the
       // running process was built with — not what the file now says
       opencodeUrlEffective: deps.opencodeUrlEffective ?? deps.cfg.opencode.url,
+      notifyChatOnAppTask: settings.notifyChatOnAppTask,
     })
     return
   }

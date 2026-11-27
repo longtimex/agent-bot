@@ -21,9 +21,13 @@ function headerValue(headers: string, name: string): string | undefined {
   return line?.slice(line.indexOf(":") + 1).trim()
 }
 
+const MAX_PART_HEADER_BYTES = 16 * 1024
+const DEFAULT_MAX_PART_BYTES = 256 * 1024
+
 function dispositionParam(value: string | undefined, key: string): string | undefined {
   if (!value) return undefined
-  const extended = new RegExp(`${key}\\*=UTF-8''([^;]+)`, "i").exec(value)
+  // Anchor on parameter boundaries so `filename*=UTF-8''...` is never matched as `name*=...`.
+  const extended = new RegExp(`(?:^|;)\\s*${key}\\*=UTF-8''([^;]+)`, "i").exec(value)
   if (extended?.[1]) {
     try {
       return decodeURIComponent(extended[1])
@@ -31,8 +35,8 @@ function dispositionParam(value: string | undefined, key: string): string | unde
       return extended[1]
     }
   }
-  return new RegExp(`${key}="([^"]*)"`, "i").exec(value)?.[1]
-    ?? new RegExp(`${key}=([^;]+)`, "i").exec(value)?.[1]?.trim()
+  return new RegExp(`(?:^|;)\\s*${key}="([^"]*)"`, "i").exec(value)?.[1]
+    ?? new RegExp(`(?:^|;)\\s*${key}=([^;]+)`, "i").exec(value)?.[1]?.trim()
 }
 
 /**
@@ -67,10 +71,12 @@ export async function* multipartParts(req: IncomingMessage, boundary: string): A
     while (true) {
       const end = buffer.indexOf("\r\n\r\n")
       if (end >= 0) {
+        if (end > MAX_PART_HEADER_BYTES) throw new Error("multipart 字段头过大")
         const headers = buffer.subarray(0, end).toString("latin1")
         buffer = buffer.subarray(end + 4)
         return headers
       }
+      if (buffer.byteLength > MAX_PART_HEADER_BYTES) throw new Error("multipart 字段头过大")
       if (!(await fill())) throw new Error("multipart 请求不完整")
     }
   }
@@ -115,7 +121,7 @@ export async function* multipartParts(req: IncomingMessage, boundary: string): A
   // The first delimiter has no CRLF prefix. Later delimiters are consumed by
   // nextChunk(), which leaves the next part's headers at the front of the buffer.
   const leading = Buffer.from(`--${boundary}`)
-  while (buffer.byteLength < leading.byteLength && !eof) await fill()
+  await ensure(leading.byteLength + 2)
   if (!buffer.subarray(0, leading.byteLength).equals(leading)) {
     throw new Error("multipart 缺少起始边界")
   }
@@ -144,9 +150,23 @@ export async function* multipartParts(req: IncomingMessage, boundary: string): A
   }
 }
 
-/** Consumes a small part (a text field) completely. */
-export async function readMultipartPart(part: AsyncIterable<Uint8Array>): Promise<Buffer> {
+/** Consumes a small part (a text field) up to `maxBytes` to prevent unbounded heap allocation. */
+export async function readMultipartPart(
+  part: AsyncIterable<Uint8Array>,
+  maxBytes = DEFAULT_MAX_PART_BYTES,
+): Promise<Buffer> {
   const chunks: Buffer[] = []
-  for await (const chunk of part) chunks.push(Buffer.from(chunk))
-  return Buffer.concat(chunks)
+  let total = 0
+  for await (const chunk of part) {
+    const buf = Buffer.from(chunk)
+    total += buf.byteLength
+    if (total > maxBytes) throw new Error(`multipart 字段超过 ${Math.round(maxBytes / 1024)}KB 上限`)
+    chunks.push(buf)
+  }
+  return Buffer.concat(chunks, total)
+}
+
+/** Discards an unwanted multipart part without buffering it in memory. */
+export async function drainMultipartPart(part: AsyncIterable<Uint8Array>): Promise<void> {
+  for await (const _chunk of part) void _chunk
 }

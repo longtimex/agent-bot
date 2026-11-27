@@ -1,7 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
 import { randomBytes } from "node:crypto"
 import { withFileLock } from "./fileLock.js"
+import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import { asRecord } from "./util.js"
 import type { Logger } from "./logger.js"
 
@@ -53,20 +52,23 @@ export class NoticeStore {
   }
 
   push(input: NoticeInput): AppNotice {
-    // Merge what another instance wrote first: the bridge and the API each hold one
-    this.#load()
-    const text = input.text.trim().slice(0, MAX_TEXT)
-    const notice: AppNotice = {
-      id: randomBytes(6).toString("hex"),
-      kind: input.kind,
-      text,
-      at: input.at ?? Date.now(),
-    }
-    this.#notices.push(notice)
-    // Oldest first: a mailbox that grows forever is a disk leak on a long-lived bot
-    if (this.#notices.length > MAX_NOTICES) this.#notices = this.#notices.slice(-MAX_NOTICES)
-    this.#save()
-    return notice
+    // Wrap the full load-mutate-save transaction in the file lock so concurrent writers
+    // never lose each other's notices.
+    return withFileLock(this.#path, () => {
+      this.#load()
+      const text = input.text.trim().slice(0, MAX_TEXT)
+      const notice: AppNotice = {
+        id: randomBytes(6).toString("hex"),
+        kind: input.kind,
+        text,
+        at: input.at ?? Date.now(),
+      }
+      this.#notices.push(notice)
+      // Oldest first: a mailbox that grows forever is a disk leak on a long-lived bot
+      if (this.#notices.length > MAX_NOTICES) this.#notices = this.#notices.slice(-MAX_NOTICES)
+      this.#saveUnlocked()
+      return notice
+    })
   }
 
   /** Notices raised after [since]; without it the newest [limit] are returned. */
@@ -77,31 +79,27 @@ export class NoticeStore {
   }
 
   clear(): number {
-    const count = this.#notices.length
-    this.#notices = []
-    this.#save()
-    return count
+    return withFileLock(this.#path, () => {
+      this.#load()
+      const count = this.#notices.length
+      this.#notices = []
+      this.#saveUnlocked()
+      return count
+    })
   }
 
   #load(): void {
-    let raw: string
-    try {
-      raw = readFileSync(this.#path, "utf8")
-    } catch {
-      // Missing means empty; a deleted file must not leave stale entries in memory
+    // readJsonObject quarantines corrupt JSON aside to `*.corrupt-<ts>` before starting empty.
+    const parsed = readJsonObject(this.#path, (message) => this.#log.warn(message))
+    if (!parsed) {
       this.#notices = []
       return
     }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      // A damaged mailbox must not block the bot; the reminders themselves live elsewhere
-      this.#log.warn(`app notices unreadable: ${this.#path}`)
+    const list = parsed.notices
+    if (!Array.isArray(list)) {
+      this.#notices = []
       return
     }
-    const list = asRecord(parsed)?.notices
-    if (!Array.isArray(list)) return
     const notices: AppNotice[] = []
     for (const item of list) {
       const record = asRecord(item)
@@ -119,13 +117,8 @@ export class NoticeStore {
     this.#notices = notices.slice(-MAX_NOTICES)
   }
 
-  #save(): void {
-    mkdirSync(dirname(this.#path), { recursive: true })
+  #saveUnlocked(): void {
     const body = JSON.stringify({ version: 1, notices: this.#notices }, null, 2)
-    withFileLock(this.#path, () => {
-      const tmp = `${this.#path}.${process.pid}.tmp`
-      writeFileSync(tmp, `${body}\n`, { mode: 0o600 })
-      renameSync(tmp, this.#path)
-    })
+    writePrivateAtomic(this.#path, `${body}\n`)
   }
 }

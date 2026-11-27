@@ -486,6 +486,8 @@ private fun ProviderCreateDialog(
     var pickingFormat by remember { mutableStateOf(false) }
     // cc-switch decides which apps take base/key/model instead of raw JSON
     val fieldMode = meta?.fieldMode ?: true
+    LaunchedEffect(Unit) { vm?.resetModelTest() }
+    val testResult = vm?.modelTestResult
 
     AppDialog(
         onDismissRequest = onDismiss,
@@ -558,13 +560,26 @@ private fun ProviderCreateDialog(
                     placeholder = if (fieldMode) "可选：额外 settings JSON" else "settings JSON（必填）",
                     monospace = true,
                 )
+                testResult?.let { result ->
+                    Text(
+                        result.message,
+                        color = if (result.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
             TextButton(
-                onClick = { vm?.testJsonProvider(config) },
-                enabled = config.isNotBlank() && !vm?.modelTesting.let { it == true },
+                onClick = {
+                    if (config.isNotBlank()) {
+                        vm?.testJsonProvider(config)
+                    } else if (fieldMode && baseUrl.isNotBlank()) {
+                        vm?.testModelConnection(baseUrl.trim(), apiKey.trim(), model.trim())
+                    }
+                },
+                enabled = (config.isNotBlank() || (fieldMode && baseUrl.isNotBlank())) && vm?.modelTesting != true,
             ) { Text(if (vm?.modelTesting == true) "测试中…" else "测试连通") }
             TextButton(onClick = {
                 onCreate(

@@ -3,9 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test, { mock } from "node:test"
-import { createServer, type AddressInfo } from "node:http"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import { Bot, GrammyError, HttpError } from "grammy"
-import type { Update } from "grammy/types"
+import type { Update, UserFromGetMe } from "grammy/types"
 import { AgentCliRegistry, AgentCliService } from "../src/agentCli.js"
 import { AgentCliInstaller } from "../src/agentInstaller.js"
 import { CcSwitchService } from "../src/ccswitch.js"
@@ -32,6 +33,7 @@ interface Harness {
   buttons(): Array<{ text: string; data: string }>
   lastKeyboard(): Array<{ text: string; data: string }>
   lastText(): string
+  answers(): string[]
   waitFor(predicate: () => boolean, timeoutMs?: number): Promise<void>
   errors: string[]
   bridge: TelegramBridge
@@ -66,7 +68,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
   }
   const cfg: BotConfig = {
     telegram: { token: "123456:TEST", allowUsers: new Set(allowUsers), allowAll: false },
-    opencode: { url: "http://127.0.0.1:1", username: "opencode" },
+    opencode: { url: "http://127.0.0.1:1", username: "opencode", onDemand: false, idleStopMs: 0 },
     taskTimeoutMs: 600_000,
     taskMaxTimeoutMs: 600_000,
     maxReplyLength: 1500,
@@ -75,11 +77,14 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
     maxInputBytes: 20 * 1024 * 1024,
     reminderTimezone: "Asia/Shanghai",
     ccswitch: { app: "opencode" },
+    magpie: { gatewayUrl: "http://127.0.0.1:3425" },
     agentCli: { configPath: join(dir, "agents.json") },
+    api: { enabled: false, port: 3080, bind: "127.0.0.1" },
     dataDir: dir,
     outboxDir: join(dir, "outbox"),
     inboxDir: join(dir, "inbox"),
     logLevel: "error",
+    encryption: { enabled: false },
   }
 
   const bot =
@@ -93,10 +98,12 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
         can_join_groups: false,
         can_read_all_group_messages: false,
         supports_inline_queries: false,
-      },
+        can_connect_to_business: false,
+        has_main_web_app: false,
+      } as UserFromGetMe,
     })
   const calls: ApiCall[] = []
-  bot.api.config.use(async (_prev, method, payload) => {
+  bot.api.config.use((async (_prev, method, payload) => {
     calls.push({ method, payload: payload as Record<string, unknown> })
     return {
       ok: true,
@@ -106,12 +113,12 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
         chat: { id: Number((payload as { chat_id?: number }).chat_id ?? 0), type: "private" },
         text: (payload as { text?: string }).text ?? "",
       },
-    }
-  })
+    } as never
+  }))
 
   if (options.agents) writeFileSync(cfg.agentCli.configPath, JSON.stringify({ agents: options.agents }))
   const store = new SessionStore(join(dir, "sessions.json"), log)
-  const oc = options.oc ?? new Opencode(cfg.opencode.url, cfg.opencode.username)
+  const oc = options.oc ?? new Opencode(cfg.opencode.url, cfg.opencode.username, undefined)
   const registry = new AgentCliRegistry({ path: cfg.agentCli.configPath, log })
   const agents = new AgentCliService(dir, store, log, 600_000, 600_000, undefined, registry)
   const installer = options.installer?.(registry, dir, log)
@@ -191,7 +198,7 @@ async function createHarness(allowUsers = ["7"], options: HarnessOptions = {}): 
       }
       return items
     },
-    lastText(): string {
+    lastText(this: Harness): string {
       return this.texts().at(-1) ?? ""
     },
     lastKeyboard(): Array<{ text: string; data: string }> {

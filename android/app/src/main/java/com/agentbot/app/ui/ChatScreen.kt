@@ -290,7 +290,7 @@ fun ChatScreen(vm: AppViewModel, onOpenDrawer: () -> Unit) {
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    items(vm.messages, key = { it.taskId ?: "local-${it.at}" }) { message ->
+                    items(vm.messages, key = { it.localId }) { message ->
                         val taskId = message.taskId
                         ChatBubble(
                             message = message,
@@ -536,7 +536,7 @@ private fun SearchResults(matches: List<IndexedValue<ChatMessage>>, query: Strin
                 modifier = Modifier.padding(bottom = 2.dp),
             )
         }
-        items(matches, key = { it.value.taskId ?: "local-${it.value.at}" }) { indexed ->
+        items(matches, key = { "${it.value.localId}-${it.index}" }) { indexed ->
             val message = indexed.value
             Surface(
                 color = MaterialTheme.colorScheme.surface,

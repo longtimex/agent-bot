@@ -339,7 +339,11 @@ else
   run git clone --depth 1 --single-branch --no-tags --branch "$branch" "$repo" "$install_dir"
 fi
 
-cd "$install_dir" || fail "cannot enter ${install_dir}"
+if [ "$dry_run" -eq 1 ] && [ ! -d "$install_dir" ]; then
+  printf '  [dry-run] cd %s\n' "$install_dir"
+else
+  cd "$install_dir" || fail "cannot enter ${install_dir}"
+fi
 
 step "Installing dependencies..."
 if [ "$skip_deps" -eq 1 ]; then
@@ -407,13 +411,21 @@ esac
 # The sample .env enables the API on loopback; that is the default, not a configured client.
 env_value() {
   [ -f .env ] || return 1
-  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env | tail -n 1 | tr -d '\r'
+  local raw
+  raw="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1[[:space:]]*=[[:space:]]*//p" .env | tail -n 1 | tr -d '\r')"
+  # Trim leading/trailing whitespace and matching single/double quotes.
+  raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "$raw" in
+    \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+  esac
+  printf '%s' "$raw"
 }
 
 has_control_channel() {
   [ -n "$(env_value TELEGRAM_BOT_TOKEN)" ] && return 0
   if [ -n "$(env_value FEISHU_APP_ID)" ] && [ -n "$(env_value FEISHU_APP_SECRET)" ]; then return 0; fi
-  case "$(env_value API_ENABLED || true)" in 0|false|no|off) return 1 ;; esac
+  case "$(env_value API_ENABLED | tr '[:upper:]' '[:lower:]' || true)" in 0|false|no|off) return 1 ;; esac
   [ -n "$(env_value API_PUBLIC_URL)" ] && return 0
   case "$(env_value API_BIND || true)" in
     127.*|localhost|*.localhost|"::1"|"[::1]"|0.0.0.0|"::"|"[::]"|"") return 1 ;;

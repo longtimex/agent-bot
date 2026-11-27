@@ -137,7 +137,8 @@ test("queue panel buttons drop entries from memory and from the journal", async 
   assert.equal(await handleQueueButton("qdrop:q1", deps), "edit", "already gone: the panel is redrawn")
 
   assert.equal(await handleQueueButton("qclear", deps), "edit")
-  assert.equal(generation.get("tg:7"), 1)
+  assert.equal(second.dropped, true, "qclear marks pending jobs dropped directly")
+  assert.equal(generation.get("tg:7"), undefined, "qclear must not bump generation and abort a running task")
   assert.equal(pending.has("tg:7"), false)
   assert.deepEqual(stored(path), [])
   assert.equal(await handleQueueButton("qclear", deps), "done")

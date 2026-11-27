@@ -238,6 +238,8 @@ function runProbe(
     let stderr = ""
     let settled = false
     let timedOut = false
+    let exited = false
+    let exitCode: number | null = null
     let drainTimer: NodeJS.Timeout | undefined
     let child: ChildProcess
     try {
@@ -246,13 +248,21 @@ function runProbe(
       resolve({ code: null, stdout: "", stderr: err instanceof Error ? err.message : String(err) })
       return
     }
+    const out = new StringDecoder("utf8")
+    const err = new StringDecoder("utf8")
     const finish = (code: number | null): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       if (drainTimer) clearTimeout(drainTimer)
-      child.stdout?.destroy()
-      child.stderr?.destroy()
+      stdout = clipTail(stdout + out.end(), MAX_PROBE_OUTPUT)
+      stderr = clipTail(stderr + err.end(), MAX_PROBE_OUTPUT)
+      // Detach listeners and drain rather than destroying stdio so terminateProcess's
+      // SIGKILL escalation is not cancelled before orphaned grandchildren exit.
+      child.stdout?.removeAllListeners("data")
+      child.stderr?.removeAllListeners("data")
+      child.stdout?.resume()
+      child.stderr?.resume()
       resolve({ code, stdout, stderr, timedOut })
     }
     const timer = setTimeout(() => {
@@ -260,31 +270,38 @@ function runProbe(
       terminateProcess(child)
       finish(null)
     }, timeoutMs)
-    const out = new StringDecoder("utf8")
-    const err = new StringDecoder("utf8")
     const armDrain = (): void => {
+      if (!exited || settled) return
       if (drainTimer) clearTimeout(drainTimer)
-      drainTimer = setTimeout(() => finish(child.exitCode), 1_000)
+      drainTimer = setTimeout(() => {
+        terminateProcess(child)
+        finish(exitCode)
+      }, 1_000)
       drainTimer.unref()
     }
     child.stdout?.on("data", (chunk: Buffer) => {
+      if (settled) return
       stdout = clipTail(stdout + out.write(chunk), MAX_PROBE_OUTPUT)
-      armDrain()
+      if (exited) armDrain()
     })
     child.stderr?.on("data", (chunk: Buffer) => {
+      if (settled) return
       stderr = clipTail(stderr + err.write(chunk), MAX_PROBE_OUTPUT)
-      armDrain()
+      if (exited) armDrain()
     })
     child.once("error", (error) => {
-      if (settled) return
-      clearTimeout(timer)
-      settled = true
-      resolve({ code: null, stdout, stderr: `${stderr}\n${error.message}`.trim() })
+      stderr = `${stderr}\n${error.message}`.trim()
+      finish(null)
     })
     child.once("exit", (code) => {
+      exited = true
+      exitCode = code
+      // Give buffered pipe output a brief window to flush before closing; a helper
+      // holding stdio open past 1s gets terminated.
       armDrain()
-      // A helper may keep the pipes open; the executable itself has exited.
-      finish(code)
+    })
+    child.once("close", (code) => {
+      finish(code ?? exitCode)
     })
   })
 }
@@ -309,6 +326,7 @@ export class AgentModelCatalog {
   readonly #now: () => number
   readonly #cache = new Map<string, CacheEntry>()
   readonly #pending = new Map<string, PendingProbe>()
+  readonly #epochs = new Map<string, number>()
 
   constructor(registry: AgentCliRegistry, options: AgentModelCatalogOptions = {}) {
     this.#registry = registry
@@ -333,14 +351,23 @@ export class AgentModelCatalog {
     const pending = this.#pending.get(profile.id)
     if (!force && pending) return pending.promise
 
-    const promise = this.#discover(profile)
+    const epoch = (this.#epochs.get(profile.id) ?? 0) + (force ? 1 : 0)
+    if (force) this.#epochs.set(profile.id, epoch)
+    const entry: PendingProbe = {
+      promise: Promise.resolve({ models: [], source: "none" }),
+    }
+    entry.promise = this.#discover(profile)
       .then((result) => {
-        this.#cache.set(profile.id, { at: this.#now(), result })
+        if ((this.#epochs.get(profile.id) ?? 0) === epoch) {
+          this.#cache.set(profile.id, { at: this.#now(), result })
+        }
         return result
       })
-      .finally(() => this.#pending.delete(profile.id))
-    this.#pending.set(profile.id, { promise })
-    return promise
+      .finally(() => {
+        if (this.#pending.get(profile.id) === entry) this.#pending.delete(profile.id)
+      })
+    this.#pending.set(profile.id, entry)
+    return entry.promise
   }
 
   /** Synchronous label lookup, used only for a selection already stored in a session. */
@@ -402,8 +429,17 @@ export class AgentModelCatalog {
 
   /** Drops cached catalogs (e.g. after an agent install/update). */
   clear(engine?: string): void {
-    if (engine) this.#cache.delete(engine)
-    else this.#cache.clear()
+    if (engine) {
+      this.#cache.delete(engine)
+      this.#pending.delete(engine)
+      this.#epochs.set(engine, (this.#epochs.get(engine) ?? 0) + 1)
+    } else {
+      for (const key of new Set([...this.#cache.keys(), ...this.#pending.keys(), ...this.#epochs.keys()])) {
+        this.#epochs.set(key, (this.#epochs.get(key) ?? 0) + 1)
+      }
+      this.#cache.clear()
+      this.#pending.clear()
+    }
   }
 
   /**

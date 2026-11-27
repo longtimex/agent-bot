@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import {
   chmodSync,
   closeSync,
@@ -11,6 +12,7 @@ import {
   writeSync,
 } from "node:fs"
 import { dirname } from "node:path"
+import process from "node:process"
 
 /**
  * Reads a JSON object store. Returns undefined when the file is absent.
@@ -51,7 +53,11 @@ export function readJsonObject(path: string, warn: (message: string) => void): R
  *
  * Throws so callers keep their own wording for what failed to persist.
  */
-export function writePrivateAtomic(path: string, content: string, tempPath = `${path}.tmp`): void {
+export function writePrivateAtomic(
+  path: string,
+  content: string,
+  tempPath = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`,
+): void {
   mkdirSync(dirname(path), { recursive: true })
   try {
     const fd = openSync(tempPath, "w", 0o600)

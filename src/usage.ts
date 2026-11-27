@@ -1,5 +1,6 @@
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
+import { roundUsd, type TokenUsage } from "./tokenUsage.js"
 
 export type UsageOutcome = "ok" | "failed" | "cancelled"
 
@@ -9,6 +10,10 @@ export interface UsageDay {
   failed: number
   cancelled: number
   totalMs: number
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  costUsd?: number
 }
 
 export interface UsageRecord {
@@ -16,6 +21,7 @@ export interface UsageRecord {
   model?: string
   ms: number
   outcome: UsageOutcome
+  tokens?: TokenUsage
 }
 
 export interface UsageSummary extends UsageDay {
@@ -48,7 +54,7 @@ const PRUNE_INTERVAL_MS = 60 * 60_000
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
 
 function emptyDay(): UsageDay {
-  return { tasks: 0, ok: 0, failed: 0, cancelled: 0, totalMs: 0 }
+  return { tasks: 0, ok: 0, failed: 0, cancelled: 0, totalMs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }
 }
 
 function emptyChat(): ChatUsage {
@@ -88,6 +94,10 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0
 }
 
+function usd(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? roundUsd(value) : 0
+}
+
 function sanitizeDay(value: unknown): UsageDay {
   const record = (value && typeof value === "object" ? value : {}) as Record<string, unknown>
   return {
@@ -96,6 +106,10 @@ function sanitizeDay(value: unknown): UsageDay {
     failed: count(record.failed),
     cancelled: count(record.cancelled),
     totalMs: count(record.totalMs),
+    inputTokens: count(record.inputTokens),
+    outputTokens: count(record.outputTokens),
+    cacheReadTokens: count(record.cacheReadTokens),
+    costUsd: usd(record.costUsd),
   }
 }
 
@@ -105,12 +119,18 @@ export class UsageStore {
   #timeZone: string
   #chats: Record<string, ChatUsage> = Object.create(null) as Record<string, ChatUsage>
   #prunedAt = 0
+  #onRecord?: (now: number) => void
 
   constructor(path: string, log: Logger, timeZone: string) {
     this.#path = path
     this.#log = log
     this.#timeZone = timeZone
     this.#load()
+  }
+
+  /** Subscribes a hook (e.g. budget alerting) invoked after each persisted usage entry. */
+  setOnRecord(cb: ((now: number) => void) | undefined): void {
+    this.#onRecord = cb
   }
 
   /** /timezone applies without a restart; per-day totals stay on the day they were recorded. */
@@ -122,10 +142,18 @@ export class UsageStore {
     const chat = this.#chats[key] ?? emptyChat()
     const outcome = input.outcome
     const ms = Math.max(0, Math.round(input.ms))
+    const inTok = count(input.tokens?.inputTokens)
+    const outTok = count(input.tokens?.outputTokens)
+    const cacheTok = count(input.tokens?.cacheReadTokens)
+    const cost = usd(input.tokens?.costUsd)
 
     chat.tasks += 1
     chat[outcome] += 1
     chat.totalMs += ms
+    chat.inputTokens = (chat.inputTokens ?? 0) + inTok
+    chat.outputTokens = (chat.outputTokens ?? 0) + outTok
+    chat.cacheReadTokens = (chat.cacheReadTokens ?? 0) + cacheTok
+    chat.costUsd = roundUsd((chat.costUsd ?? 0) + cost)
     // Own-property read: engine ids come from user-managed profiles, and an
     // inherited name such as "toString" would otherwise count as NaN
     const engineTotal = Object.hasOwn(chat.engines, input.engine) ? chat.engines[input.engine]! : 0
@@ -141,6 +169,10 @@ export class UsageStore {
     entry.tasks += 1
     entry[outcome] += 1
     entry.totalMs += ms
+    entry.inputTokens = (entry.inputTokens ?? 0) + inTok
+    entry.outputTokens = (entry.outputTokens ?? 0) + outTok
+    entry.cacheReadTokens = (entry.cacheReadTokens ?? 0) + cacheTok
+    entry.costUsd = roundUsd((entry.costUsd ?? 0) + cost)
     chat.days[day] = entry
 
     const days = Object.keys(chat.days).sort()
@@ -149,6 +181,7 @@ export class UsageStore {
     this.#chats[key] = chat
     this.#prune(now)
     this.#save()
+    this.#onRecord?.(now)
   }
 
   /**
@@ -179,6 +212,10 @@ export class UsageStore {
       failed: chat.failed,
       cancelled: chat.cancelled,
       totalMs: chat.totalMs,
+      inputTokens: chat.inputTokens ?? 0,
+      outputTokens: chat.outputTokens ?? 0,
+      cacheReadTokens: chat.cacheReadTokens ?? 0,
+      costUsd: chat.costUsd ?? 0,
       engines: { ...chat.engines },
       lastAt: chat.lastAt,
       lastEngine: chat.lastEngine,
@@ -232,6 +269,10 @@ export class UsageStore {
         total.failed += entry.failed
         total.cancelled += entry.cancelled
         total.totalMs += entry.totalMs
+        total.inputTokens = (total.inputTokens ?? 0) + (entry.inputTokens ?? 0)
+        total.outputTokens = (total.outputTokens ?? 0) + (entry.outputTokens ?? 0)
+        total.cacheReadTokens = (total.cacheReadTokens ?? 0) + (entry.cacheReadTokens ?? 0)
+        total.costUsd = roundUsd((total.costUsd ?? 0) + (entry.costUsd ?? 0))
       }
     }
     return ordered.map((key) => ({ day: key, ...totals.get(key)! }))
@@ -255,6 +296,10 @@ export class UsageStore {
         chat.failed = totals.failed
         chat.cancelled = totals.cancelled
         chat.totalMs = totals.totalMs
+        chat.inputTokens = totals.inputTokens
+        chat.outputTokens = totals.outputTokens
+        chat.cacheReadTokens = totals.cacheReadTokens
+        chat.costUsd = totals.costUsd
 
         if (record.engines && typeof record.engines === "object") {
           for (const [engine, raw] of Object.entries(record.engines as Record<string, unknown>)) {

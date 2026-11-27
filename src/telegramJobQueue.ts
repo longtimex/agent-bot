@@ -58,16 +58,27 @@ export class TelegramJobJournal {
   }
 
   /** Runs once the bot can send: one notice per chat first, then the recent messages resume in order. */
-  async recover(host: QueueRecoveryHost, now = Date.now()): Promise<void> {
-    const plan = this.#journal.takeRecovery(now)
-    const chats = new Map<number, { resume: StoredJob[]; interrupted: StoredJob[]; expired: StoredJob[] }>()
+  async recover(
+    host: QueueRecoveryHost,
+    now = Date.now(),
+    match?: (job: StoredJob) => boolean,
+  ): Promise<void> {
+    const plan = this.#journal.peekRecovery(now, RESUME_MAX_AGE_MS, match)
+    const chats = new Map<
+      number,
+      { resume: StoredJob[]; interrupted: StoredJob[]; expired: StoredJob[]; ids: string[] }
+    >()
     const bucket = (job: StoredJob) => {
       let found = chats.get(job.chatId)
-      if (!found) chats.set(job.chatId, (found = { resume: [], interrupted: [], expired: [] }))
+      if (!found) chats.set(job.chatId, (found = { resume: [], interrupted: [], expired: [], ids: [] }))
       return found
     }
     const each = (entries: JournalEntry<StoredJob>[], pick: "resume" | "interrupted" | "expired") => {
-      for (const entry of entries) bucket(entry.payload)[pick].push(entry.payload)
+      for (const entry of entries) {
+        const group = bucket(entry.payload)
+        group[pick].push(entry.payload)
+        group.ids.push(entry.id)
+      }
     }
     each(plan.resume, "resume")
     each(plan.interrupted, "interrupted")
@@ -88,7 +99,10 @@ export class TelegramJobJournal {
       } catch (err) {
         this.#log.warn("failed to send the queue recovery notice:", (err as Error).message)
       }
+      // Enqueue (which tracks fresh entries on disk) BEFORE removing the previous-process
+      // records, so a crash mid-recovery never loses resumed jobs.
       for (const job of found.resume) host.enqueue(job)
+      this.#journal.completeRecovery(found.ids)
     }
   }
 }
@@ -121,7 +135,7 @@ export interface QueueButtonDeps {
   key: string
   answer: (text?: string) => Promise<void>
   pending: Map<string, Job[]>
-  generation: Map<string, number>
+  generation?: Map<string, number>
   journal: TelegramJobJournal
 }
 
@@ -149,12 +163,15 @@ export async function handleQueueButton(data: string, deps: QueueButtonDeps): Pr
     return "edit"
   }
   if (data === "qclear") {
-    const count = pending.get(key)?.length ?? 0
+    const items = pending.get(key) ?? []
+    const count = items.length
     if (count === 0) {
       await answer("队列已经是空的")
       return "done"
     }
-    deps.generation.set(key, (deps.generation.get(key) ?? 0) + 1)
+    // Mark every queued job dropped instead of bumping generation so a running task
+    // currently choosing its engine is not cancelled as stale.
+    for (const job of items) job.dropped = true
     pending.delete(key)
     deps.journal.dropQueued(key)
     await answer(`已清空 ${count} 条排队消息`)

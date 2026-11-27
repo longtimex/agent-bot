@@ -10,7 +10,7 @@ import {
   writeSync,
 } from "node:fs"
 import { dirname } from "node:path"
-import { parse, parseTree, type Node as JsonNode, type ParseError } from "jsonc-parser"
+import { createScanner, parse, parseTree, SyntaxKind, type Node as JsonNode, type ParseError } from "jsonc-parser"
 
 /**
  * Edits a hand-maintained JSON config without re-serialising it.
@@ -94,6 +94,27 @@ function assertParses(text: string): string {
   return text
 }
 
+/** Finds the first real JSON comma token in `[offset, limit)`, ignoring comments. */
+function findCommaAfter(text: string, offset: number, limit: number): number {
+  const scanner = createScanner(text, false)
+  scanner.setPosition(offset)
+  while (scanner.getPosition() < limit) {
+    const token = scanner.scan()
+    if (token === SyntaxKind.EOF) break
+    if (scanner.getTokenOffset() >= limit) break
+    if (token === SyntaxKind.CommaToken) return scanner.getTokenOffset()
+    if (
+      token !== SyntaxKind.Trivia &&
+      token !== SyntaxKind.LineBreakTrivia &&
+      token !== SyntaxKind.LineCommentTrivia &&
+      token !== SyntaxKind.BlockCommentTrivia
+    ) {
+      break
+    }
+  }
+  return -1
+}
+
 function insertProperty(text: string, object: JsonNode, key: string, value: unknown, unit: string): string {
   const close = object.offset + object.length - 1
   const props = propertiesOf(object)
@@ -104,8 +125,11 @@ function insertProperty(text: string, object: JsonNode, key: string, value: unkn
   // hand-written line. An empty `{}` has nothing to preserve, so it is expanded to the
   // file's own indentation instead of receiving a compact one-liner.
   if (props.length > 0 && !text.slice(object.offset, close).includes("\n")) {
-    const separator = props.length === 0 ? "" : ", "
-    return `${text.slice(0, close)}${separator}${keyJson}: ${JSON.stringify(value)}${text.slice(close)}`
+    // Insert right after the last property value (before any existing trailing comma or
+    // spaces before `}`) so `{ "a": 1, }` becomes `{ "a": 1, "b": 2, }` instead of `, ,`.
+    const last = props[props.length - 1]!
+    const lastEnd = last.offset + last.length
+    return `${text.slice(0, lastEnd)}, ${keyJson}: ${JSON.stringify(value)}${text.slice(lastEnd)}`
   }
 
   const objectIndent = indentAt(text, object.offset)
@@ -182,12 +206,28 @@ export function removeJsonPath(text: string, path: JsonPath): string {
   if (props.length === 1) {
     return assertParses(text.slice(0, node.offset) + "{}" + text.slice(node.offset + node.length))
   }
-  const start = index > 0 ? props[index - 1]!.offset + props[index - 1]!.length : node.offset + 1
   const end = prop.offset + prop.length
   const next = props[index + 1]
-  const comma = next ? text.indexOf(",", end) : -1
-  const cutEnd = next && comma >= 0 && comma < next.offset ? comma + 1 : end
-  return assertParses(text.slice(0, start) + text.slice(cutEnd))
+  if (index === 0 && next) {
+    const nextComma = findCommaAfter(text, end, next.offset)
+    const cutEnd = nextComma >= 0 ? nextComma + 1 : end
+    return assertParses(text.slice(0, node.offset + 1) + text.slice(cutEnd))
+  }
+  const prev = props[index - 1]!
+  const prevEnd = prev.offset + prev.length
+  if (next) {
+    // Middle property: preserve the comma after `prev` and delete `prop` along with its own comma.
+    const prevComma = findCommaAfter(text, prevEnd, prop.offset)
+    const nextComma = findCommaAfter(text, end, next.offset)
+    if (prevComma >= 0 && nextComma >= 0) {
+      return assertParses(text.slice(0, prevComma + 1) + text.slice(nextComma + 1))
+    }
+    return assertParses(text.slice(0, prevEnd) + text.slice(end))
+  }
+  // Last property: remove the separator comma after `prev`, `prop`, and any trailing comma after `prop`.
+  const trailingComma = findCommaAfter(text, end, node.offset + node.length - 1)
+  const cutEnd = trailingComma >= 0 ? trailingComma + 1 : end
+  return assertParses(text.slice(0, prevEnd) + text.slice(cutEnd))
 }
 
 /** Temp file plus rename, keeping the mode the target already had. */

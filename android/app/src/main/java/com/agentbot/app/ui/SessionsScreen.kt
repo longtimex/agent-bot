@@ -75,7 +75,8 @@ fun SessionsScreen(vm: AppViewModel) {
         if (error != null) {
             PageErrorNotice(
                 message = error,
-                onDismiss = vm::refreshArchivedSessions,
+                onDismiss = vm::clearArchivedError,
+                onRetry = vm::refreshArchivedSessions,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
         }

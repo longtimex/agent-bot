@@ -604,7 +604,9 @@ test("subscribeSession backs off when a 200 stream closes without sending bytes"
   }
 
   try {
-    const oc = new Opencode("http://127.0.0.1:9", "user", "pass", { fetch: stubFetch })
+    const oc = new Opencode("http://127.0.0.1:9", "user", "pass", {
+      fetch: stubFetch as unknown as NonNullable<ConstructorParameters<typeof Opencode>[3]>["fetch"],
+    })
     // Make sure a regressed client cannot reach the test peer on port 9
     assert.notEqual(stubFetch, fetch)
     stop = oc.subscribeSession("ses_test", () => {})

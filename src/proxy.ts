@@ -148,9 +148,15 @@ function socksDispatcher(url: URL): Agent {
           // undici connectors must invoke the callback exactly once: a late TLS
           // error after secureConnect would otherwise fire it a second time
           let done = false
+          const tlsTimer = setTimeout(() => {
+            secure.destroy()
+            finish(new Error("代理 TLS 握手超时"), null)
+          }, TEST_TIMEOUT_MS)
+          tlsTimer.unref()
           const finish = (err: Error | null, value: tls.TLSSocket | null): void => {
             if (done) return
             done = true
+            clearTimeout(tlsTimer)
             if (err) callback(err, null)
             else if (value) callback(null, value)
           }

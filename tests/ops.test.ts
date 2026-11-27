@@ -775,9 +775,9 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
   writeFileSync(join(dataDir, "accounts.key"), `${"ab".repeat(32)}\n`)
   const { ops, calls } = makeService(
     dir,
-    (_command, args) => {
+    (_command, args, options) => {
       // 模拟 tar 真正落盘,让 existsSync/体积断言有据可依
-      if (args[0] === "-czf" && args[1]) writeFileSync(args[1], "tarball-bytes")
+      if (args[0] === "-czf" && args[1]) writeFileSync(join(options.cwd, args[1]), "tarball-bytes")
       return { code: 0, stdout: "", stderr: "" }
     },
     { dataDir },
@@ -790,14 +790,17 @@ test("ops backupData packs the JSON stores and never the pairing token", async (
     const result = await ops.backupData()
     assert.equal(result.ok, true)
     assert.ok(result.file, "the backup reports the archive path")
-    assert.match(result.file!, /backups\/backup-\d{8}-\d{9}\.tar\.gz$/)
+    assert.match(result.file!, /backups[\\/]backup-\d{8}-\d{9}\.tar\.gz$/)
     assert.ok(existsSync(result.file!))
     assertFileMode(join(dataDir, "backups"), 0o700, "an existing backup directory must be private")
     assertFileMode(result.file!, 0o600, "the archive must be private")
     // tar 收到的就是 data/ 下的状态文件,且不含配对令牌
     const tarCall = calls.find((call) => call.command === "tar")
     assert.ok(tarCall, "backup runs tar")
-    assert.deepEqual(tarCall!.args.slice(0, 4), ["-czf", result.file, "-C", dataDir])
+    assert.equal(tarCall!.cwd, dataDir)
+    assert.equal(tarCall!.args[0], "-czf")
+    assert.match(tarCall!.args[1] ?? "", /^backups\/backup-\d{8}-\d{9}\.tar\.gz$/)
+    assert.equal(tarCall!.args[2], "--")
     assert.ok(tarCall!.args.includes("usage.json"))
     assert.ok(tarCall!.args.includes("reminders.json"))
     assert.ok(!tarCall!.args.includes("api-token.json"), "the pairing token stays out of backups")
@@ -884,8 +887,8 @@ test("an update backs up first, under its own name, without pushing out manual b
   writeFileSync(join(dataDir, "usage.json"), "{}")
   const { ops } = makeService(
     dir,
-    (_command, args) => {
-      if (args[0] === "-czf" && args[1]) writeFileSync(args[1], "tarball-bytes")
+    (_command, args, options) => {
+      if (args[0] === "-czf" && args[1]) writeFileSync(join(options.cwd, args[1]), "tarball-bytes")
       return { code: 0, stdout: "", stderr: "" }
     },
     { dataDir },

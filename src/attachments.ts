@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import {
   chmodSync,
   closeSync,
@@ -86,13 +87,23 @@ export function sanitizeFilename(name: string, fallback: string): string {
 }
 
 export function saveAttachment(dir: string, chatId: number, name: string, data: Buffer): { path: string; name: string } {
-  const path = reserveAttachmentPath(dir, chatId, name)
-  writeFileSync(path, data, { mode: 0o600 })
-  return { path, name: path.split(/[\\/]/).pop()! }
+  ensureInboxDir(dir)
+  const stamp = Date.now()
+  const safe = sanitizeFilename(name, "file.bin")
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const path = candidateAttachmentPath(dir, chatId, stamp, safe, attempt)
+    try {
+      writeFileSync(path, data, { mode: 0o600, flag: "wx" })
+      return { path, name: path.split(/[\\/]/).pop()! }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue
+      throw err
+    }
+  }
+  throw new Error("无法分配唯一的附件路径")
 }
 
-/** A unique, private inbox path; the caller writes the bytes. */
-function reserveAttachmentPath(dir: string, chatId: number, name: string): string {
+function ensureInboxDir(dir: string): void {
   // Uploads routinely carry config files with API keys: keep them private to the
   // service account instead of relying on the host umask.
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -100,16 +111,16 @@ function reserveAttachmentPath(dir: string, chatId: number, name: string): strin
   // inbox (or one from an older release) can still be 0775, and the upload must not
   // inherit that exposure just because the directory already existed.
   chmodSync(dir, 0o700)
-  const base = `${chatId}-${Date.now()}-${sanitizeFilename(name, "file.bin")}`
-  // Two uploads of the same file in the same millisecond (an album, a retried update)
-  // would otherwise share one name and silently overwrite each other
-  let finalName = base
-  const dot = base.lastIndexOf(".")
-  for (let n = 1; existsSync(join(dir, finalName)); n += 1) {
-    finalName = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`
-  }
-  const path = join(dir, finalName)
-  return path
+}
+
+/** Deterministic base name on first try, numbered on same-ms collision, random suffix beyond 32. */
+function candidateAttachmentPath(dir: string, chatId: number, stamp: number, safe: string, attempt: number): string {
+  if (attempt === 0) return join(dir, `${chatId}-${stamp}-${safe}`)
+  const dot = safe.lastIndexOf(".")
+  const stem = dot > 0 ? safe.slice(0, dot) : safe
+  const ext = dot > 0 ? safe.slice(dot) : ""
+  const suffix = attempt <= 32 ? String(attempt) : randomBytes(4).toString("hex")
+  return join(dir, `${chatId}-${stamp}-${stem}-${suffix}${ext}`)
 }
 
 /**
@@ -123,7 +134,25 @@ export async function saveAttachmentStream(
   name: string,
   source: AsyncIterable<Uint8Array>,
 ): Promise<{ path: string; name: string; bytes: number }> {
-  const path = reserveAttachmentPath(dir, chatId, name)
+  ensureInboxDir(dir)
+  // Atomically claim the destination file before opening the write stream so two
+  // concurrent uploads in the same millisecond can never overwrite or unlink each other.
+  const stamp = Date.now()
+  const safe = sanitizeFilename(name, "file.bin")
+  let path = ""
+  let fd: number | undefined
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const candidate = candidateAttachmentPath(dir, chatId, stamp, safe, attempt)
+    try {
+      fd = openSync(candidate, "wx", 0o600)
+      path = candidate
+      break
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") continue
+      throw err
+    }
+  }
+  if (fd === undefined || !path) throw new Error("无法分配唯一的附件路径")
   let bytes = 0
   const meter = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
@@ -132,7 +161,7 @@ export async function saveAttachmentStream(
     },
   })
   try {
-    await pipeline(source, meter, createWriteStream(path, { mode: 0o600 }))
+    await pipeline(source, meter, createWriteStream(path, { fd, autoClose: true }))
     if (bytes === 0) {
       unlinkSync(path)
       throw new Error("附件为空")

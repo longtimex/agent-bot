@@ -366,6 +366,7 @@ export const CC_EXEC_COMMANDS: Readonly<Record<string, CcExecSpec>> = {
   "skills-update-all": {
     label: "更新全部有新版技能",
     args: () => ["skills", "update", "--all"],
+    phrases: ["skills update --all", "skills update"],
     long: true,
   },
   "mcp-delete": {

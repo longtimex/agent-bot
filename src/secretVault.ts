@@ -4,6 +4,7 @@ import { join, resolve } from "node:path"
 import { decryptPayload, encryptPayload } from "./apiCrypto.js"
 import { writePrivateAtomic } from "./jsonStore.js"
 import type { Logger } from "./logger.js"
+import { escapeMarkdown } from "./messages.js"
 import { loadOrCreateSecretKey } from "./secretKey.js"
 
 /**
@@ -152,7 +153,11 @@ export class SecretVault {
   /** Replaces every stored value in outgoing text; a no-op while nothing is stored. */
   mask(text: string): string {
     let out = text
-    for (const value of this.#plain) if (out.includes(value)) out = out.split(value).join("***")
+    for (const value of this.#plain) {
+      if (out.includes(value)) out = out.split(value).join("***")
+      const escaped = escapeMarkdown(value)
+      if (escaped !== value && out.includes(escaped)) out = out.split(escaped).join("***")
+    }
     return out
   }
 

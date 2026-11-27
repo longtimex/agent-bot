@@ -84,7 +84,13 @@ function offsetMs(timestamp: number, timeZone: string): number {
 function zonedToUtc(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): number {
   const guess = Date.UTC(year, month - 1, day, hour, minute)
   const offset = offsetMs(guess, timeZone)
-  return guess - offsetMs(guess - offset, timeZone)
+  const first = guess - offset
+  const candidate = guess - offsetMs(first, timeZone)
+  const parts = zonedParts(candidate, timeZone)
+  const resolved = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute)
+  // On a spring-forward DST gap in negative-UTC zones, `candidate` resolves an hour
+  // earlier than requested; `first` lands cleanly on the post-transition wall time.
+  return resolved < guess ? first : candidate
 }
 
 function absoluteDue(

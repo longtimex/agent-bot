@@ -18,6 +18,8 @@ import {
   ccAppFlagToken,
   ccBlockedReason,
   ccConfirmPlan,
+  ccIsDeeplinkArgs,
+  extractCliSecrets,
   isLongCcCommand,
   type CcActionPlan,
 } from "./ccGuards.js"
@@ -122,6 +124,32 @@ export function parseProviderAdd(tokens: string[]): CcSwitchProviderDraft | stri
     }
   }
   return draft
+}
+
+function redactDeeplinkPreview(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl)
+    for (const key of new Set(parsed.searchParams.keys())) {
+      if (/(?:key|token|secret|pass|auth|cred|config|content)/i.test(key)) {
+        parsed.searchParams.set(key, "***")
+      }
+    }
+    const safe = redactSecrets(parsed.toString())
+    const shown = clip(safe, 120) ?? ""
+    return `${shown}${safe.length > shown.length ? "…" : ""}`
+  } catch {
+    const safe = redactSecrets(rawUrl)
+    const shown = clip(safe, 120) ?? ""
+    return `${shown}${safe.length > shown.length ? "…" : ""}`
+  }
+}
+
+function maskValues(text: string, secrets: string[]): string {
+  let out = text
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join("***")
+  }
+  return out
 }
 
 const CC_CONFIRM_TTL_MS = 5 * 60_000
@@ -480,7 +508,7 @@ export class CcCommands {
         await answer("请确认切换")
         await this.#requestCcConfirm(chatId, {
           args: ["use", id],
-          label: `切换 Provider 到 \`${id}\`（修改 cc-switch 全局配置）`,
+          label: `切换 Provider 到 ${id}（修改 cc-switch 全局配置）`,
           kind: "provider-use",
           providerId: id,
         })
@@ -637,7 +665,7 @@ export class CcCommands {
         }
         await this.#requestCcConfirm(chatId, {
           args: ["use", id],
-          label: `切换 Provider 到 \`${id}\`（修改 cc-switch 全局配置）`,
+          label: `切换 Provider 到 ${id}（修改 cc-switch 全局配置）`,
           kind: "provider-use",
           providerId: id,
         })
@@ -715,6 +743,9 @@ export class CcCommands {
     }
 
     if (normalized === "update") {
+      const updateTokens = [sub, ...tail].filter(Boolean)
+      const appFlag = ccAppFlagToken(updateTokens)
+      if (appFlag) throw new Error(`不要在 /cc 命令中传 ${appFlag}；应用类型由 CC_SWITCH_APP 固定。`)
       if (sub === "--check" || sub === "check" || tail.includes("--check")) {
         const args = ["update", "--check", ...tail.filter((token) => token !== "--check")]
         await this.#executeCc(chatId, args, { label: "检查 cc-switch 更新", timeoutMs: CC_LONG_TIMEOUT_MS })
@@ -793,7 +824,12 @@ export class CcCommands {
     }
     const appFlag = ccAppFlagToken(args)
     if (appFlag) throw new Error(`不要在 /cc run 中传 ${appFlag}；应用类型由 CC_SWITCH_APP 固定。`)
-    if (args[0] === "deeplink") {
+    if (ccIsDeeplinkArgs(args)) {
+      const blocked = ccBlockedReason(args)
+      if (blocked) {
+        await this.#host.sendTextMessage(chatId, blocked)
+        return
+      }
       await this.#requestCcDeeplinkImport(chatId, args[1] ?? "")
       return
     }
@@ -827,15 +863,13 @@ export class CcCommands {
     if (!url) throw new Error("用法：`/cc deeplink <ccswitch://v1/import?...>`")
     if (!/^ccswitch:\/\/v1\/import\?/i.test(url)) throw new Error("只接受 ccswitch://v1/import?... 形式的链接。")
     if (url.length > 8192) throw new Error("Deep Link 过长。")
-    // clip: a hard cut between surrogate halves makes Telegram reject the whole
-    // confirmation message, so the import could never be approved
-    const shownUrl = clip(url, 120) ?? ""
+    // Redact query secrets before echoing into the confirmation card so keys never linger
+    // in chat history even after the user deletes their own message.
+    const shownUrl = redactDeeplinkPreview(url)
     await this.#requestCcConfirm(chatId, {
       args: ["deeplink", url],
       bare: true,
-      label:
-        `导入 Deep Link（会新增或覆盖 Provider、MCP、提示词等配置）\n` +
-        `\`${shownUrl}${url.length > shownUrl.length ? "…" : ""}\``,
+      label: `导入 Deep Link（会新增或覆盖 Provider、MCP、提示词等配置）\n${shownUrl}`,
     })
   }
 
@@ -862,27 +896,40 @@ export class CcCommands {
   async #executeCc(
     chatId: number,
     args: string[],
-    options: { bare?: boolean; pty?: boolean; timeoutMs?: number; label?: string } = {},
+    options: { bare?: boolean; pty?: boolean; timeoutMs?: number; label?: string; write?: boolean } = {},
   ): Promise<void> {
     const timeoutMs = options.timeoutMs ?? (isLongCcCommand(args) ? CC_LONG_TIMEOUT_MS : undefined)
+    const secrets = extractCliSecrets(args)
     // The echoed preview can quote a token typed into the command (an API URL, a
-    // password flag value), so it gets the same redaction as command output; long
-    // tokens are clipped so escaping cannot push the line past the message limit
+    // password flag value), so it gets exact + pattern redaction before display.
     const preview = args
       .slice(0, 3)
-      .map((token) => escapeMarkdown(clip(redactSecrets(token), 80) ?? ""))
+      .map((token) => (clip(redactSecrets(maskValues(token, secrets)), 80) ?? "").replace(/`/g, "'"))
       .join(" ")
     await this.#host.sendTextMessage(chatId, `⏳ 正在执行 \`${preview || "cc-switch"}\`…`)
 
-    const result = options.bare
-      ? await this.#cc.runBare(args, timeoutMs)
-      : options.pty
-        ? await this.#cc.runWithConfirm(args, timeoutMs)
-        : await this.#cc.run(args, timeoutMs)
+    const runCall = async () =>
+      options.bare
+        ? await this.#cc.runBare(args, timeoutMs)
+        : options.pty
+          ? await this.#cc.runWithConfirm(args, timeoutMs)
+          : await this.#cc.run(args, timeoutMs)
+    const needsLock =
+      (options.write || options.bare || options.pty || Boolean(ccConfirmPlan(args))) &&
+      typeof this.#cc.runWriteLocked === "function"
+    let result
+    try {
+      result = needsLock ? await this.#cc.runWriteLocked(runCall) : await runCall()
+    } catch (err) {
+      if (secrets.length > 0 && err instanceof Error) {
+        throw new Error(maskValues(err.message, secrets))
+      }
+      throw err
+    }
 
     this.#log.info(`cc-switch ${args[0] ?? ""} ${args[1] ?? ""} [ok]`)
-    const title = options.label ? `🔌 *${escapeMarkdown(options.label)}*` : "🔌 *cc-switch*"
-    await this.#sendCcOutput(chatId, title, result.stdout || result.stderr)
+    const title = options.label ? `🔌 *${escapeMarkdown(maskValues(options.label, secrets))}*` : "🔌 *cc-switch*"
+    await this.#sendCcOutput(chatId, title, maskValues(result.stdout || result.stderr, secrets))
   }
 
   async #handleCcModel(chatId: number, key: string, rest: string[]): Promise<void> {
@@ -991,8 +1038,8 @@ export class CcCommands {
         modelKey: key,
         modelForce: force || undefined,
         label: force
-          ? `强制删除模型 \`${key}\`（会删除项目配置中的条目，并清除引用它的 Agent 与会话绑定）`
-          : `删除模型 \`${key}\``,
+          ? `强制删除模型 ${key}（会删除项目配置中的条目，并清除引用它的 Agent 与会话绑定）`
+          : `删除模型 ${key}`,
       })
       return
     }

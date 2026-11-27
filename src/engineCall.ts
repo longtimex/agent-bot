@@ -5,6 +5,8 @@ import { activeOpencodeSupervisor } from "./opencodeSupervisor.js"
 import type { SessionStore } from "./store.js"
 import { snapshotWorkspace, workspaceChanges } from "./workspaceChanges.js"
 import { activeSecretVault } from "./secretVault.js"
+import { activeApprovalManager } from "./approvals.js"
+import type { TokenUsage } from "./tokenUsage.js"
 
 export interface ResolvedModel {
   providerID: string
@@ -34,8 +36,10 @@ export interface EngineCallOptions {
   cliModel?: string
   signal?: AbortSignal
   onProgress?: (summary: string) => void
-  /** OpenCode only: the answer so far, for clients that render it while it is written. */
+  /** The answer so far, for clients that render it while it is written. */
   onDraft?: (text: string) => void
+  /** Token/cost usage reported by OpenCode or supported CLI engines on completion. */
+  onUsage?: (usage: TokenUsage) => void
 }
 
 /**
@@ -54,12 +58,16 @@ export async function callEngine(deps: EngineCallDeps, opts: EngineCallOptions):
 }
 
 async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise<string> {
+  // Interactive high-risk approval gate before invoking either engine.
+  const approvals = activeApprovalManager()
+  if (approvals) await approvals.guardPrompt(opts.key, opts.text, opts.signal)
+
+  // Snapshot the git workspace before either engine edits files, so /diff, /undo and /commit work for both.
+  const workDir = deps.agents.workDir?.(opts.key)
+  const snapshot = workDir ? snapshotWorkspace(workDir) : undefined
+
   if (opts.engine !== "opencode") {
     const notice = cliAttachmentNotice(opts.files)
-    // The CLI edits files where it runs: snapshot the repository so the reply can list what
-    // changed and /undo can take it back. Outside a git repository this is a no-op.
-    const workDir = deps.agents.workDir?.(opts.key)
-    const snapshot = workDir ? snapshotWorkspace(workDir) : undefined
     const reply = await deps.agents.prompt(
       opts.key,
       opts.engine,
@@ -67,8 +75,11 @@ async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise
       opts.cliModel,
       opts.onProgress,
       opts.signal,
+      0,
+      opts.onDraft,
+      opts.onUsage,
     )
-    const changes = snapshot ? workspaceChanges.finish(opts.key, snapshot) : undefined
+    const changes = snapshot ? workspaceChanges.finish(opts.key, snapshot, opts.engine) : undefined
     return changes ? `${reply}\n\n${changes}` : reply
   }
 
@@ -98,7 +109,9 @@ async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise
         },
         signal: opts.signal,
         files: opts.files,
+        onUsage: opts.onUsage,
       })
+    const handledPerms = new Set<string>()
     const listen = (): void => {
       unsubscribe = deps.oc.subscribeSession(
         sessionID,
@@ -112,13 +125,37 @@ async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise
               opts.onDraft?.(text)
             }
           : undefined,
+        approvals
+          ? (perm) => {
+              if (handledPerms.has(perm.id)) return
+              handledPerms.add(perm.id)
+              touch?.()
+              const detail = [perm.type ? `类型：${perm.type}` : "", perm.pattern ? `目标：${perm.pattern}` : ""]
+                .filter(Boolean)
+                .join("\n") || perm.title
+              void approvals
+                .requestApproval({
+                  key: opts.key,
+                  source: "opencode",
+                  title: perm.title,
+                  detail,
+                  patternKey: `oc:${perm.type ?? "perm"}:${perm.pattern ?? perm.title}`,
+                  signal: opts.signal,
+                })
+                .then((decision) => deps.oc.replyPermission(perm.sessionID, perm.id, decision))
+                .catch((err: unknown) => {
+                  deps.log.warn(`opencode permission reply failed (${perm.id}):`, err instanceof Error ? err.message : String(err))
+                })
+            }
+          : undefined,
       )
     }
 
     try {
       listen()
+      let reply: string
       try {
-        return await promptOnce()
+        reply = await promptOnce()
       } catch (err) {
         const missing = err instanceof OpencodeError && err.status === 404
         if (!missing) throw err
@@ -129,8 +166,10 @@ async function runEngine(deps: EngineCallDeps, opts: EngineCallOptions): Promise
         listen()
         // Recovery is silent otherwise, and a session resumed from 历史会话 that the server has
         // since dropped would look restored while the Agent remembers nothing of it
-        return `${LOST_SESSION_NOTICE}\n\n${await promptOnce()}`
+        reply = `${LOST_SESSION_NOTICE}\n\n${await promptOnce()}`
       }
+      const changes = snapshot ? workspaceChanges.finish(opts.key, snapshot, "opencode") : undefined
+      return changes ? `${reply}\n\n${changes}` : reply
     } finally {
       unsubscribe?.()
     }

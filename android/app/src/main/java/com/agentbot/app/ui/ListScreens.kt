@@ -254,6 +254,10 @@ fun HistoryScreen(vm: AppViewModel) {
                 tone = MaterialTheme.colorScheme.error,
             )
         }
+        PageErrorNotice(
+            message = vm.connectionError,
+            onDismiss = { vm.connectionError = null },
+        )
         if (vm.historyBusy) {
             LoadingBar(modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
         }
@@ -425,6 +429,10 @@ fun RemindersScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
             onBack = { vm.navigate(Screen.Chat) },
         )
+        PageErrorNotice(
+            message = vm.connectionError,
+            onDismiss = { vm.connectionError = null },
+        )
         val loadError = vm.remindersError
         val unavailable = vm.remindersUnavailable
         if (unavailable != null) {
@@ -568,6 +576,10 @@ fun SchedulesScreen(vm: AppViewModel) {
             subtitle = "按计划自动执行，结果推送到 Telegram 或飞书",
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
             onBack = { vm.navigate(Screen.Chat) },
+        )
+        PageErrorNotice(
+            message = vm.connectionError,
+            onDismiss = { vm.connectionError = null },
         )
         Text(
             "点播放可立即执行一次，不影响原定时间。",

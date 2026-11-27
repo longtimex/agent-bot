@@ -13,6 +13,8 @@ export interface Settings {
   defaultEngine?: string
   /** Where the OpenCode server listens; absent means "whatever OPENCODE_URL says". */
   opencodeUrl?: string
+  /** Push a summary to the paired Telegram/Feishu chat when an App task settles. */
+  notifyChatOnAppTask?: boolean
 }
 
 export class SettingsStore {
@@ -30,6 +32,17 @@ export class SettingsStore {
 
   get opencodeUrl(): string | undefined {
     return this.#load().opencodeUrl
+  }
+
+  get notifyChatOnAppTask(): boolean {
+    return this.#load().notifyChatOnAppTask === true
+  }
+
+  setNotifyChatOnAppTask(enabled: boolean): void {
+    const next: Settings = { ...this.#load() }
+    if (enabled) next.notifyChatOnAppTask = true
+    else delete next.notifyChatOnAppTask
+    writePrivateAtomic(this.#path, `${JSON.stringify(next, null, 2)}\n`)
   }
 
   /** Passing undefined restores the address from OPENCODE_URL. */
@@ -53,6 +66,7 @@ export class SettingsStore {
     return {
       defaultEngine: typeof raw?.defaultEngine === "string" && raw.defaultEngine ? raw.defaultEngine : undefined,
       opencodeUrl: typeof raw?.opencodeUrl === "string" && raw.opencodeUrl ? raw.opencodeUrl : undefined,
+      notifyChatOnAppTask: raw?.notifyChatOnAppTask === true ? true : undefined,
     }
   }
 }

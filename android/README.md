@@ -44,8 +44,13 @@ Telegram 与飞书控制方式不受影响——App 通过 bot 进程内置的 H
 - **定时 AI 任务**：创建、暂停/恢复、删除、立即执行一次（同 `/schedule run`，不影响原定时间）；新建对话框可像 Telegram 一样指定执行目标（引擎下拉 + 模型输入框，内部按 `--engine/--model` 前缀提交，留空则沿用当前会话），列表每项显示「执行 引擎 / 模型」、下次触发的绝对时间与倒计时，到点由 bot 执行并推送到 Telegram 或飞书。页面和提醒共用同一套加载中、读取失败、暂不可用、空列表与有数据五种状态；没有推送目标时同样在页面内解释原因并隐藏创建入口，「重新检查」与提醒走同一条重新探测路径
 - **任务队列**：查看排队/执行中的任务、单条停止，或一键「清空排队」（同 Telegram 队列面板，只取消排队中的任务）；「最近任务」区列出已结束的记录，逐条「重试」等价于 Telegram 的 `/retry`，成功后明确提示新任务已提交。刷新失败、停止失败、清空失败与重试失败都显示在本页可关闭的错误条中，不再依赖只有聊天页才渲染的横幅；已有列表刷新失败时保留旧记录并显示原因，而不是误装成空队列
 - **运行状态**：页头以状态胶囊显示在线/离线，OpenCode 可达性、运行时长、进行中任务数（另计服务器保留的可重试条目）、当前执行/排队中的任务与其最新进展、今日任务、成功率、平均耗时、最近活动（上次执行时间/引擎/模型）、引擎分布、近 7 天趋势；末尾的「每日报告」卡片跨全部聊天聚合当日用量（含 Telegram 端）与来源分布，与 `USAGE_DAILY_REPORT` 定时推送同源（`GET /usage/report`）；附「连接信息」（服务器地址、API 监听、引擎/模型、工作目录、时区、推送聊天 ID、会话 ID），对应 Telegram 的 `/api` 与 `/id`
+- **工作区代码改动（Diff / 撤销 / 提交）**：抽屉「代码改动」对应 `/diff`、`/undo`、`/commit`——按文件展示增删统计与折叠补丁、多步撤销栈与二次确认提交，切 `/dir` 后按当前仓库隔离；失败提交会自动回滚暂存区。
+- **高危操作审批中心**：抽屉「高危审批」对应 `/approvals`（带待审批角标）——展示高危指令详情，支持「放行一次 / 本会话同类放行 / 拒绝」，并可一键切换 `auto / strict / off` 防护级别。
+- **Webhook 事件触发器**：抽屉「Webhook 触发器」对应 `/hooks`——创建、启停、测试、删除入站触发器，展示触发地址、最近执行摘要，复制密钥时自动标记 Android 剪贴板敏感内容（`EXTRA_IS_SENSITIVE`）。
+- **加密账号库**：抽屉「账号库」对应 `/account`——按分类/标签检索与维护凭据，列表只返回 `hasPassword`，点开后按需解密显示，离开页面立即清除内存明文；密码框使用防键盘联想的 `SecretTextField`。
+- **费用预算与跨端同步**：运行状态页集成 Token 统计与每日/每月美元预算设置（`/budget`）；会话设置页支持「从服务端恢复聊天记录」（`GET /sync/messages`）、「接管对端会话」（`POST /sync/handoff`）与「跨端完成提醒」开关，并支持实时流式预览 Codex / Gemini / Claude Code 等 CLI 引擎的草稿输出。
 - **帮助**：与 Telegram 的 `/help`、`/help full`、`/help cc` 共用同一份服务端文案——三档切换、可滚动可选中复制，不再与聊天端脱节
-- **设置**：页头显示连接状态，服务器地址 + 访问令牌；地址字段允许换行，Instabox 这类长主机名在 720px 宽的手机上也能完整看到。地址下方实时预览实际请求的 `/api/v1`，并对手机回环地址（`127.0.0.1` / `localhost`）与公网明文 HTTP 给出警告。保存时先做健康检查与会话探测，成功后才替换旧配置并进入聊天；失败留在设置页显示中文原因，已保存的旧连接不受影响。扫码只**导入**地址、令牌与加密密钥，需要用户核对后再点保存；在 Telegram / 飞书发 `/api` 可获取二维码（服务器开启 `API_ENCRYPTION=1` 时还含加密密钥，自动启用消息级加密——请求/响应体 AES-256-GCM，SSE 与媒体流除外；服务器随后关掉加密时，App 会自动改回明文重试一次并继续工作，无需你动「设置」；密钥也可在设置页手动填写——粘贴时夹进的换行与空格会被自动忽略，长度不对会直接告诉你重新扫码）。二维码只在服务端设置了 `API_PUBLIC_URL`（或 `API_BIND` 为具体地址）时出现；手动填写时 `http://IP:3080`、`IP:3080`、`http://IP:3080/api/v1` 都能识别；Bot 挂在反向代理子路径上时（`API_PUBLIC_URL=https://域名/agent-bot`），`/api` 打印的 `https://域名/agent-bot/api/v1` 也只摘掉结尾前缀、留下 `/agent-bot`
+- **设置**：页头显示连接状态，服务器地址 + 访问令牌；地址字段允许换行，Instabox 这类长主机名在 720px 宽的手机上也能完整看到。地址下方实时预览实际请求的 `/api/v1`，并对手机回环地址（`127.0.0.1` / `localhost`）与公网明文 HTTP 给出警告。保存时先做健康检查与会话探测，成功后才替换旧配置并进入聊天；失败留在设置页显示中文原因，已保存的旧连接不受影响。扫码只**导入**地址、令牌与加密密钥，需要用户核对后再点保存；在 Telegram / 飞书发 `/api` 可获取二维码（服务器开启 `API_ENCRYPTION=1` 时还含加密密钥，自动启用消息级加密——请求/响应体 AES-256-GCM，SSE 与媒体流除外；若服务器主动关闭加密，仅对非敏感请求回退明文，对凭据/账号/密钥/配置/代理/Webhook 等敏感接口与 AEAD 校验失败绝不静默降级，而是提示重新配对；密钥也可在设置页手动填写——粘贴时夹进的换行与空格会被自动忽略，长度不对会直接告诉你重新扫码）。二维码只在服务端设置了 `API_PUBLIC_URL`（或 `API_BIND` 为具体地址）时出现；手动填写时 `http://IP:3080`、`IP:3080`、`http://IP:3080/api/v1` 都能识别；Bot 挂在反向代理子路径上时（`API_PUBLIC_URL=https://域名/agent-bot`），`/api` 打印的 `https://域名/agent-bot/api/v1` 也只摘掉结尾前缀、留下 `/agent-bot`
 
 ## 构建与安装
 
@@ -212,31 +217,42 @@ android/
 │   ├── ui/
 │   │   ├── AppViewModel.kt        # 全部状态与 API 编排（轮询任务进度、附件、持久化）
 │   │   ├── Markdown.kt            # 轻量 Markdown 渲染（代码块/行内代码/加粗/列表/引用块）
-│   │   ├── ChatScreen.kt          # 聊天主界面
+│   │   ├── ChatScreen.kt          # 聊天主界面（含流式草稿、搜索、安全输入卡片）
 │   │   ├── ImageViewer.kt         # 全屏看图（双指缩放/拖动）
-│   │   ├── SessionScreen.kt       # 会话设置（工作目录/时区/模型选择/对端会话）与任务队列
+│   │   ├── MediaPlayerDialog.kt   # 内置语音/视频播放器
+│   │   ├── SecretInput.kt         # 安全输入卡片组件
+│   │   ├── SessionScreen.kt       # 会话设置（工作目录浏览/时区/模型/跨端同步与接管）
+│   │   ├── SessionsScreen.kt      # 历史会话（搜索/置顶/改名/切回）
+│   │   ├── WorkspaceScreen.kt     # 工作区 Diff 查看、多步撤销与一键提交
+│   │   ├── ApprovalsScreen.kt     # 高危操作审批中心与防护级别切换
+│   │   ├── WebhooksScreen.kt      # 入站 Webhook 触发器管理与测试
+│   │   ├── AccountsScreen.kt      # 加密账号库（分类/标签/按需解密）
 │   │   ├── AgentsScreen.kt        # 引擎安装/更新/卸载
-│   │   ├── OpsScreen.kt           # 运维诊断与日志
+│   │   ├── OpsScreen.kt           # 运维诊断、日志、服务与备份
 │   │   ├── ProxyScreen.kt         # 网络代理管理
 │   │   ├── AliasesScreen.kt       # 快捷指令
 │   │   ├── AccessScreen.kt        # 访问白名单
-│   │   ├── ModelsScreen.kt        # 自定义模型管理
+│   │   ├── ModelsScreen.kt        # 自定义模型与 CLI 中转站管理
 │   │   ├── CcScreen.kt            # cc-switch 控制台（Provider/MCP/提示词/环境/代理/高级操作）
+│   │   ├── MagpieScreen.kt        # magpie 模型网关控制台
 │   │   ├── HermesScreen.kt        # Hermes 记忆（MEMORY.md / USER.md 编辑、启停、预算）
 │   │   ├── ConfigScreen.kt        # .env 配置项查看与编辑
 │   │   ├── PickerDialog.kt        # 引擎/模型切换、新建对话框
 │   │   ├── ListScreens.kt         # 历史 / 提醒 / 定时任务
-│   │   ├── StatusScreen.kt        # 状态与统计
+│   │   ├── StatusScreen.kt        # 状态、Token/费用统计与预算设置
+│   │   ├── SlashCommands.kt       # 与聊天端同源的 `/` 命令路由
 │   │   ├── HelpScreen.kt          # 帮助（与 Telegram /help 共用文案）
 │   │   ├── AppVisibility.kt       # 前后台标记（后台才发任务通知）
-│   │   ├── SettingsScreen.kt      # 服务器连接设置
-│   │   ├── AppDrawer.kt           # 分组侧边抽屉（连接状态/新对话/队列角标）
+│   │   ├── SettingsScreen.kt      # 服务器连接设置与在线更新
+│   │   ├── AppDrawer.kt           # 分组侧边抽屉（连接状态/新对话/队列与审批角标）
 │   │   ├── UiComponents.kt        # 共享标题、卡片、状态胶囊与空状态
 │   │   └── theme/Theme.kt         # 暗色主题、字体层级与圆角 token
+│   ├── widget/                    # 桌面小部件、快捷设置磁贴与长按快捷方式
 │   └── data/
-│       ├── ApiClient.kt           # /api/v1 客户端（OkHttp + kotlinx.serialization）
-│       ├── LocalStore.kt          # 附件读取（ContentResolver）与聊天记录持久化
+│       ├── ApiClient.kt           # /api/v1 客户端（OkHttp + AES-256-GCM + SSE）
+│       ├── LocalStore.kt          # 附件流式读取、聊天记录与离线队列持久化
 │       ├── MediaFiles.kt          # 回复媒体磁盘缓存、图片降采样与 MIME 推断
+│       ├── ShareIntents.kt        # 系统分享选择器（排除自身回环）
 │       ├── TaskNotifier.kt        # 后台任务完成通知（Android 13+ 权限检查）
 │       ├── ApiModels.kt           # 接口模型
 │       └── SettingsRepository.kt  # 连接信息持久化

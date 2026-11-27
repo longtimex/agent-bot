@@ -2,8 +2,15 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { clip } from "./messages.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
-import { magpieErrorText, type MagpieService } from "./magpie.js"
-import { magpieBlockedReason, magpieConfirmPlan } from "./magpieGuards.js"
+import {
+  MAGPIE_LONG_TIMEOUT_MS,
+  MagpieBusyError,
+  MagpieError,
+  MagpieRunError,
+  magpieErrorText,
+  type MagpieService,
+} from "./magpie.js"
+import { isLongMagpieCommand, magpieBlockedReason, magpieConfirmPlan } from "./magpieGuards.js"
 import {
   MAGPIE_EXEC,
   MAGPIE_VIEWS,
@@ -15,7 +22,10 @@ export interface MagpieRouteDeps {
   magpie: MagpieService | undefined
   json: (res: ServerResponse, status: number, body: unknown) => void
   readJsonBody: (req: IncomingMessage) => Promise<Record<string, unknown>>
+  /** Serializes mutating magpie CLI calls and fails fast with 409 on contention. */
   magpieQuery: <T>(run: () => Promise<T>) => Promise<T>
+  /** Optional lock-free read wrapper for read-only `/magpie/view` calls. */
+  magpieRead?: <T>(run: () => Promise<T>) => Promise<T>
 }
 
 const OUTPUT_LIMIT = 4000
@@ -85,6 +95,14 @@ function argvFrom(value: unknown): string[] {
   }
 }
 
+function rethrowMagpieError(err: unknown, validationIs400: boolean): never {
+  if (err instanceof ApiError) throw err
+  if (err instanceof MagpieBusyError) throw new ApiError(409, magpieErrorText(err))
+  if (err instanceof MagpieRunError) throw new ApiError(502, magpieErrorText(err))
+  if (validationIs400 && err instanceof MagpieError) throw new ApiError(400, magpieErrorText(err))
+  throw new ApiError(502, magpieErrorText(err))
+}
+
 export async function routeMagpie(
   deps: MagpieRouteDeps,
   ctx: ApiRequestContext,
@@ -111,11 +129,14 @@ export async function routeMagpie(
     const spec = viewSpec(name)
     if (!spec) throw new ApiError(400, `未知的视图，可用：${Object.keys(MAGPIE_VIEWS).join("、")}`)
     const target = targetFor(ctx.url.searchParams.get("target") ?? "", spec)
+    const runRead = deps.magpieRead ?? ((fn: () => Promise<string>) => fn())
     try {
-      const text = await deps.magpieQuery(() => magpie!.runRaw(spec.args(target)))
+      const args = spec.args(target)
+      const timeoutMs = spec.long ? MAGPIE_LONG_TIMEOUT_MS : undefined
+      const text = await runRead(() => magpie!.runRaw(args, timeoutMs))
       deps.json(ctx.res, 200, { name, label: spec.label, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(502, magpieErrorText(err))
+      rethrowMagpieError(err, false)
     }
     return
   }
@@ -130,10 +151,12 @@ export async function routeMagpie(
       throw new ApiError(400, `需要确认：${spec.label}。带 confirm: true 重发。`)
     }
     try {
-      const text = await deps.magpieQuery(() => magpie!.runRaw(spec.args(target)))
+      const args = spec.args(target)
+      const timeoutMs = spec.timeoutMs ?? (spec.long ? MAGPIE_LONG_TIMEOUT_MS : undefined)
+      const text = await deps.magpieQuery(() => magpie!.runRaw(args, timeoutMs))
       deps.json(ctx.res, 200, { ok: true, name, label: spec.label, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(502, magpieErrorText(err))
+      rethrowMagpieError(err, false)
     }
     return
   }
@@ -151,11 +174,12 @@ export async function routeMagpie(
     if (plan && body.confirm !== true) {
       throw new ApiError(400, `需要确认：${plan.label}。带 confirm: true 重发。`)
     }
+    const timeoutMs = plan?.timeoutMs ?? (isLongMagpieCommand(args) ? MAGPIE_LONG_TIMEOUT_MS : undefined)
     try {
-      const text = await deps.magpieQuery(() => magpie!.runRaw(args))
+      const text = await deps.magpieQuery(() => magpie!.runRaw(args, timeoutMs))
       deps.json(ctx.res, 200, { ok: true, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(502, magpieErrorText(err))
+      rethrowMagpieError(err, false)
     }
     return
   }
@@ -170,7 +194,7 @@ export async function routeMagpie(
       const text = await deps.magpieQuery(() => magpie!.addProvider(preset, key))
       deps.json(ctx.res, 200, { ok: true, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(400, magpieErrorText(err))
+      rethrowMagpieError(err, true)
     }
     return
   }
@@ -185,7 +209,7 @@ export async function routeMagpie(
       const text = await deps.magpieQuery(() => magpie!.setAgentModel(agent, model))
       deps.json(ctx.res, 200, { ok: true, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(400, magpieErrorText(err))
+      rethrowMagpieError(err, true)
     }
     return
   }
@@ -200,7 +224,7 @@ export async function routeMagpie(
       const text = await deps.magpieQuery(() => magpie!.addGroup(name, pairs))
       deps.json(ctx.res, 200, { ok: true, text: clipped(text) })
     } catch (err) {
-      throw new ApiError(400, magpieErrorText(err))
+      rethrowMagpieError(err, true)
     }
     return
   }

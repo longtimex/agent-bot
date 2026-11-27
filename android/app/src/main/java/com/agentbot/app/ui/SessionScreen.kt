@@ -63,6 +63,7 @@ fun SessionScreen(vm: AppViewModel) {
     var browseDir by remember { mutableStateOf(false) }
     var editTz by remember { mutableStateOf(false) }
     var followTarget by remember { mutableStateOf<Peer?>(null) }
+    var handoffTarget by remember { mutableStateOf<Peer?>(null) }
     val session = vm.session
     val dir = vm.dirInfo
     val currentTz = vm.timezone ?: session?.timezone
@@ -91,8 +92,10 @@ fun SessionScreen(vm: AppViewModel) {
         )
 
         PageErrorNotice(
-            message = vm.sessionActionError,
-            onDismiss = { vm.sessionActionError = null },
+            message = vm.sessionActionError ?: vm.connectionError,
+            onDismiss = {
+                if (vm.sessionActionError != null) vm.sessionActionError = null else vm.connectionError = null
+            },
         )
 
         val loadError = vm.sessionError
@@ -171,6 +174,29 @@ fun SessionScreen(vm: AppViewModel) {
                     onClick = { vm.navigate(Screen.Sessions) },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                QuietButton(
+                    text = "从服务端恢复聊天记录",
+                    onClick = { vm.restoreServerTranscript("app") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("跨端完成提醒", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "App 任务完成或失败时同步向聊天端发通知",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = vm.notifyChatOnAppTask,
+                        onCheckedChange = vm::toggleNotifyChatOnAppTask,
+                    )
+                }
             }
         }
 
@@ -206,14 +232,24 @@ fun SessionScreen(vm: AppViewModel) {
                                 "今日 ${activity.todayOk}/${activity.todayTasks} · 累计 ${activity.totalTasks}"
                             } ?: "-",
                         )
-                        SecondaryButton(
-                            text = "跟随该会话",
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                vm.sessionActionError = null
-                                followTarget = peer
-                            },
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SecondaryButton(
+                                text = "跟随配置",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    vm.sessionActionError = null
+                                    followTarget = peer
+                                },
+                            )
+                            PrimaryButton(
+                                text = "接管对话",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    vm.sessionActionError = null
+                                    handoffTarget = peer
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -333,6 +369,36 @@ fun SessionScreen(vm: AppViewModel) {
             },
         )
     }
+    handoffTarget?.let { peer ->
+        AppDialog(
+            onDismissRequest = { handoffTarget = null },
+            title = { Text("接管${peer.label}对话？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "会把「${peer.session?.engineLabel ?: peer.session?.engine ?: "-"} · " +
+                            "${peer.session?.model ?: "-"}」的会话上下文和最近对话记录直接接力到本机 App，方便继续往下聊。",
+                    )
+                    vm.sessionActionError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.handoffPeer(peer.scope) { ok ->
+                        if (ok) {
+                            handoffTarget = null
+                            vm.navigate(Screen.Chat)
+                        }
+                    }
+                }) { Text("接管并打开聊天") }
+            },
+            dismissButton = {
+                TextButton(onClick = { handoffTarget = null }) { Text("取消") }
+            },
+        )
+    }
 }
 
 /**
@@ -415,7 +481,12 @@ private fun DirBrowserDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         },
         confirmButton = {
             TextButton(
-                onClick = { listing?.let { vm.chooseDir(it.path) } },
+                onClick = {
+                    listing?.let {
+                        vm.chooseDir(it.path)
+                        onDismiss()
+                    }
+                },
                 enabled = listing != null && !busy,
             ) { Text("选择此目录") }
         },

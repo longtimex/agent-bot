@@ -326,7 +326,7 @@ export class ModelAdmin {
 
     const registry = this.#readRegistry()
     this.#assertRegistryWritable()
-    if (registry.models[key]) throw new Error(`模型 ${key} 已存在，请先删除后再添加。`)
+    if (Object.hasOwn(registry.models, key)) throw new Error(`模型 ${key} 已存在，请先删除后再添加。`)
     const clash = Object.entries(registry.models).find(
       ([, info]) => info.modelID === modelID && info.providerID === providerID,
     )
@@ -334,7 +334,9 @@ export class ModelAdmin {
 
     const projectConfig = this.#readProjectConfig()
     const projectProvider =
-      projectConfig && isRecord(projectConfig.provider) ? projectConfig.provider[providerID] : undefined
+      projectConfig && isRecord(projectConfig.provider) && Object.hasOwn(projectConfig.provider, providerID)
+        ? projectConfig.provider[providerID]
+        : undefined
     if (isRecord(projectProvider) && isRecord(projectProvider.models) && Object.hasOwn(projectProvider.models, modelID)) {
       throw new Error(`模型 ${providerID}/${modelID} 已存在于项目 opencode.json 中。`)
     }
@@ -358,7 +360,7 @@ export class ModelAdmin {
     const norm = key.trim().toLowerCase()
     const registry = this.#readRegistry()
     this.#assertRegistryWritable()
-    const entry = registry.models[norm]
+    const entry = Object.hasOwn(registry.models, norm) ? registry.models[norm] : undefined
     if (!entry) return undefined
 
     const bindings = this.#agentBindings(entry)
@@ -398,7 +400,7 @@ export class ModelAdmin {
     const config = parseJsoncObject(text)
     if (!config) return false
     const providers = isRecord(config.provider) ? (config.provider as Record<string, unknown>) : {}
-    const provider = providers[entry.providerID]
+    const provider = Object.hasOwn(providers, entry.providerID) ? providers[entry.providerID] : undefined
 
     const spec: Record<string, unknown> = { name: cleanText(input.label, 60) ?? entry.modelID }
     if (input.attachment) spec.attachment = true
@@ -442,6 +444,7 @@ export class ModelAdmin {
     if (text === undefined) return false
     const config = parseJsoncObject(text)
     if (!config || !isRecord(config.provider)) return false
+    if (!Object.hasOwn(config.provider, entry.providerID)) return false
     const provider = config.provider[entry.providerID]
     if (!isRecord(provider) || !isRecord(provider.models)) return false
     if (!Object.hasOwn(provider.models, entry.modelID)) return false

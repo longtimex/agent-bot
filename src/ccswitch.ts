@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder"
 import { childEnv, extendedPath } from "./binPath.js"
 import { clip, clipTail } from "./messages.js"
 import { maskSecretValues } from "./secretVault.js"
+import { ReEntrantWriteLock } from "./writeLock.js"
 
 export const CC_SWITCH_APPS = [
   "claude",
@@ -82,6 +83,8 @@ export interface CcSwitchOptions {
   app?: string
   projectDir?: string
   env?: NodeJS.ProcessEnv
+  /** Dynamic proxy env (e.g. from ProxyService), merged into each child invocation. */
+  proxyEnv?: () => NodeJS.ProcessEnv
   timeoutMs?: number
   speedtestTimeoutMs?: number
   runner?: CcSwitchRunner
@@ -98,6 +101,9 @@ export class CcSwitchError extends Error {}
  * can fix, 502 for the tool that just failed.
  */
 export class CcSwitchRunError extends CcSwitchError {}
+
+/** Another mutating cc-switch operation is currently holding the service write lock. */
+export class CcSwitchBusyError extends CcSwitchError {}
 
 const DEFAULT_TIMEOUT_MS = 20_000
 /** Commands that shell out to a provider or the skill market need more than the 20s default. */
@@ -148,10 +154,8 @@ export function redactSecrets(text: string): string {
 }
 
 export function toBase64Url(text: string): string {
-  return Buffer.from(text, "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
+  // Unpadded URL-safe base64 matches Rust's URL_SAFE_NO_PAD decoder used by cc-switch-cli.
+  return Buffer.from(text, "utf8").toString("base64url")
 }
 
 export function buildPromptDeeplink(app: string, name: string, content: string): string {
@@ -447,10 +451,19 @@ export function parseProviderList(output: string): CcSwitchProvider[] {
     if (!headers) continue
     const id = idIndex >= 0 ? (cells[idIndex] ?? "") : ""
     if (!id) {
-      if (providers.length > 0 && urlIndex >= 0) {
-        const wrapped = cells[urlIndex] ?? ""
+      if (providers.length > 0) {
         const last = providers[providers.length - 1]!
-        if (wrapped) last.apiUrl = last.apiUrl ? `${last.apiUrl}${wrapped}` : wrapped
+        if (nameIndex >= 0) {
+          const wrappedName = cells[nameIndex] ?? ""
+          if (wrappedName) {
+            const sep = /[A-Za-z0-9]$/.test(last.name) && /^[A-Za-z0-9]/.test(wrappedName) ? " " : ""
+            last.name = last.name ? `${last.name}${sep}${wrappedName}` : wrappedName
+          }
+        }
+        if (urlIndex >= 0) {
+          const wrapped = cells[urlIndex] ?? ""
+          if (wrapped) last.apiUrl = last.apiUrl ? `${last.apiUrl}${wrapped}` : wrapped
+        }
       }
       continue
     }
@@ -464,13 +477,16 @@ export function parseProviderList(output: string): CcSwitchProvider[] {
   }
 
   const currentMatch = /(?:^|\n)\s*(?:→|ℹ)?\s*Current:\s*(\S+)/.exec(stripAnsi(output))
-  const currentId = currentMatch?.[1]
+  const rawCurrent = currentMatch?.[1]
+  const currentId = rawCurrent && !/^(?:none|null|n\/a|-|无)$/i.test(rawCurrent) ? rawCurrent : undefined
   if (currentId) {
-    for (const provider of providers) provider.current = provider.id === currentId
-  }
-
-  if (providers.length === 0 && currentId) {
-    providers.push({ id: currentId, name: currentId, apiUrl: "", current: true })
+    // Only overwrite table checkmarks when the footer actually names a parsed provider id;
+    // a display name or placeholder like "None" must not wipe out valid table markers.
+    if (providers.some((provider) => provider.id === currentId)) {
+      for (const provider of providers) provider.current = provider.id === currentId
+    } else if (providers.length === 0) {
+      providers.push({ id: currentId, name: currentId, apiUrl: "", current: true })
+    }
   }
 
   return providers
@@ -545,10 +561,15 @@ function probeScript(scriptPath: string, env: NodeJS.ProcessEnv): Promise<boolea
   })
 }
 
+const PTY_CONFIRM_PROMPT_RE =
+  /(?:\[y\/n\]|\(y\/n\)|y\/n|\bconfirm\b|\bcontinue\b|\bproceed\b|\boverwrite\b|确认|继续|是否|\?\s*$)/i
+const PTY_FALLBACK_CONFIRM_MS = 250
+
 export class CcSwitchService {
   readonly #app: string
   readonly #projectDir: string
-  readonly #env: NodeJS.ProcessEnv
+  readonly #envOverride?: NodeJS.ProcessEnv
+  readonly #proxyEnv?: () => NodeJS.ProcessEnv
   readonly #timeoutMs: number
   readonly #speedtestTimeoutMs: number
   readonly #runnerOverride?: CcSwitchRunner
@@ -557,20 +578,33 @@ export class CcSwitchService {
   #explicitBin?: string
   #version?: string
   #versionStamp?: string
+  readonly #writeLock = new ReEntrantWriteLock()
 
   constructor(options: CcSwitchOptions = {}) {
     this.#app = normalizeCcSwitchApp(options.app)
     this.#projectDir = options.projectDir ?? process.cwd()
-    // cc-switch is a third-party binary run with user-chosen passthrough argv, and
-    // `env tools` / `env check` print environment data straight back into the chat, so
-    // it gets the same scrubbed environment as the agent CLIs and the installers.
-    this.#env = childEnv(options.env ?? process.env)
+    this.#envOverride = options.env
+    this.#proxyEnv = options.proxyEnv
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.#speedtestTimeoutMs = options.speedtestTimeoutMs ?? SPEEDTEST_TIMEOUT_MS
     this.#runnerOverride = options.runner
     this.#confirmRunnerOverride = options.confirmRunner
     this.#ptyProbe = options.ptyProbe ?? probeScript
     this.#explicitBin = options.bin
+  }
+
+  #childEnv(): NodeJS.ProcessEnv {
+    const base = childEnv(this.#envOverride ?? process.env)
+    const proxy = this.#proxyEnv?.()
+    return proxy ? { ...base, ...proxy } : base
+  }
+
+  /** Serializes mutating cc-switch calls across HTTP API and Telegram (re-entrant). */
+  runWriteLocked<T>(fn: () => Promise<T>, options: { failFast?: boolean } = {}): Promise<T> {
+    return this.#writeLock.run(fn, {
+      failFast: options.failFast,
+      onBusy: () => new CcSwitchBusyError("已有 cc-switch 操作在执行，请稍后再试"),
+    })
   }
 
   get app(): string {
@@ -591,7 +625,7 @@ export class CcSwitchService {
     // Re-resolved on every access: `npm run cc-switch:install` can drop a newer binary into
     // ./bin or a PATH directory while the bot is running, and a snapshot taken at first use
     // would keep that upgrade invisible until the next restart.
-    return resolveCcSwitchBin(this.#explicitBin, this.#projectDir, this.#env)
+    return resolveCcSwitchBin(this.#explicitBin, this.#projectDir, this.#childEnv())
   }
 
   get available(): boolean {
@@ -611,7 +645,7 @@ export class CcSwitchService {
   async run(args: string[], timeoutMs = this.#timeoutMs): Promise<CcSwitchRunResult> {
     const bin = this.#ensureBin()
     const runner =
-      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#env, NO_COLOR: "1" })
+      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#childEnv(), NO_COLOR: "1" })
     const result = await runner(["--app", this.#app, ...args], { timeoutMs })
     if (result.code !== 0) {
       throw new CcSwitchRunError(errorDetail(result))
@@ -623,7 +657,7 @@ export class CcSwitchService {
   async runBare(args: string[], timeoutMs = this.#timeoutMs): Promise<CcSwitchRunResult> {
     const bin = this.#ensureBin()
     const runner =
-      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#env, NO_COLOR: "1" })
+      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#childEnv(), NO_COLOR: "1" })
     const result = await runner(args, { timeoutMs })
     if (result.code !== 0) {
       throw new CcSwitchRunError(errorDetail(result))
@@ -632,23 +666,26 @@ export class CcSwitchService {
   }
 
   async runWithConfirm(args: string[], timeoutMs = this.#timeoutMs): Promise<CcSwitchRunResult> {
-    const result = this.#confirmRunnerOverride
-      ? await this.#confirmRunnerOverride(args, "y\n", { timeoutMs })
-      : await this.#runPty(args, timeoutMs)
-    if (result.code !== 0) {
-      throw new CcSwitchRunError(errorDetail(result))
-    }
-    return result
+    return this.runWriteLocked(async () => {
+      const result = this.#confirmRunnerOverride
+        ? await this.#confirmRunnerOverride(args, "y\n", { timeoutMs })
+        : await this.#runPty(args, timeoutMs)
+      if (result.code !== 0) {
+        throw new CcSwitchRunError(errorDetail(result))
+      }
+      return result
+    })
   }
 
   async #runPty(args: string[], timeoutMs: number): Promise<CcSwitchRunResult> {
     const bin = this.#ensureBin()
-    const script = resolveOnPath("script", this.#env)
+    const env = this.#childEnv()
+    const script = resolveOnPath("script", env)
     if (!script) {
       throw new CcSwitchError("未找到 script 命令，无法自动确认交互式操作；请在服务器安装 util-linux。")
     }
     // A BusyBox build ignores `-qec` and would sit reading stdin until the task times out
-    if (!(await this.#ptyProbe(script, this.#env))) {
+    if (!(await this.#ptyProbe(script, env))) {
       throw new CcSwitchError(
         "`script` 不是 util-linux 版本（可能是 BusyBox），无法自动确认交互式操作；请在服务器安装 util-linux。",
       )
@@ -657,26 +694,34 @@ export class CcSwitchService {
     return new Promise<CcSwitchRunResult>((resolvePromise, reject) => {
       const child = spawn(script, ["-qec", command, "/dev/null"], {
         cwd: this.#projectDir,
-        env: { ...this.#env, NO_COLOR: "1" },
+        env: { ...env, NO_COLOR: "1" },
         stdio: ["pipe", "pipe", "pipe"],
       })
       let stdout = ""
       let stderr = ""
       let settled = false
+      let confirmed = false
+      let fallbackTimer: NodeJS.Timeout | undefined
       // Decoders keep a multibyte character split across two pipe reads intact;
       // per-chunk toString() would turn it into replacement characters
       const out = new StringDecoder("utf8")
       const err = new StringDecoder("utf8")
+      const sendConfirm = (): void => {
+        if (confirmed || settled) return
+        confirmed = true
+        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = undefined }
+        child.stdin?.write("y\n")
+      }
       const finish = (fn: () => void): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = undefined }
         stdout = clipTail(stdout + out.end(), MAX_OUTPUT)
         stderr = clipTail(stderr + err.end(), MAX_OUTPUT)
         fn()
       }
       const timer = setTimeout(() => {
-        // SIGTERM first so the pty child can flush; escalate if it lingers
         child.kill("SIGTERM")
         const escalate = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
@@ -684,25 +729,21 @@ export class CcSwitchService {
         escalate.unref()
         finish(() => reject(new CcSwitchError(`cc-switch 执行超时（${Math.round(timeoutMs / 1000)} 秒）。`)))
       }, timeoutMs)
-      // Keep a rolling tail of each stream: capping only stdout let a chatty stderr
-      // grow without limit, and killing on overflow aborted an otherwise healthy run
+      fallbackTimer = setTimeout(sendConfirm, PTY_FALLBACK_CONFIRM_MS)
+      fallbackTimer.unref()
       child.stdout?.on("data", (chunk: Buffer) => {
-        stdout = clipTail(stdout + out.write(chunk), MAX_OUTPUT)
+        const text = out.write(chunk)
+        stdout = clipTail(stdout + text, MAX_OUTPUT)
+        if (!confirmed && PTY_CONFIRM_PROMPT_RE.test(stripAnsi(text))) sendConfirm()
       })
       child.stderr?.on("data", (chunk: Buffer) => {
-        stderr = clipTail(stderr + err.write(chunk), MAX_OUTPUT)
+        const text = err.write(chunk)
+        stderr = clipTail(stderr + text, MAX_OUTPUT)
+        if (!confirmed && PTY_CONFIRM_PROMPT_RE.test(stripAnsi(text))) sendConfirm()
       })
-      child.on("error", (error) => {
-        finish(() => reject(new CcSwitchError(`无法执行 cc-switch：${error.message}`)))
-      })
-      child.on("close", (code) => {
-        finish(() => resolvePromise({ code: code ?? 1, stdout, stderr }))
-      })
-      // The child may exit before reading the confirmation; without this guard the
-      // resulting EPIPE on stdin surfaces as an uncaught stream error
+      child.on("error", (error) => finish(() => reject(new CcSwitchError(`无法执行 cc-switch：${error.message}`))))
+      child.on("close", (code) => finish(() => resolvePromise({ code: code ?? 1, stdout, stderr })))
       child.stdin?.on("error", () => {})
-      child.stdin?.write("y\n")
-      child.stdin?.end()
     })
   }
 
@@ -710,13 +751,18 @@ export class CcSwitchService {
     const preset = name.trim()
     if (!preset) throw new CcSwitchError("提示词名称不能为空。")
     if (!content.trim()) throw new CcSwitchError("提示词内容不能为空。")
-    const result = await this.runBare(["deeplink", buildPromptDeeplink(this.#app, preset, content)], this.#speedtestTimeoutMs)
-    return stripAnsi(result.stdout).trim()
+    return this.runWriteLocked(async () => {
+      const result = await this.runBare(["deeplink", buildPromptDeeplink(this.#app, preset, content)], this.#speedtestTimeoutMs)
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async importMcp(input: string, apps?: string[]): Promise<string> {
-    const result = await this.runBare(["deeplink", buildMcpDeeplink(this.#app, input, apps)], this.#speedtestTimeoutMs)
-    return stripAnsi(result.stdout).trim()
+    const link = buildMcpDeeplink(this.#app, input, apps)
+    return this.runWriteLocked(async () => {
+      const result = await this.runBare(["deeplink", link], this.#speedtestTimeoutMs)
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async importSkill(repo: string): Promise<string> {
@@ -725,8 +771,10 @@ export class CcSwitchService {
     if (!/^[\w.-]+\/[\w.-]+$/.test(value) || value.split("/").some((segment) => segment === "." || segment === "..")) {
       throw new CcSwitchError("技能仓库格式应为 owner/name。")
     }
-    const result = await this.runBare(["deeplink", buildSkillDeeplink(value)], this.#speedtestTimeoutMs)
-    return stripAnsi(result.stdout).trim()
+    return this.runWriteLocked(async () => {
+      const result = await this.runBare(["deeplink", buildSkillDeeplink(value)], this.#speedtestTimeoutMs)
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   /**
@@ -781,17 +829,19 @@ export class CcSwitchService {
     const key = draft.apiKey?.trim()
     // cc-switch echoes the created settings on failure, so the key must not escape
     const mask = (text: string): string => (key ? text.split(key).join("***") : text)
-    let result: CcSwitchRunResult
-    try {
-      result = await this.run(args, this.#speedtestTimeoutMs)
-    } catch (err) {
-      // The rejection is the path where that echo actually happens, and errorDetail()
-      // only knows the generic label patterns: an unlabelled key in the dump would
-      // otherwise reach the chat and the App untouched
-      if (key && err instanceof CcSwitchRunError) throw new CcSwitchRunError(mask(err.message))
-      throw err
-    }
-    return { code: result.code, stdout: mask(result.stdout), stderr: mask(result.stderr) }
+    return this.runWriteLocked(async () => {
+      let result: CcSwitchRunResult
+      try {
+        result = await this.run(args, this.#speedtestTimeoutMs)
+      } catch (err) {
+        // The rejection is the path where that echo actually happens, and errorDetail()
+        // only knows the generic label patterns: an unlabelled key in the dump would
+        // otherwise reach the chat and the App untouched
+        if (key && err instanceof CcSwitchRunError) throw new CcSwitchRunError(mask(err.message))
+        throw err
+      }
+      return { code: result.code, stdout: mask(result.stdout), stderr: mask(result.stderr) }
+    })
   }
 
   async version(): Promise<string | undefined> {
@@ -800,7 +850,7 @@ export class CcSwitchService {
     const stamp = binStamp(bin)
     if (this.#version !== undefined && this.#versionStamp === stamp) return this.#version
     try {
-      const runner = this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, this.#env)
+      const runner = this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, this.#childEnv())
       const result = await runner(["--version"], { timeoutMs: this.#timeoutMs })
       if (result.code !== 0) return undefined
       this.#version = stripAnsi(result.stdout).trim().split("\n")[0]
@@ -818,8 +868,10 @@ export class CcSwitchService {
 
   async useProvider(id: string): Promise<string> {
     const safeId = assertSafeId(id, "Provider ID")
-    const result = await this.run(["use", safeId])
-    return stripAnsi(result.stdout).trim()
+    return this.runWriteLocked(async () => {
+      const result = await this.run(["use", safeId])
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async speedtest(id: string): Promise<CcSwitchSpeedtest> {
@@ -849,8 +901,10 @@ export class CcSwitchService {
   }
 
   async syncMcp(): Promise<string> {
-    const result = await this.run(["mcp", "sync"])
-    return stripAnsi(result.stdout).trim()
+    return this.runWriteLocked(async () => {
+      const result = await this.run(["mcp", "sync"])
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async listPrompts(): Promise<string> {
@@ -859,13 +913,18 @@ export class CcSwitchService {
   }
 
   async activatePrompt(id: string): Promise<string> {
-    const result = await this.run(["prompts", "activate", assertSafeId(id, "提示词 ID")])
-    return stripAnsi(result.stdout).trim()
+    const safeId = assertSafeId(id, "提示词 ID")
+    return this.runWriteLocked(async () => {
+      const result = await this.run(["prompts", "activate", safeId])
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async deactivatePrompt(): Promise<string> {
-    const result = await this.run(["prompts", "deactivate"])
-    return stripAnsi(result.stdout).trim()
+    return this.runWriteLocked(async () => {
+      const result = await this.run(["prompts", "deactivate"])
+      return stripAnsi(result.stdout).trim()
+    })
   }
 
   async envTools(): Promise<string> {

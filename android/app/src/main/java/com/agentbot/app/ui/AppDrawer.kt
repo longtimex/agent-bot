@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Help
@@ -70,6 +71,7 @@ fun AppDrawer(
     connected: Boolean = false,
     sessionLabel: String? = null,
     queueCount: Int = 0,
+    pendingApprovalsCount: Int = 0,
     appUpdateAvailable: Boolean = false,
     open: Boolean = false,
 ) {
@@ -142,6 +144,7 @@ fun AppDrawer(
                 Spacer(modifier = Modifier.padding(top = 6.dp))
                 DrawerSection("对话")
                 DrawerItem(Icons.Filled.Forum, "历史会话", current is Screen.Sessions) { onNavigate(Screen.Sessions) }
+                DrawerItem(Icons.Filled.Code, "代码改动", current is Screen.Workspace) { onNavigate(Screen.Workspace) }
                 DrawerItem(Icons.Filled.History, "任务历史", current is Screen.History) { onNavigate(Screen.History) }
                 DrawerItem(
                     Icons.Filled.List,
@@ -153,6 +156,13 @@ fun AppDrawer(
                 DrawerSection("自动化")
                 DrawerItem(Icons.Filled.Notifications, "提醒", current is Screen.Reminders) { onNavigate(Screen.Reminders) }
                 DrawerItem(Icons.Filled.Schedule, "定时任务", current is Screen.Schedules) { onNavigate(Screen.Schedules) }
+                DrawerItem(
+                    Icons.Filled.Lock,
+                    "高危审批",
+                    current is Screen.Approvals,
+                    badge = pendingApprovalsCount.takeIf { it > 0 }?.toString(),
+                ) { onNavigate(Screen.Approvals) }
+                DrawerItem(Icons.Filled.Bolt, "Webhook 触发器", current is Screen.Webhooks) { onNavigate(Screen.Webhooks) }
                 DrawerItem(Icons.Filled.Bolt, "快捷指令", current is Screen.Aliases) { onNavigate(Screen.Aliases) }
                 DrawerItem(Icons.Filled.VpnKey, "账号库", current is Screen.Accounts) { onNavigate(Screen.Accounts) }
 

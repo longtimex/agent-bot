@@ -182,8 +182,15 @@ export async function routeSchedules(
   action: string | undefined,
 ): Promise<void> {
   const chatId = requireOwnerChat(deps, "定时任务")
+  // Tasks created before pairing a chat live under APP_CHAT_ID; keep both scopes
+  // visible and manageable after pairing, matching routeReminders.
+  const scopes = chatId === APP_CHAT_ID ? [APP_CHAT_ID] : [chatId, APP_CHAT_ID]
   if (ctx.method === "GET" && !id) {
-    deps.json(ctx.res, 200, { schedules: deps.schedules.list(chatId).map((task) => publicSchedule(task, deps.registry)) })
+    const schedules = scopes
+      .flatMap((scope) => deps.schedules.list(scope))
+      .sort((a, b) => a.dueAt - b.dueAt || a.id - b.id)
+      .map((task) => publicSchedule(task, deps.registry))
+    deps.json(ctx.res, 200, { schedules })
     return
   }
   if (ctx.method === "POST" && !id) {
@@ -207,14 +214,15 @@ export async function routeSchedules(
   const taskId = Number(id)
   if (!Number.isInteger(taskId)) throw new ApiError(404, "未知的定时任务 API 路径")
   if (ctx.method === "DELETE" && !action) {
-    const removed = deps.schedules.remove(chatId, taskId)
+    const removed = scopes.map((scope) => deps.schedules.remove(scope, taskId)).find(Boolean)
     if (!removed) throw new ApiError(404, "定时任务不存在")
     deps.json(ctx.res, 200, { ok: true })
     return
   }
   if (ctx.method === "POST" && (action === "pause" || action === "resume")) {
-    const updated =
-      action === "pause" ? deps.schedules.pause(chatId, taskId) : deps.schedules.resume(chatId, taskId)
+    const updated = scopes
+      .map((scope) => (action === "pause" ? deps.schedules.pause(scope, taskId) : deps.schedules.resume(scope, taskId)))
+      .find(Boolean)
     if (!updated) throw new ApiError(404, "定时任务不存在")
     deps.json(ctx.res, 200, { schedule: publicSchedule(updated, deps.registry) })
     return
@@ -222,7 +230,10 @@ export async function routeSchedules(
   if (ctx.method === "POST" && action === "run") {
     let task
     try {
-      task = deps.schedules.runNow(chatId, taskId)
+      for (const scope of scopes) {
+        task = deps.schedules.runNow(scope, taskId)
+        if (task) break
+      }
     } catch (err) {
       throw new ApiError(409, err instanceof Error ? err.message : "定时任务正在执行中")
     }

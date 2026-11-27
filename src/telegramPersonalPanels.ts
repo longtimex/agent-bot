@@ -112,20 +112,25 @@ export class TelegramPersonalPanels {
 
   aliasPanel(chatId: number): Panel {
     const aliases = this.#deps.aliases.list(chatId)
-    const keyboard = new InlineKeyboard().text("➕ 用法见 /alias add", "noop:alias").row().text("⬅️ 主菜单", "show:menu")
     if (aliases.length === 0) {
+      const keyboard = new InlineKeyboard().text("➕ 用法见 /alias add", "noop:alias").row().text("⬅️ 主菜单", "show:menu")
       return {
         text:
           "⚡ *快捷指令*\n\n还没有自定义指令。用 `/alias add 名称 指令内容` 创建，例如：\n`/alias add code 审查当前目录的代码`\n之后发送 `/code` 即可触发。",
         keyboard,
       }
     }
+    const keyboard = new InlineKeyboard()
     const lines = aliases.map((entry) => `• \`/${entry.name}\` → ${escapeMarkdown(clip(entry.expansion, 120) ?? "")}`)
-    for (const entry of aliases) {
+    const visible = aliases.slice(0, 16)
+    for (let i = 0; i < visible.length; i++) {
+      const entry = visible[i]!
       keyboard.text(`🗑 /${entry.name}`, `aliasdel:${entry.name}`)
+      if (i % 2 === 1 && i < visible.length - 1) keyboard.row()
     }
     keyboard.row().text("⬅️ 主菜单", "show:menu")
-    return { text: `⚡ *快捷指令*（${aliases.length}）\n\n${lines.join("\n")}\n\n点按钮删除，或发送 /alias add 新增。`, keyboard }
+    const overflow = aliases.length > visible.length ? `\n（仅显示前 ${visible.length} 个删除按钮，其余可用 /alias del <名称> 删除）` : ""
+    return { text: `⚡ *快捷指令*（${aliases.length}）\n\n${lines.join("\n")}${overflow}\n\n点按钮删除，或发送 /alias add 新增。`, keyboard }
   }
 
   schedulePanel(chatId: number, page = 1): Panel {

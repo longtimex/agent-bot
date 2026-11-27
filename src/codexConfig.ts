@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { parse } from "smol-toml"
+import { scrubEnv } from "./binPath.js"
+import { assertNotCloudMetadataUrl, readBoundedResponseText } from "./media.js"
 import { asRecord } from "./util.js"
 
 /**
@@ -49,14 +51,15 @@ export function readCodexConfig(): CodexConfig | undefined {
 
   const model = typeof root.model === "string" && root.model.trim() ? root.model.trim() : undefined
 
+  const safeEnv = scrubEnv(process.env)
   const providersRaw = asRecord(root.model_providers) ?? {}
   const providers: CodexProvider[] = Object.entries(providersRaw).flatMap(([id, value]) => {
     const spec = asRecord(value)
     if (!spec) return []
     const baseURL = typeof spec.base_url === "string" && spec.base_url.trim() ? spec.base_url.trim() : undefined
     const envKey = typeof spec.env_key === "string" && spec.env_key.trim() ? spec.env_key.trim() : undefined
-    // The key stays in the environment: it is read here, never copied into data/
-    const apiKey = envKey ? process.env[envKey]?.trim() : undefined
+    // Read only from the scrubbed child environment so ~/.codex/config.toml can never exfiltrate BOT_ONLY secrets
+    const apiKey = envKey && Object.hasOwn(safeEnv, envKey) ? safeEnv[envKey]?.trim() : undefined
     return [{ id, name: typeof spec.name === "string" && spec.name ? spec.name : id, baseURL, apiKey }]
   })
 
@@ -77,15 +80,19 @@ export function readCodexConfig(): CodexConfig | undefined {
 export async function fetchProviderModels(provider: CodexProvider, timeoutMs = 6_000): Promise<string[]> {
   if (!provider.baseURL) return []
   try {
-    const res = await fetch(`${provider.baseURL.replace(/\/+$/, "")}/models`, {
+    const target = `${provider.baseURL.replace(/\/+$/, "")}/models`
+    await assertNotCloudMetadataUrl(target)
+    const res = await fetch(target, {
       headers: provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {},
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
       return []
     }
-    const body = (await res.json()) as { data?: Array<{ id?: unknown }> }
+    const text = await readBoundedResponseText(res, 1024 * 1024)
+    const body = JSON.parse(text) as { data?: Array<{ id?: unknown }> }
     if (!Array.isArray(body?.data)) return []
     return body.data
       .map((entry) => (typeof entry?.id === "string" ? entry.id.trim() : ""))

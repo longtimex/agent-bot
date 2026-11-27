@@ -54,12 +54,21 @@ export class AuthFailureLimiter {
 
   recordFailure(key: string, now = Date.now()): AuthLimitDecision {
     let entry = this.#entries.get(key)
-    if (!entry || now - entry.windowStart >= this.#windowMs) {
+    // Check an active cooldown BEFORE expiring the shorter failure window, otherwise a
+    // failure after `windowMs` inside a longer `blockMs` clears the block prematurely.
+    if (entry && entry.blockedUntil > now) return this.#blocked(entry, now)
+    if (!entry || entry.blockedUntil !== 0 || now - entry.windowStart >= this.#windowMs) {
+      if (!entry) {
+        this.#pruneExpired(now)
+        if (this.#entries.size >= this.#maxKeys && !this.#evictUnblocked(now)) {
+          // Every slot is held by a live cooldown: refuse without evicting an active block
+          // and without handing the overflowing address unlimited free attempts.
+          return { allowed: false, retryAfterSec: Math.max(1, Math.ceil(this.#blockMs / 1000)) }
+        }
+      }
       entry = { failures: 0, windowStart: now, blockedUntil: 0 }
       this.#entries.set(key, entry)
-      this.#prune(now)
     }
-    if (entry.blockedUntil > now) return this.#blocked(entry, now)
 
     entry.failures += 1
     if (entry.failures < this.#maxFailures) return ALLOWED
@@ -91,7 +100,7 @@ export class AuthFailureLimiter {
     return this.#entries.size
   }
 
-  #prune(now: number): number {
+  #pruneExpired(now: number): number {
     let removed = 0
     for (const [key, entry] of this.#entries) {
       if (entry.blockedUntil > now) continue
@@ -99,25 +108,29 @@ export class AuthFailureLimiter {
       this.#entries.delete(key)
       removed++
     }
-    // Keep the cap without sacrificing live cooldowns first. A newly seen address
-    // whose window has not expired is exactly what address rotation produces, so
-    // insertion order alone would let it evict the attacker's own block. Expired
-    // records are already gone by here; prefer a non-blocked failure window, then
-    // the cooldown that expires soonest. Only when every slot is blocked must a
-    // block be dropped, which keeps memory bounded without pretending the server
-    // can track unlimited addresses.
+    return removed
+  }
+
+  #evictUnblocked(now: number): boolean {
+    for (const [key, entry] of this.#entries) {
+      if (entry.blockedUntil <= now) {
+        this.#entries.delete(key)
+        return true
+      }
+    }
+    return false
+  }
+
+  #prune(now: number): number {
+    const removed = this.#pruneExpired(now)
     while (this.#entries.size > this.#maxKeys) {
+      if (this.#evictUnblocked(now)) continue
       let victim: string | undefined
       let victimBlockedUntil = Infinity
       for (const [key, entry] of this.#entries) {
-        const blockedUntil = entry.blockedUntil > now ? entry.blockedUntil : 0
-        if (blockedUntil === 0) {
+        if (entry.blockedUntil < victimBlockedUntil) {
           victim = key
-          break
-        }
-        if (blockedUntil < victimBlockedUntil) {
-          victim = key
-          victimBlockedUntil = blockedUntil
+          victimBlockedUntil = entry.blockedUntil
         }
       }
       if (victim === undefined) break

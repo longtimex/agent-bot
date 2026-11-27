@@ -373,8 +373,8 @@ export class TelegramOpsCommands {
       }
       await this.#deps.sendPanel(chatId, await this.opsPanel())
     } catch (err) {
-      const detail = redactSecrets((err as Error).message)
-      this.#deps.log.error(`ops 备份数据 failed:`, this.#deps.maskToken(detail))
+      const detail = this.#deps.maskToken(redactSecrets((err as Error).message))
+      this.#deps.log.error(`ops 备份数据 failed:`, detail)
       await this.#deps.sendText(chatId, `❌ 备份数据失败：${escapeMarkdown(detail)}`)
     } finally {
       this.#opsRunning = ""
@@ -395,8 +395,8 @@ export class TelegramOpsCommands {
       await this.sendOpsResult(chatId, result)
       if (!restarting) await this.#deps.sendPanel(chatId, await this.opsPanel())
     } catch (err) {
-      const detail = redactSecrets((err as Error).message)
-      this.#deps.log.error(`ops ${label} failed:`, this.#deps.maskToken(detail))
+      const detail = this.#deps.maskToken(redactSecrets((err as Error).message))
+      this.#deps.log.error(`ops ${label} failed:`, detail)
       await this.#deps.sendText(chatId, `❌ ${escapeMarkdown(label)}失败：${escapeMarkdown(detail)}`)
     } finally {
       this.#opsRunning = ""

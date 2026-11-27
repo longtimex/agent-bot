@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import { createLogger, rotateLogIfNeeded, pruneRotatedLogs } from "../src/logger.js"
+import { createLogger, formatFatalError, rotateLogIfNeeded, pruneRotatedLogs } from "../src/logger.js"
 
 test("rotateLogIfNeeded copies and truncates an oversized log", () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-log-"))
@@ -83,4 +83,23 @@ test("createLogger keeps credentials out of every line it writes", () => {
   assert.ok(!text.includes("7654321098:AAHabcdEfghIjklMnopQrstUvwxYZ1234"), text)
   assert.ok(!text.includes("s3cret"), text)
   assert.ok(text.includes("provider add failed"), text)
+})
+
+test("formatFatalError scrubs runtime credentials beyond pattern-matched secrets", () => {
+  const err = new Error(
+    "startup failed with feishu=myFeishuAppSecret99, oc=opencodePassWord42, api=rawApiToken0123456789abcdef, enc=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=",
+  )
+  const out = formatFatalError(err, [
+    "myFeishuAppSecret99",
+    "opencodePassWord42",
+    "rawApiToken0123456789abcdef",
+    "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=",
+    // Short values should not corrupt ordinary numbers or tokens in stack traces
+    "1234",
+  ])
+  assert.ok(!out.includes("myFeishuAppSecret99"), out)
+  assert.ok(!out.includes("opencodePassWord42"), out)
+  assert.ok(!out.includes("rawApiToken0123456789abcdef"), out)
+  assert.ok(!out.includes("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU="), out)
+  assert.ok(out.includes("startup failed"), out)
 })

@@ -170,7 +170,7 @@ function fakeOpencode(prompts: Harness["prompts"], replies: string[]): FakeOpenc
     async deleteSession() {},
     async abortSession() {},
     async inputCapabilities() {
-      return { image: true, audio: true, pdf: true }
+      return { image: true, audio: true, video: false, pdf: true }
     },
     subscribeSession() {
       return () => {}
@@ -204,9 +204,9 @@ function routeDeps(
     schedules: h.bridge.sharedSchedules,
     store: { getEngine: () => "opencode", getModel: () => undefined } as never,
     registry: {} as never,
-    json: (_res, status, body) => replies.push({ status, body }),
+    json: (_res: unknown, status: number, body: unknown) => replies.push({ status, body }),
     readJsonBody: async () => bodies.shift() ?? {},
-  } as PersonalRouteDeps
+  } as unknown as PersonalRouteDeps
 }
 
 function request(method: string): Parameters<typeof routeReminders>[1] {
@@ -245,7 +245,7 @@ async function harness(options: {
           }
         : undefined,
     },
-    opencode: { url: "http://127.0.0.1:1", username: "opencode" },
+    opencode: { url: "http://127.0.0.1:1", username: "opencode", onDemand: false, idleStopMs: 0 },
     taskTimeoutMs: 600_000,
     taskMaxTimeoutMs: 600_000,
     maxReplyLength: 1500,
@@ -262,6 +262,7 @@ async function harness(options: {
     inboxDir: join(root, "inbox"),
     logLevel: "error",
     startupNotice: options.startupNotice ?? false,
+    encryption: { enabled: false },
   }
   const calls: FeishuCall[] = []
   const client = fakeFeishu(calls)
@@ -424,7 +425,7 @@ async function harness(options: {
     texts() {
       return calls.filter((call) => call.method === "send" && call.msgType === "interactive").map(messageContent)
     },
-    lastText() {
+    lastText(this: Harness) {
       return this.texts().at(-1) ?? ""
     },
     buttons() {

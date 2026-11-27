@@ -32,7 +32,9 @@ function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
  * that has not reached EOF still has another process holding the write end open.
  */
 function stdioDrained(child: ChildProcess): boolean {
-  return [child.stdout, child.stderr].every((stream) => !stream || stream.readableEnded || stream.destroyed)
+  // Only count real EOF (readableEnded), not a premature parent-side destroy(),
+  // so SIGKILL escalation stays armed until orphaned grandchildren release the pipes.
+  return [child.stdout, child.stderr].every((stream) => !stream || stream.readableEnded)
 }
 
 /** SIGTERM now, SIGKILL if the process is still alive after `graceMs`. */

@@ -41,6 +41,9 @@ import com.agentbot.app.ui.theme.TextTertiary
 /** Telegram's `/cc model` panel: custom OpenCode provider models and agent bindings. */
 @Composable
 fun ModelsScreen(vm: AppViewModel) {
+    LaunchedEffect(Unit) {
+        if (vm.agents.isEmpty()) vm.refreshAgentsQuietly()
+    }
     // OpenCode keeps its provider registry; every other engine gets a plain id list
     if (vm.agentModelEngine != "opencode") {
         AgentEngineModelsScreen(vm)
@@ -318,9 +321,9 @@ private fun AgentEngineModelsScreen(vm: AppViewModel) {
     val label = agent?.label ?: engine
     val relaySupported = agent?.relaySupported == true
 
-    LaunchedEffect(engine) {
+    LaunchedEffect(engine, relaySupported) {
         vm.loadAgentCustomModels(engine)
-        vm.loadAgentProvider(engine)
+        if (relaySupported) vm.loadAgentProvider(engine) else vm.clearLoadedAgentProvider()
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
@@ -428,6 +431,7 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
     var providerID by remember { mutableStateOf("") }
     var modelID by remember { mutableStateOf("") }
     var key by remember { mutableStateOf("") }
+    var keyEdited by remember { mutableStateOf(false) }
     var label by remember { mutableStateOf("") }
     var baseURL by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
@@ -478,7 +482,7 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                     value = modelID,
                     onValueChange = {
                         modelID = it
-                        if (key.isBlank()) key = it.substringAfterLast('/').lowercase()
+                        if (!keyEdited) key = it.substringAfterLast('/').lowercase()
                     },
                     placeholder = "模型 ID（如 gpt-4o）",
                     singleLine = true,
@@ -486,7 +490,10 @@ private fun CustomModelDialog(vm: AppViewModel, engine: String = "opencode", onD
                 if (isRegistry) {
                     AppTextField(
                         value = key,
-                        onValueChange = { key = it },
+                        onValueChange = {
+                            key = it
+                            keyEdited = it.isNotBlank()
+                        },
                         placeholder = "简称（默认取模型 ID 末段）",
                         singleLine = true,
                     )

@@ -8,7 +8,7 @@ import { channelOfChatId, type Channel, type ChannelIdResolver } from "./channel
 export interface AdminCommandDeps {
   cfg: BotConfig
   ops: OpsService
-  ownerChatId?: number
+  ownerChatId?: number | (() => number | undefined)
   timezone: () => string
   applyLiveEnv: (key: string, value: string) => void
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
@@ -134,11 +134,15 @@ export class TelegramAdminCommands {
 
   /** HTTP API counterpart of `/access add`; the owner can never remove themselves. */
   addAccess(ids: string[]): { ok: boolean; message: string } {
-    return this.mutateAccess(true, ids, this.#deps.ownerChatId)
+    return this.mutateAccess(true, ids, this.#ownerChatId())
   }
 
   removeAccess(ids: string[]): { ok: boolean; message: string } {
-    return this.mutateAccess(false, ids, this.#deps.ownerChatId)
+    return this.mutateAccess(false, ids, this.#ownerChatId())
+  }
+
+  #ownerChatId(): number | undefined {
+    return typeof this.#deps.ownerChatId === "function" ? this.#deps.ownerChatId() : this.#deps.ownerChatId
   }
 
   /** Lockout guards shared by the `/access` command and its remove buttons. */

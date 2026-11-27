@@ -76,6 +76,11 @@ fun OpsScreen(vm: AppViewModel) {
             },
         )
 
+        PageErrorNotice(
+            message = vm.connectionError,
+            onDismiss = { vm.connectionError = null },
+        )
+
         if (vm.opsBusy || busyLabel != null) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
                 LoadingBar()
@@ -280,6 +285,7 @@ private fun ServiceCard(
             confirmLabel = "保存",
             placeholder = "http://127.0.0.1:4096",
             maxLines = 1,
+            allowBlank = true,
             onDismiss = { editingUrl = false },
             onConfirm = { input ->
                 vm.saveOpencodeUrl(input)

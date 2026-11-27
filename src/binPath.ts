@@ -43,10 +43,19 @@ export function extendedPath(envPath = process.env.PATH ?? "", home = homedir())
 
 /**
  * Child-process environment with the extended PATH applied. Keeps the real PATH entries first so a
- * system-wide install still wins over a per-user one.
+ * system-wide install still wins over a per-user one. Preserves case-insensitive `Path` on Windows.
  */
 export function extendedEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  return { ...env, PATH: extendedPath(env.PATH ?? "") }
+  const out: Record<string, string | undefined> = { ...env }
+  if (process.platform === "win32") {
+    const pathKey = Object.keys(out).find((key) => key.toUpperCase() === "PATH")
+    const current = pathKey ? (out[pathKey] ?? "") : ""
+    if (pathKey && pathKey !== "PATH") delete out[pathKey]
+    out.PATH = extendedPath(current)
+    return out
+  }
+  out.PATH = extendedPath(out.PATH ?? "")
+  return out
 }
 
 /**
@@ -61,10 +70,11 @@ const BOT_ONLY = new Set([
   "TELEGRAM_ALLOW_USERS",
   "TELEGRAM_ALLOW_ALL_USERS",
   // The Feishu app secret can mint tenant tokens for the bot's own app, and the
-  // whitelist names who may drive it. Neither is a provider credential an engine
-  // has any use for.
+  // whitelist / callback secrets protect inbound webhooks. None is a provider credential.
   "FEISHU_APP_ID",
   "FEISHU_APP_SECRET",
+  "FEISHU_CALLBACK_VERIFICATION_TOKEN",
+  "FEISHU_CALLBACK_ENCRYPT_KEY",
   "FEISHU_ALLOW_OPEN_IDS",
   "FEISHU_ALLOW_ALL_USERS",
   "OPENCODE_SERVER_USERNAME",
@@ -79,7 +89,8 @@ const BOT_ONLY = new Set([
   "SNIPER_PASSWORD",
 ])
 
-const CREDENTIAL_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i
+const CREDENTIAL_NAME =
+  /(API[_-]?KEY|ENCRYPT[_-]?KEY|PRIVATE[_-]?KEY|SIGNING[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i
 
 /**
  * Environment for a child process: PATH extended, the bot's own credentials removed.
@@ -93,8 +104,10 @@ export function scrubEnv(
   dropCredentials = false,
 ): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {}
+  const caseInsensitive = process.platform === "win32"
   for (const [name, value] of Object.entries(env)) {
-    if (value === undefined || BOT_ONLY.has(name)) continue
+    if (value === undefined) continue
+    if (BOT_ONLY.has(name) || (caseInsensitive && BOT_ONLY.has(name.toUpperCase()))) continue
     if (dropCredentials && CREDENTIAL_NAME.test(name)) continue
     out[name] = value
   }
@@ -103,6 +116,17 @@ export function scrubEnv(
 
 export function childEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   return extendedEnv(scrubEnv(env))
+}
+
+/**
+ * Environment for `opencode serve`: strips all bot-only secrets (Telegram/Feishu/API tokens)
+ * while retaining only OpenCode's own HTTP Basic auth variables when configured.
+ */
+export function opencodeServerEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const out = childEnv(env)
+  if (env.OPENCODE_SERVER_USERNAME !== undefined) out.OPENCODE_SERVER_USERNAME = env.OPENCODE_SERVER_USERNAME
+  if (env.OPENCODE_SERVER_PASSWORD !== undefined) out.OPENCODE_SERVER_PASSWORD = env.OPENCODE_SERVER_PASSWORD
+  return out
 }
 
 export function installerChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {

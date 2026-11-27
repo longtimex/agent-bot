@@ -21,6 +21,10 @@ export interface CustomAgentModel {
   baseURL?: string
 }
 
+interface StoredCustomAgentModel extends CustomAgentModel {
+  secret?: string
+}
+
 /** A model's own endpoint plus its decrypted key, ready to become env vars. */
 export interface CustomModelEndpoint {
   baseURL: string
@@ -30,6 +34,31 @@ export interface CustomModelEndpoint {
 const MAX_PER_ENGINE = 40
 const VALUE_MAX = 120
 const LABEL_MAX = 60
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
+function toPublicModel(entry: StoredCustomAgentModel): CustomAgentModel {
+  return {
+    value: entry.value,
+    label: entry.label,
+    ...(entry.baseURL ? { baseURL: entry.baseURL } : {}),
+  }
+}
+
+function validateModelBaseUrl(raw: string): string {
+  const trimmed = raw.trim()
+  if (CONTROL_CHARS.test(trimmed)) throw new Error("baseURL 不能包含控制字符")
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error("baseURL 格式不合法")
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("baseURL 需要以 http:// 或 https:// 开头")
+  }
+  return trimmed
+}
 
 export class AgentCustomModelStore {
   readonly #path: string
@@ -45,10 +74,11 @@ export class AgentCustomModelStore {
 
   /** Endpoint attached to one model, decrypted; undefined when it has none of its own. */
   endpointFor(engine: string, value: string): CustomModelEndpoint | undefined {
-    const entry = this.#load()[engine]?.find((model) => model.value === value)
+    const loaded = this.#load()
+    const list = Object.hasOwn(loaded, engine) ? loaded[engine] : undefined
+    const entry = list?.find((model) => model.value === value)
     if (!entry?.baseURL) return undefined
-    const secret = (entry as CustomAgentModel & { secret?: string }).secret
-    const apiKey = secret ? this.#decrypt(secret, engine) : undefined
+    const apiKey = entry.secret ? this.#decrypt(entry.secret, engine) : undefined
     return { baseURL: entry.baseURL, ...(apiKey ? { apiKey } : {}) }
   }
 
@@ -69,34 +99,42 @@ export class AgentCustomModelStore {
   }
 
   all(): Record<string, CustomAgentModel[]> {
-    return this.#load()
+    const out: Record<string, CustomAgentModel[]> = {}
+    for (const [engine, list] of Object.entries(this.#load())) {
+      out[engine] = list.map(toPublicModel)
+    }
+    return out
   }
 
   list(engine: string): CustomAgentModel[] {
-    return this.#load()[engine] ?? []
+    const loaded = this.#load()
+    return (Object.hasOwn(loaded, engine) ? loaded[engine]! : []).map(toPublicModel)
   }
 
   add(engine: string, model: CustomAgentModel & { apiKey?: string }): CustomAgentModel[] {
     const value = model.value.trim().slice(0, VALUE_MAX)
     const label = model.label.trim().slice(0, LABEL_MAX) || value
     if (!value) throw new Error("模型 ID 不能为空")
-    const baseURL = model.baseURL?.trim()
-    const entry: CustomAgentModel & { secret?: string } = { value, label }
+    if (value.startsWith("-") || /\s/.test(value) || CONTROL_CHARS.test(value)) {
+      throw new Error("模型 ID 不能以 - 开头或包含空白/控制字符")
+    }
+    const baseURL = model.baseURL?.trim() ? validateModelBaseUrl(model.baseURL) : undefined
+    const entry: StoredCustomAgentModel = { value, label }
     if (baseURL) entry.baseURL = baseURL
     // Only the URL without a key is meaningless, so a key is stored next to it, encrypted
     if (baseURL && model.apiKey) entry.secret = encryptPayload(this.#keyBuffer(), model.apiKey)
     return this.#mutate((data) => {
-      const current = data[engine] ?? []
+      const current = Object.hasOwn(data, engine) ? data[engine]! : []
       // Re-adding the same value updates its label instead of creating a duplicate entry
       const next = [...current.filter((item) => item.value !== value), entry].slice(-MAX_PER_ENGINE)
       data[engine] = next
-      return { result: next, changed: true }
+      return { result: next.map(toPublicModel), changed: true }
     })
   }
 
   remove(engine: string, value: string): boolean {
     return this.#mutate((data) => {
-      const current = data[engine] ?? []
+      const current = Object.hasOwn(data, engine) ? data[engine]! : []
       const next = current.filter((entry) => entry.value !== value)
       if (next.length === current.length) return { result: false, changed: false }
       if (next.length > 0) data[engine] = next
@@ -111,7 +149,7 @@ export class AgentCustomModelStore {
    * the other had just added. Reading inside the lock makes each edit apply to the latest file.
    */
   #mutate<T>(
-    fn: (data: Record<string, CustomAgentModel[]>) => { result: T; changed: boolean },
+    fn: (data: Record<string, StoredCustomAgentModel[]>) => { result: T; changed: boolean },
   ): T {
     return withFileLock(this.#path, () => {
       const data = this.#load()
@@ -121,19 +159,19 @@ export class AgentCustomModelStore {
     })
   }
 
-  #load(): Record<string, CustomAgentModel[]> {
+  #load(): Record<string, StoredCustomAgentModel[]> {
     const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
     const engines = asRecord(raw?.engines)
-    if (!engines) return {}
-    const result: Record<string, CustomAgentModel[]> = {}
+    const result = Object.create(null) as Record<string, StoredCustomAgentModel[]>
+    if (!engines) return result
     for (const [engine, entries] of Object.entries(engines)) {
       if (!Array.isArray(entries)) continue
-      const models: CustomAgentModel[] = []
+      const models: StoredCustomAgentModel[] = []
       for (const entry of entries) {
         const record = asRecord(entry)
         const value = typeof record?.value === "string" ? record.value.trim() : ""
         if (!value) continue
-        const model: CustomAgentModel & { secret?: string } = {
+        const model: StoredCustomAgentModel = {
           value,
           label: typeof record?.label === "string" && record.label ? record.label : value,
         }
@@ -146,7 +184,7 @@ export class AgentCustomModelStore {
     return result
   }
 
-  #save(data: Record<string, CustomAgentModel[]>): void {
+  #save(data: Record<string, StoredCustomAgentModel[]>): void {
     writePrivateAtomic(
       this.#path,
       `${JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), engines: data }, null, 2)}\n`,

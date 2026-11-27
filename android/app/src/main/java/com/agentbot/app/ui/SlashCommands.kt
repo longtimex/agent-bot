@@ -17,9 +17,9 @@ internal val ONE_OFF_WORDS = setOf("engine", "engine!", "model!")
  * is never submitted to the AI as a prompt.
  */
 internal val SLASH_COMMANDS = setOf(
-    "start", "menu", "help", "new", "sessions", "undo", "secrets", "stop", "retry", "queue", "history", "export",
-    "status", "usage", "report", "id", "api", "agent", "agents", "model", "dir", "timezone",
-    "remind", "reminders", "cancel", "schedule", "env", "access", "alias", "account", "proxy",
+    "start", "menu", "help", "new", "sessions", "diff", "undo", "commit", "secrets", "stop", "retry", "queue", "history", "export",
+    "status", "usage", "budget", "report", "id", "api", "agent", "agents", "model", "dir", "timezone",
+    "remind", "reminders", "cancel", "schedule", "approvals", "hooks", "env", "access", "alias", "account", "proxy",
     "cc", "magpie", "ops", "logs", "diag", "update", "restart", "service",
 )
 
@@ -97,12 +97,23 @@ internal fun matchCcQuery(
     return null
 }
 
+private val SHELL_WORD_RE = Regex("\"([^\"]*)\"|'([^']*)'|(\\S+)")
+
+/** Quote-aware tokenizer matching Telegram's `/cc` and `/magpie` command parsers. */
+internal fun tokenizeShellWords(words: String): List<String> =
+    SHELL_WORD_RE.findAll(words)
+        .map { match ->
+            match.groups[1]?.value ?: match.groups[2]?.value ?: match.groups[3]?.value ?: ""
+        }
+        .filter { it.isNotEmpty() }
+        .toList()
+
 /**
  * The argv Telegram hands to cc-switch for `/cc run provider list`: one entry per word, and
  * the leading `run` word is Telegram's own, so it never reaches the CLI.
  */
 internal fun ccRawArgv(words: String): List<String> =
-    words.split(SLASH_SPACES).filter { it.isNotBlank() }
+    tokenizeShellWords(words)
         .let { if (it.firstOrNull()?.lowercase() == "run") it.drop(1) else it }
 
 /**
@@ -131,7 +142,9 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
             // `/sessions 发布` opens the list already filtered, like Telegram's search
             vm.updateArchivedQuery(arg)
         }
+        "diff" -> vm.navigate(Screen.Workspace)
         "undo" -> vm.undoChanges()
+        "commit" -> if (arg.isNotBlank()) vm.commitChanges(arg) else vm.navigate(Screen.Workspace)
         "secrets" -> if (arg.lowercase() in CLEAR_WORDS) vm.clearSecrets() else vm.showSecrets()
         "stop" -> vm.stop()
         "retry" -> vm.retryLastTask()
@@ -159,7 +172,44 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
 
         "status" -> vm.navigate(Screen.Status)
         "usage" -> vm.navigate(Screen.Status)
+        "budget" -> {
+            val parts = arg.trim().lowercase().split(SLASH_SPACES).filter { it.isNotBlank() }
+            when {
+                parts.isEmpty() -> vm.navigate(Screen.Status)
+                parts[0] in CLEAR_WORDS || parts[0] == "0" -> {
+                    vm.updateBudget(0.0, 0.0) { vm.navigate(Screen.Status) }
+                }
+                parts[0] in setOf("month", "monthly", "月") && parts.size >= 2 -> {
+                    val amount = parts[1].removePrefix("$").toDoubleOrNull()
+                    if (amount != null && amount >= 0) {
+                        vm.updateBudget(null, amount) { vm.navigate(Screen.Status) }
+                    } else {
+                        vm.showToast("用法：/budget month <美元>")
+                        vm.navigate(Screen.Status)
+                    }
+                }
+                else -> {
+                    val raw = if (parts[0] in setOf("day", "daily", "日") && parts.size >= 2) parts[1] else parts[0]
+                    val amount = raw.removePrefix("$").toDoubleOrNull()
+                    if (amount != null && amount >= 0) {
+                        vm.updateBudget(amount, null) { vm.navigate(Screen.Status) }
+                    } else {
+                        vm.showToast("用法：/budget <每日美元> | /budget month <每月美元> | /budget off")
+                        vm.navigate(Screen.Status)
+                    }
+                }
+            }
+        }
         "report" -> vm.navigate(Screen.Status)
+        "approvals" -> {
+            val mode = arg.trim().lowercase()
+            if (mode in setOf("auto", "strict", "off")) {
+                vm.setApprovalMode(mode) { vm.navigate(Screen.Approvals) }
+            } else {
+                vm.navigate(Screen.Approvals)
+            }
+        }
+        "hooks" -> vm.navigate(Screen.Webhooks)
         "id" -> vm.navigate(Screen.Status)
         "api" -> vm.navigate(Screen.Settings)
 
@@ -217,12 +267,15 @@ internal fun applySlashCommand(vm: AppViewModel, name: String, arg: String) {
         }
 
         "schedule" -> {
-            val rest = arg.removePrefix("add").trim()
-            if ((arg.startsWith("add") || arg.startsWith("新增")) && rest.isNotBlank()) {
-                vm.addSchedule(rest)
-            } else {
-                vm.navigate(Screen.Schedules)
+            val trimmed = arg.trim()
+            val rest = when {
+                trimmed.startsWith("add", ignoreCase = true) && (trimmed.length == 3 || trimmed[3].isWhitespace()) ->
+                    trimmed.drop(3).trim()
+                trimmed.startsWith("新增") && (trimmed.length == 2 || trimmed[2].isWhitespace()) ->
+                    trimmed.drop(2).trim()
+                else -> ""
             }
+            if (rest.isNotBlank()) vm.addSchedule(rest) else vm.navigate(Screen.Schedules)
         }
 
         "env" -> {
@@ -383,7 +436,7 @@ internal fun applyOneOffSlashCommand(vm: AppViewModel, name: String, arg: String
             vm.requestPinPicker()
             true
         }
-        isResetWord(arg) && vm.oneOffModels.matchModel(arg.trim().lowercase()) == null -> {
+        isResetWord(arg) && vm.pinPickerModels.matchModel(arg.trim().lowercase()) == null -> {
             vm.updateOneOffModel(null)
             true
         }

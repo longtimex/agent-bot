@@ -39,7 +39,7 @@ function makeDeps(overrides: Partial<FakeOc> = {}): { deps: EngineCallDeps; stor
       return `回复:${text}`
     },
   }
-  const agents = { prompt: async (_key, _engine, text) => `CLI:${text}` }
+  const agents = { prompt: async (_key: string, _engine: string, text: string) => `CLI:${text}` }
   const deps: EngineCallDeps = {
     oc: oc as unknown as EngineCallDeps["oc"],
     agents: agents as unknown as EngineCallDeps["agents"],
@@ -150,7 +150,7 @@ test("OpenCode omits model from the request unless one was explicitly selected",
 test("a CLI engine is told that binary attachments did not travel with the prompt", async () => {
   const captured: Array<{ text: string }> = []
   const { deps } = makeDeps()
-  ;(deps.agents as unknown as { prompt: (...args: unknown[]) => Promise<string> }).prompt = async (
+  ;(deps.agents as unknown as { prompt: (key: string, engine: string, text: string) => Promise<string> }).prompt = async (
     _key: string,
     _engine: string,
     text: string,

@@ -4,10 +4,10 @@ import { supportsRelay, type AgentProviderStore } from "./agentProviders.js"
 import { asRecord } from "./util.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import { customModelView } from "./apiPersonal.js"
+import { assertNotCloudMetadataUrl, readBoundedResponseText } from "./media.js"
 import type { ModelAdmin } from "./modelAdmin.js"
 
-/** Metadata services answer unauthenticated requests with instance credentials. */
-const BLOCKED_PROBE_HOSTS = new Set(["169.254.169.254", "metadata.google.internal", "100.100.100.200"])
+const MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
 
 export interface ModelRouteDeps {
   models: ModelAdmin
@@ -41,15 +41,10 @@ export async function routeModelTest(deps: ModelRouteDeps, ctx: ApiRequestContex
   if (!/^https?:\/\//i.test(baseURL)) throw new ApiError(400, "baseURL 需要以 http:// 或 https:// 开头")
   // The probe makes the server fetch a user-supplied URL. Private ranges stay allowed on
   // purpose (a local relay is the normal case), but cloud metadata endpoints never are.
-  const host = (() => {
-    try {
-      return new URL(baseURL).hostname.toLowerCase()
-    } catch {
-      return ""
-    }
-  })()
-  if (BLOCKED_PROBE_HOSTS.has(host)) {
-    throw new ApiError(400, "该地址是云主机元数据端点，拒绝探测；请填写模型服务的实际地址")
+  try {
+    await assertNotCloudMetadataUrl(`${baseURL}/models`)
+  } catch (err) {
+    throw new ApiError(400, err instanceof Error ? err.message : "baseURL 不合法")
   }
 
   const controller = new AbortController()
@@ -57,9 +52,10 @@ export async function routeModelTest(deps: ModelRouteDeps, ctx: ApiRequestContex
   try {
     const res = await fetch(`${baseURL}/models`, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      redirect: "error",
       signal: controller.signal,
     })
-    const text = await res.text()
+    const text = await readBoundedResponseText(res, MAX_PROBE_RESPONSE_BYTES)
     if (res.status === 404 || res.status === 405) {
       deps.json(ctx.res, 200, {
         ok: true,

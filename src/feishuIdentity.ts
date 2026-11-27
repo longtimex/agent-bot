@@ -160,17 +160,27 @@ export class FeishuIdentityStore {
     this.#save()
   }
 
-  ownerChatId(): number | undefined {
+  ownerChatId(isAllowed?: (openId: string) => boolean): number | undefined {
     for (const record of Object.values(this.#state.chats)) {
-      if (record.ownerNumericId !== undefined) return record.numericId
+      if (record.ownerNumericId === undefined) continue
+      if (isAllowed) {
+        const openId = this.userOpenId(record.ownerNumericId)
+        if (!openId || !isAllowed(openId)) continue
+      }
+      return record.numericId
     }
     return undefined
   }
 
   /** The user identity paired with the notification chat, not the chat's own id. */
-  ownerUserId(): number | undefined {
+  ownerUserId(isAllowed?: (openId: string) => boolean): number | undefined {
     for (const record of Object.values(this.#state.chats)) {
-      if (record.ownerNumericId !== undefined) return record.ownerNumericId
+      if (record.ownerNumericId === undefined) continue
+      if (isAllowed) {
+        const openId = this.userOpenId(record.ownerNumericId)
+        if (!openId || !isAllowed(openId)) continue
+      }
+      return record.ownerNumericId
     }
     return undefined
   }

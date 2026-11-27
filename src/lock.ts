@@ -177,7 +177,22 @@ export function acquireLock(path: string, log: Logger): () => void {
     try {
       writeFileSync(staging, owner, { mode: 0o600 })
       try {
-        linkSync(staging, path)
+        try {
+          linkSync(staging, path)
+        } catch (linkErr) {
+          const code = (linkErr as NodeJS.ErrnoException).code
+          if (code === "EPERM" || code === "ENOTSUP" || code === "EXDEV") {
+            const fd = openSync(path, "wx", 0o600)
+            try {
+              writeSync(fd, owner)
+              fsyncSync(fd)
+            } finally {
+              closeSync(fd)
+            }
+          } else {
+            throw linkErr
+          }
+        }
       } finally {
         try {
           unlinkSync(staging)
@@ -188,10 +203,36 @@ export function acquireLock(path: string, log: Logger): () => void {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
 
-      // Reclaim the existing lock by moving it aside: rename() is atomic, so only one
-      // of several concurrently starting processes can take the stale file. Deleting
-      // it in place would let a second starter unlink the fresh lock the first one has
-      // just linked, and both would then run.
+      // Check liveness BEFORE moving the lock aside: renaming a live owner's lock opens
+      // a window where `path` does not exist and a third process could start concurrently.
+      let existing = ""
+      try {
+        existing = readFileSync(path, "utf8").trim()
+      } catch (readErr) {
+        if ((readErr as NodeJS.ErrnoException).code === "ENOENT") continue
+        throw readErr
+      }
+      if (!parseLock(existing)) {
+        // Give an openSync("wx") writer a brief moment to write its PID before treating an
+        // empty/malformed file as an abandoned lock left behind by a crash.
+        sleepSync(15)
+        try {
+          existing = readFileSync(path, "utf8").trim()
+        } catch (readErr) {
+          if ((readErr as NodeJS.ErrnoException).code === "ENOENT") continue
+          throw readErr
+        }
+      }
+      const emptyStale = !parseLock(existing)
+      if (!emptyStale && !isStaleLock(path, existing)) {
+        const liveOwner = parseLock(existing)
+        throw new Error(
+          `已有实例正在运行（PID ${liveOwner?.pid ?? existing}，锁文件 ${path}）。如需重启请执行 npm run restart。`,
+        )
+      }
+
+      // Only stale locks are moved aside; re-verify after the atomic rename in case a
+      // live peer replaced the stale file between our read and rename.
       const claim = `${path}.claim.${process.pid}.${Date.now().toString(36)}`
       try {
         renameSync(path, claim)
@@ -207,9 +248,8 @@ export function acquireLock(path: string, log: Logger): () => void {
       } catch {
         // treat an unreadable claim as stale
       }
-      const ownerInfo = parseLock(content)
-      const sameProcess = !ownerInfo?.start || !processStartTime(ownerInfo.pid) || ownerInfo.start === processStartTime(ownerInfo.pid)
-      if (ownerInfo && isAlive(ownerInfo.pid) && sameProcess) {
+      if (parseLock(content) && !isStaleLock(claim, content)) {
+        const ownerInfo = parseLock(content)
         // We raced with a lock that was fresh after all: put it back, unless a third
         // process has linked its own lock in the meantime.
         try {
@@ -222,7 +262,9 @@ export function acquireLock(path: string, log: Logger): () => void {
         } catch {
           // claim already gone
         }
-        throw new Error(`已有实例正在运行（PID ${ownerInfo.pid}，锁文件 ${path}）。如需重启请执行 npm run restart。`)
+        throw new Error(
+          `已有实例正在运行（PID ${ownerInfo?.pid ?? content}，锁文件 ${path}）。如需重启请执行 npm run restart。`,
+        )
       }
 
       log.warn(`removing stale lock file ${path} (owner ${content || "unknown"})`)

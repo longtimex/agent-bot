@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
@@ -28,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.agentbot.app.data.MagpieSpec
 import com.agentbot.app.ui.theme.AppSpacing
@@ -42,6 +44,7 @@ import com.agentbot.app.ui.theme.TextTertiary
 @Composable
 fun MagpieScreen(vm: AppViewModel) {
     var running by remember { mutableStateOf(false) }
+    var addingProvider by remember { mutableStateOf(false) }
     var targetFor by remember { mutableStateOf<MagpieSpec?>(null) }
     var commandTarget by remember { mutableStateOf<MagpieSpec?>(null) }
     val overview = vm.magpie
@@ -53,6 +56,11 @@ fun MagpieScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = AppSpacing.screen),
             onBack = { vm.navigate(Screen.Chat) },
             trailing = {
+                AppIconButton(
+                    icon = Icons.Filled.Add,
+                    contentDescription = "添加 Provider",
+                    onClick = { addingProvider = true },
+                )
                 AppIconButton(
                     icon = Icons.Filled.PlayArrow,
                     contentDescription = "执行 magpie 命令",
@@ -254,14 +262,57 @@ fun MagpieScreen(vm: AppViewModel) {
 
             item {
                 Text(
-                    "提示：可直接输入 magpie 参数，例如 providers、quota、agent claude deepseek/deepseek-chat。" +
-                        "需要桌面或交互的命令会被服务器拒绝。",
+                    "提示：可直接输入 magpie 参数，例如 providers、quota、claude deepseek/deepseek-chat。" +
+                        "添加带密钥的 Provider 请点右上角「＋」，密钥不会回显。需要桌面或交互的命令会被服务器拒绝。",
                     color = TextTertiary,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
         }
+    }
+
+    if (addingProvider) {
+        var preset by remember { mutableStateOf("") }
+        var apiKey by remember { mutableStateOf("") }
+        AppDialog(
+            onDismissRequest = { addingProvider = false },
+            title = { Text("添加 magpie Provider", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "密钥通过专用接口提交，服务端会自动打码且不回显。预设名称可先查看「内置供应商模板」。",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    AppTextField(
+                        value = preset,
+                        onValueChange = { preset = it },
+                        singleLine = true,
+                        placeholder = "预设名称（如 deepseek、openai、kimi）",
+                    )
+                    AppTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        singleLine = true,
+                        placeholder = "API Key",
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.addMagpieProvider(preset, apiKey)
+                        addingProvider = false
+                    },
+                    enabled = preset.isNotBlank() && apiKey.isNotBlank() && !vm.magpieBusy,
+                ) { Text("添加") }
+            },
+            dismissButton = {
+                TextButton(onClick = { addingProvider = false }) { Text("取消") }
+            },
+        )
     }
 
     if (running) {

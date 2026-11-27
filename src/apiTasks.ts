@@ -6,7 +6,7 @@ import { ApiError } from "./apiCore.js"
 import type { AgentCliService } from "./agentCli.js"
 import type { AgentModelCatalog } from "./agentModelCatalog.js"
 import { buildAttachmentSections } from "./attachmentInput.js"
-import { multipartParts, readMultipartPart } from "./multipart.js"
+import { drainMultipartPart, multipartParts, readMultipartPart } from "./multipart.js"
 import {
   attachmentKind,
   isTextAttachment,
@@ -36,6 +36,8 @@ import { JobJournal } from "./jobJournal.js"
 import { extractSecretRequests } from "./secretRequests.js"
 import { activeSecretVault, maskSecretValues } from "./secretVault.js"
 import { recoveredTasks, storedTask, type StoredApiTask } from "./apiTaskJournal.js"
+import { formatAppTaskNotice, type ChatTranscriptStore } from "./chatTranscript.js"
+import type { SettingsStore } from "./settings.js"
 
 const MAX_API_ATTACHMENTS = 4
 const MIME_RE = /^[\w.+-]+\/[\w.+-]+$/
@@ -57,6 +59,9 @@ export interface TaskManagerDeps {
   ownerChatId?: number | (() => number | undefined)
   fetchMedia?: (target: string) => Promise<Buffer>
   appKey: string
+  transcripts?: ChatTranscriptStore
+  settings?: SettingsStore
+  notifyOwner?: (text: string) => Promise<void>
 }
 
 export class ApiTaskManager {
@@ -212,14 +217,13 @@ export class ApiTaskManager {
         }
         const index = /^file(\d+)$/.exec(part.name)?.[1]
         if (index === undefined) {
-          await readMultipartPart(part.data)
+          await drainMultipartPart(part.data)
           continue
         }
         fileCount += 1
         if (fileCount > MAX_API_ATTACHMENTS) {
-          // Drain this part so the parser reaches the boundary, then reject the
-          // request. The first four files are removed by the catch below.
-          await readMultipartPart(part.data)
+          // Drain this part without buffering so the parser reaches the boundary cleanly.
+          await drainMultipartPart(part.data)
           throw new ApiError(400, `附件最多 ${MAX_API_ATTACHMENTS} 个`)
         }
 
@@ -227,7 +231,7 @@ export class ApiTaskManager {
         const mime = part.contentType?.trim() || "application/octet-stream"
         if (!MIME_RE.test(mime)) {
           failed.push(`${name}: mime 无效`)
-          await readMultipartPart(part.data)
+          await drainMultipartPart(part.data)
           continue
         }
         try {
@@ -289,8 +293,15 @@ export class ApiTaskManager {
     }
   }
 
-  /** Submits already-persisted attachments, used by the multipart path. */
-  async submitSaved(text: string, engineOverride?: string, modelOverride?: string, saved?: SavedAttachment[], failed: string[] = []): Promise<ApiTask> {
+  /** Submits already-persisted attachments, used by the multipart and retry paths. */
+  async submitSaved(
+    text: string,
+    engineOverride?: string,
+    modelOverride?: string,
+    saved?: SavedAttachment[],
+    failed: string[] = [],
+    discardOnError = true,
+  ): Promise<ApiTask> {
     try {
       if (this.waitingCount() >= MAX_API_QUEUE) {
         throw new ApiError(409, `待处理消息过多（最多排队 ${MAX_API_QUEUE} 条），请等待当前任务完成或发送 /stop 取消。`)
@@ -299,7 +310,7 @@ export class ApiTaskManager {
       const promptText = failed.length > 0 ? [text, `[附件处理失败]\n${failed.join("\n")}`].filter(Boolean).join("\n\n") : text
       return this.#submit(text, modelOverride, saved ?? [], promptText, selection)
     } catch (err) {
-      this.#discardSaved(saved)
+      if (discardOnError) this.#discardSaved(saved)
       throw err
     }
   }
@@ -432,6 +443,7 @@ export class ApiTaskManager {
     let outcome: UsageOutcome = "failed"
     let modelLabel: string | undefined
     let failureDetail: string | undefined
+    let tokenUsage: import("./tokenUsage.js").TokenUsage | undefined
 
     try {
       let opencodeModel: ResolvedModel | undefined
@@ -475,6 +487,7 @@ export class ApiTaskManager {
           task.partial = text
           this.#emitTask(task)
         },
+        onUsage: (u) => { tokenUsage = u },
       })
       // `[[secret: NAME]]` becomes a card in the App instead of text the user has to decode
       const asked = extractSecretRequests(reply)
@@ -505,17 +518,21 @@ export class ApiTaskManager {
       task.controller = undefined
       // The preview has done its job: the reply (or the error) is what the bubble shows now
       task.partial = undefined
-      this.#deps.usage.record(task.key, { engine, model: modelLabel, ms: Date.now() - started, outcome })
+      const promptForLog = task.text || this.#attachmentSummary(task.savedAttachments)
+      const elapsedMs = Date.now() - started
+      this.#deps.usage.record(task.key, { engine, model: modelLabel, ms: elapsedMs, outcome, tokens: tokenUsage })
       this.#deps.history.record(task.key, {
-        prompt: task.text || this.#attachmentSummary(task.savedAttachments),
-        engine,
-        model: modelLabel,
-        ms: Date.now() - started,
-        outcome,
+        prompt: promptForLog, engine, model: modelLabel, ms: elapsedMs, outcome,
         errorCode: outcome === "ok" ? undefined : (task.errorCode ?? classifyTaskError(failureDetail ?? "")),
-        detail: failureDetail,
-        scheduled: false,
+        detail: failureDetail, scheduled: false,
       })
+      if (this.#deps.transcripts && outcome === "ok") {
+        this.#deps.transcripts.append(task.key, { role: "user", text: promptForLog, engine, model: modelLabel })
+        this.#deps.transcripts.append(task.key, { role: "assistant", text: task.reply ?? "", engine, model: modelLabel })
+      }
+      if (this.#deps.settings?.notifyChatOnAppTask && this.#deps.notifyOwner && outcome !== "cancelled") {
+        void this.#deps.notifyOwner(formatAppTaskNotice({ engine, model: modelLabel, ms: elapsedMs, outcome, prompt: promptForLog, reply: task.reply, error: failureDetail })).catch(() => {})
+      }
       logApiTaskTerminal(
         {
           log: this.#deps.log,
@@ -535,15 +552,7 @@ export class ApiTaskManager {
   #attachmentSummary(attachments?: SavedAttachment[]): string {
     const kinds: string[] = []
     for (const item of attachments ?? []) {
-      const kind = item.kind === "image"
-        ? "图片"
-        : item.kind === "audio"
-          ? "语音"
-          : item.kind === "video"
-            ? "视频"
-            : item.mime === "application/pdf"
-              ? "PDF"
-              : "文件"
+      const kind = item.kind === "image" ? "图片" : item.kind === "audio" ? "语音" : item.kind === "video" ? "视频" : item.mime === "application/pdf" ? "PDF" : "文件"
       if (!kinds.includes(kind)) kinds.push(kind)
     }
     return kinds.length > 0 ? `（${kinds.join("、")}）` : ""
@@ -805,9 +814,7 @@ export class ApiTaskManager {
         )
       }
     } else {
-      // The path was safe when the reply settled, not necessarily now: outbox files
-      // are writable during the task's lifetime. Re-run the same containment, file
-      // type and size checks against the current path before reading anything.
+      // Re-run containment, type and size checks on current outbox path before reading.
       let resolved: ReturnType<typeof resolveMedia>
       try {
         resolved = resolveMedia(item.kind, item.target, this.#deps.cfg.outboxDir, this.#deps.cfg.maxMediaBytes)
@@ -826,11 +833,14 @@ export class ApiTaskManager {
       }
     }
 
+    const mime = mimeForName(item.name)
+    const disposition = mime === "image/svg+xml" || mime === "text/html" ? "attachment" : "inline"
     ctx.res.writeHead(200, {
-      "Content-Type": mimeForName(item.name),
+      "Content-Type": mime,
       "Content-Length": String(data.byteLength),
-      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(item.name)}`,
+      "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(item.name)}`,
       "Cache-Control": "private, max-age=300",
+      "Content-Security-Policy": "sandbox; default-src 'none'",
       "X-Content-Type-Options": "nosniff",
     })
     ctx.res.end(data)

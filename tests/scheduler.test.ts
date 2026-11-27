@@ -699,11 +699,11 @@ test("a notice that fails to send does not break the scheduler", async () => {
 test("ScheduleService.runNow returns the updated snapshot, not the pre-run copy", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bot-scheduler-"))
   try {
-    let resolveRun: ((value: string) => void) | undefined
+    let resolveRun: ((value: UsageOutcome) => void) | undefined
     const service = new ScheduleService(
       join(dir, "schedules.json"),
       (_task) =>
-        new Promise<string>((resolve) => {
+        new Promise<UsageOutcome>((resolve) => {
           resolveRun = resolve
         }),
       log,

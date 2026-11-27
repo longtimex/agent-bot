@@ -1,6 +1,7 @@
 import type { Logger } from "./logger.js"
 import type { TaskHistoryStore } from "./history.js"
 import type { UsageOutcome, UsageStore } from "./usage.js"
+import type { TokenUsage } from "./tokenUsage.js"
 import { classifyTaskError } from "./taskErrors.js"
 import { logChatTaskTerminal, type ChatTerminalTask } from "./taskTerminalLog.js"
 
@@ -20,6 +21,7 @@ export interface ChatTaskOutcomeInput {
   detail?: string
   ms: number
   startedAt: number
+  tokens?: TokenUsage
 }
 
 /** Records usage, history and the one terminal log line for a Telegram/Feishu run. */
@@ -49,6 +51,7 @@ export class ChatTaskOutcomeRecorder {
       model: input.model,
       ms: input.ms,
       outcome: input.outcome,
+      tokens: input.tokens,
     })
     this.#deps.history.record(input.task.key, {
       prompt: input.task.text,

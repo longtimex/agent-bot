@@ -3,7 +3,7 @@ import { resolve } from "node:path"
 import { ApiServer, resolveApiToken, resolveEncKey } from "./api.js"
 import { AgentCliRegistry, AgentCliService } from "./agentCli.js"
 import { pruneInbox } from "./attachments.js"
-import { CcSwitchService, redactSecrets } from "./ccswitch.js"
+import { CcSwitchService } from "./ccswitch.js"
 import { configureFileClock } from "./clock.js"
 import { MagpieService } from "./magpie.js"
 import { ConfigError, hasControlClientEvidence, loadConfig, StartupConfigError, type BotConfig } from "./config.js"
@@ -12,7 +12,7 @@ import { writeStartupFailure, writeStartupSelfCheck } from "./startupSelfCheck.j
 import { AndroidReleaseService } from "./androidRelease.js"
 import { createFeishuConnection, createFeishuRuntime, type FeishuRuntime } from "./feishuRuntime.js"
 import { acquireLock } from "./lock.js"
-import { createLogger, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
+import { createLogger, formatFatalError, pruneRotatedLogs, rotateLogIfNeeded } from "./logger.js"
 import { pruneOutbox } from "./media.js"
 import { ModelAdmin } from "./modelAdmin.js"
 import { Opencode } from "./opencode.js"
@@ -30,6 +30,7 @@ import { configureSecretVault, SecretVault } from "./secretVault.js"
 import { SessionStore } from "./store.js"
 import { TelegramBridge } from "./telegram.js"
 import { appVersion } from "./version.js"
+import { workspaceChanges } from "./workspaceChanges.js"
 
 function setupHint(detail: string): string {
   return (
@@ -41,13 +42,17 @@ function setupHint(detail: string): string {
   )
 }
 
-let botToken: string | undefined
+const runtimeSecrets = new Set<string>()
+
+function trackSecrets(...values: Array<string | undefined>): void {
+  for (const value of values) {
+    if (value) runtimeSecrets.add(value)
+  }
+}
 
 /** Crash output lands in bot.log and is read by whoever tails it, so it must never carry credentials. */
 function fatalText(err: unknown): string {
-  const raw = err instanceof Error ? (err.stack ?? err.message) : String(err)
-  const redacted = redactSecrets(raw)
-  return botToken ? redacted.split(botToken).join("***") : redacted
+  return formatFatalError(err, runtimeSecrets)
 }
 
 function installCrashGuards(): void {
@@ -85,9 +90,27 @@ async function loadConfigOrSetup(): Promise<BotConfig> {
 }
 
 async function main(): Promise<void> {
+  // Seed pre-config env secrets so even a failure inside loadConfigOrSetup cannot leak them.
+  trackSecrets(
+    process.env.TELEGRAM_BOT_TOKEN,
+    process.env.FEISHU_APP_SECRET,
+    process.env.FEISHU_CALLBACK_VERIFICATION_TOKEN,
+    process.env.FEISHU_CALLBACK_ENCRYPT_KEY,
+    process.env.OPENCODE_SERVER_PASSWORD,
+    process.env.STT_API_KEY,
+    process.env.API_TOKEN,
+  )
   installCrashGuards()
   const cfg = await loadConfigOrSetup()
-  botToken = cfg.telegram.token
+  trackSecrets(
+    cfg.telegram.token,
+    cfg.feishu?.appSecret,
+    cfg.feishu?.callback?.verificationToken,
+    cfg.feishu?.callback?.encryptKey,
+    cfg.opencode.password,
+    cfg.stt?.apiKey,
+    cfg.api.token,
+  )
   // Until the bridge exists the configured zone is the live one; it takes over below
   configureFileClock(() => cfg.reminderTimezone)
   const log = createLogger(cfg.logLevel)
@@ -153,18 +176,22 @@ async function main(): Promise<void> {
     : undefined
 
   const effectiveOpencodeUrl = settings.opencodeUrl ?? cfg.opencode.url
+  const runtimeCfg: BotConfig =
+    effectiveOpencodeUrl === cfg.opencode.url
+      ? cfg
+      : { ...cfg, opencode: { ...cfg.opencode, url: effectiveOpencodeUrl } }
   const oc = new Opencode(
     effectiveOpencodeUrl,
     cfg.opencode.username,
     cfg.opencode.password,
   )
   if (await oc.health()) {
-    log.info(`opencode server reachable at ${cfg.opencode.url}`)
+    log.info(`opencode server reachable at ${effectiveOpencodeUrl}`)
   } else if (cfg.opencode.onDemand) {
     // Expected in on-demand mode: the first OpenCode task starts it
-    log.info(`opencode server not running at ${cfg.opencode.url}; it will start on demand`)
+    log.info(`opencode server not running at ${effectiveOpencodeUrl}; it will start on demand`)
   } else {
-    log.warn(`opencode server not reachable at ${cfg.opencode.url}; start it with: npm run serve`)
+    log.warn(`opencode server not reachable at ${effectiveOpencodeUrl}; start it with: npm run serve`)
   }
 
   const proxies = new ProxyService(resolve(cfg.dataDir, "proxies.json"), log)
@@ -215,11 +242,13 @@ async function main(): Promise<void> {
     bin: cfg.ccswitch.bin,
     app: cfg.ccswitch.app,
     projectDir: process.cwd(),
+    proxyEnv: () => proxies.env(),
   })
   const magpie = new MagpieService({
     bin: cfg.magpie.bin,
     gatewayUrl: cfg.magpie.gatewayUrl,
     projectDir: process.cwd(),
+    proxyEnv: () => proxies.env(),
   })
   if (!magpie.available) {
     log.info("magpie CLI 未安装；/magpie 面板可用但需要先安装 magpie")
@@ -236,9 +265,10 @@ async function main(): Promise<void> {
 
   // 安全输入: secrets the user typed into a card, readable by tasks but never sent to a model
   configureSecretVault(new SecretVault(cfg.dataDir, log))
+  workspaceChanges.configure(resolve(cfg.dataDir, "workspace-changes.json"), log)
   const feishuConnection = createFeishuConnection(cfg, log)
   const tgBridge = new TelegramBridge(
-    cfg,
+    runtimeCfg,
     oc,
     agents,
     store,
@@ -294,6 +324,9 @@ async function main(): Promise<void> {
   let apiError: string | undefined
   if (cfg.api.enabled) {
     try {
+      const apiToken = resolveApiToken(cfg)
+      const encKey = resolveEncKey(cfg)
+      trackSecrets(apiToken, encKey?.toString("base64"))
       apiServer = new ApiServer(
         {
           cfg,
@@ -314,10 +347,16 @@ async function main(): Promise<void> {
           proxies,
           aliases: tgBridge.aliasStore,
           settings,
+          opencodeUrlEffective: effectiveOpencodeUrl,
           customModels,
           providers: agentProviders,
           accounts: tgBridge.accountStore,
           notices: tgBridge.noticeStore,
+          transcripts: tgBridge.transcriptStore,
+          budget: tgBridge.budgetStore,
+          approvals: tgBridge.approvalManager,
+          webhooks: tgBridge.webhookStore,
+          notifyOwner: (text) => tgBridge.notifyOwner(text),
           ccswitch: tgBridge.ccSwitch,
           magpie,
           fetchMedia: (target) => tgBridge.fetchRemoteMedia(target),
@@ -331,8 +370,8 @@ async function main(): Promise<void> {
           channel: feishuConnection?.resolver,
           version: appVersion(),
         },
-        resolveApiToken(cfg),
-        resolveEncKey(cfg),
+        apiToken,
+        encKey,
       )
       await apiServer.start()
     } catch (err) {
@@ -356,6 +395,7 @@ async function main(): Promise<void> {
     clearInterval(pruneTimer)
     if (logTimer) clearInterval(logTimer)
     healthMonitor?.dispose()
+    tgBridge.approvalManager.rejectAll()
     await feishu?.stop()
     await agents.dispose(1_000).catch(() => {})
     proxies.dispose()

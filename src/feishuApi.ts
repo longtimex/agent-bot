@@ -249,7 +249,7 @@ export class FeishuOutbound {
   async sendImage(chatId: number, receiveId: string, file: unknown, caption?: string): Promise<Message> {
     const { data, name } = await inputBytes(file)
     if (data.byteLength > FEISHU_IMAGE_LIMIT) {
-      return this.sendDocument(chatId, receiveId, file, name, caption)
+      return this.sendDocument(chatId, receiveId, data, name, caption)
     }
     const uploaded = await this.#api.im.v1.image.create({ data: { image_type: "message", image: data } })
     const imageKey = uploaded?.image_key ?? uploaded?.data?.image_key
@@ -345,12 +345,13 @@ export function installFeishuTransformer(
   channel: {
     isFeishuId(id: number): boolean
     receiveIdForChat?(chatId: number): string | undefined
+    telegramEnabled?: boolean
   },
 ): void {
   bot.api.config.use(async (prev: unknown, method: string, payload: Record<string, unknown>) => {
     const chatId = typeof payload.chat_id === "number" ? payload.chat_id : undefined
-    // answerCallbackQuery carries only its query id. Feishu query ids use the
-    // `fs:` prefix, so this branch must come before chat-id routing.
+    // answerCallbackQuery, getFile (feishu:*), and Feishu-only setMyCommands do not carry
+    // a chat_id, so they must be handled before chat-id routing.
     if (method === "answerCallbackQuery" && String(payload.callback_query_id ?? "").startsWith("fs:")) {
       await outbound.answerCallback(
         String(payload.callback_query_id),
@@ -358,14 +359,17 @@ export function installFeishuTransformer(
       )
       return { ok: true, result: true }
     }
+    if (method === "getFile" && String(payload.file_id ?? "").startsWith("feishu:")) {
+      throw new Error("飞书文件应通过 messageResource 下载")
+    }
+    if (method === "setMyCommands" && channel.telegramEnabled === false) {
+      return { ok: true, result: true }
+    }
     const isFeishu = chatId !== undefined && channel.isFeishuId(chatId)
     if (!isFeishu) return (prev as (...args: unknown[]) => Promise<unknown>)(method, payload)
 
     if (method === "sendChatAction") {
       return { ok: true, result: true }
-    }
-    if (method === "getFile") {
-      throw new Error("飞书文件应通过 messageResource 下载")
     }
 
     const receiveId = channel.receiveIdForChat?.(chatId) ?? outbound.receiveIdForChat(chatId)
@@ -396,9 +400,6 @@ export function installFeishuTransformer(
     }
     if (method === "sendVideo") {
       return { ok: true, result: await outbound.sendVideo(chatId, receiveId, payload.video, caption) }
-    }
-    if (method === "setMyCommands") {
-      return { ok: true, result: true }
     }
     return (prev as (...args: unknown[]) => Promise<unknown>)(method, payload)
   })

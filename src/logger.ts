@@ -78,3 +78,21 @@ export function createLogger(level: LogLevel = "info"): Logger {
     error: (...args) => write("error", args),
   }
 }
+
+/** Very short values risk masking ordinary stack-trace tokens like line numbers. */
+const MIN_LITERAL_SECRET_LEN = 6
+
+/** Formats a fatal/uncaught error for stderr and bot.log, scrubbing both secret patterns and known runtime credentials. */
+export function formatFatalError(err: unknown, secrets: Iterable<string | undefined> = []): string {
+  const raw = err instanceof Error ? (err.stack ?? err.message) : String(err)
+  let out = redactSecrets(raw)
+  const literals = [
+    ...new Set(
+      [...secrets].filter((value): value is string => typeof value === "string" && value.length >= MIN_LITERAL_SECRET_LEN),
+    ),
+  ].sort((a, b) => b.length - a.length)
+  for (const secret of literals) {
+    if (out.includes(secret)) out = out.split(secret).join("***")
+  }
+  return out
+}

@@ -133,8 +133,8 @@ export function parseFeishuMessage(messageId: string, messageType: string | unde
   return { text: "", refs: [] }
 }
 
-function syntheticMessageId(feishuId: string, outbound: FeishuOutbound): number {
-  return outbound.syntheticMessageId(feishuId) ?? outbound.registerInbound(feishuId, 0)
+function syntheticMessageId(feishuId: string, outbound: FeishuOutbound, chatId: number): number {
+  return outbound.syntheticMessageId(feishuId) ?? outbound.registerInbound(feishuId, chatId)
 }
 
 function isGroup(event: FeishuMessageEvent): boolean {
@@ -212,7 +212,7 @@ export class FeishuService {
     const parsed = parseFeishuMessage(message.message_id, message.message_type, message.content)
     const timestamp = Math.floor(Date.now() / 1000)
     const base = {
-      message_id: syntheticMessageId(message.message_id, this.#deps.outbound),
+      message_id: syntheticMessageId(message.message_id, this.#deps.outbound, chatId),
       date: timestamp,
       chat: { id: chatId, type: "private" as const, first_name: openId },
       from: { id: userId, is_bot: false, first_name: openId },
@@ -255,7 +255,7 @@ export class FeishuService {
     this.#deps.outbound.registerChat(chatKey, chatId)
     if (this.#ownerEligible(parsed.openId)) this.#deps.identities.bindOwner(chatKey, userId)
     this.#deps.onFirstChat?.()
-    const messageId = syntheticMessageId(parsed.openMessageId, this.#deps.outbound)
+    const messageId = syntheticMessageId(parsed.openMessageId, this.#deps.outbound, chatId)
     const queryId = `fs:${parsed.openMessageId}:${this.#nextUpdateId++}`
     const update = {
       update_id: this.#nextUpdateId++,

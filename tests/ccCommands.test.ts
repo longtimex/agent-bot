@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import { CcCommands, type CcHost } from "../src/ccCommands.js"
+import { ccBlockedReason, ccConfirmPlan, ccIsDeeplinkArgs, isLongCcCommand } from "../src/ccGuards.js"
 import { CcSwitchService } from "../src/ccswitch.js"
 import { loadConfig } from "../src/config.js"
 import { ModelAdmin } from "../src/modelAdmin.js"
@@ -244,5 +245,69 @@ test("cc model agents escapes markdown in agent metadata", async () => {
     assert.match(text, /\\\[点击/, "the escaped form is what gets rendered")
   } finally {
     rmSync(h.dir, { recursive: true, force: true })
+  }
+})
+
+test("cc guards block leading global flags and still detect hidden commands", () => {
+  assert.ok(ccBlockedReason(["-v", "interactive"]))
+  assert.ok(ccBlockedReason(["--config", "/tmp/x", "provider", "delete", "main"]))
+  assert.ok(ccBlockedReason(["-v", "deeplink", "ccswitch://v1/import?a=1"]))
+  assert.equal(ccBlockedReason(["--help"]), undefined)
+  assert.equal(ccBlockedReason(["--version"]), undefined)
+  assert.ok(ccConfirmPlan(["--verbose", "provider", "delete", "main"]))
+  assert.equal(isLongCcCommand(["--verbose", "update"]), true)
+  assert.equal(ccIsDeeplinkArgs(["-v", "deeplink", "ccswitch://v1/import?a=1"]), true)
+})
+
+test("cc update enforces CC_SWITCH_APP flag guard and deeplink confirmation redacts secrets", async () => {
+  const h = makeHarness()
+  try {
+    await h.commands.handleCommand(42, "tg:42", "update --check -a claude")
+    assert.match(h.sent.at(-1)!.text, /CC\\?_SWITCH\\?_APP/)
+    assert.equal(h.calls.length, 0, "update with -a must not reach cc-switch")
+
+    const secret = "relaySecretValue98765"
+    await h.commands.handleCommand(
+      42,
+      "tg:42",
+      `deeplink ccswitch://v1/import?resource=provider&apiKey=${secret}&config=eyJzZWNyZXQiOiJ4In0`,
+    )
+    const confirmCard = h.sent.at(-1)!.text
+    assert.ok(!confirmCard.includes(secret), `deeplink confirmation leaked apiKey: ${confirmCard}`)
+    assert.ok(!confirmCard.includes("eyJzZWNyZXQiOiJ4In0"), "deeplink confirmation must redact config payload")
+    assert.ok(!confirmCard.includes("\\`"), "confirmation label must not contain escaped backticks")
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true })
+  }
+})
+
+test("native /cc provider add --api-key masks unlabelled keys in output and errors", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bot-cc-secret-"))
+  const sent: Array<{ chatId: number; text: string }> = []
+  const secret = "relayUnlabelledKey4242"
+  try {
+    const host: CcHost = {
+      sendTextMessage: async (chatId, text) => {
+        sent.push({ chatId, text })
+        return true
+      },
+      sendPanel: async () => {},
+      editPanel: async () => {},
+      applyOpenCodeModel: async () => {},
+      store: new SessionStore(join(dir, "sessions.json"), log),
+      cfg: loadConfig({ TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_ALLOW_USERS: "7" }),
+    }
+    const cc = new CcSwitchService({
+      app: "claude",
+      projectDir: dir,
+      runner: async () => ({ code: 1, stdout: "", stderr: `failed saving ${secret}` }),
+    })
+    const commands = new CcCommands(host, cc, new ModelAdmin(join(dir, "data", "models.json"), dir, "assistant"), log)
+    await commands.handleCommand(42, "tg:42", `provider add --name Test --api-key ${secret}`)
+    for (const msg of sent) {
+      assert.ok(!msg.text.includes(secret), `unlabelled native api-key leaked: ${msg.text}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

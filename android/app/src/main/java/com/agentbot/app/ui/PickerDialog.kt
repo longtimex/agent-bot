@@ -197,6 +197,7 @@ fun TextPromptDialog(
     confirmLabel: String = "创建",
     placeholder: String = "例如：30m 喝水",
     maxLines: Int = 3,
+    allowBlank: Boolean = false,
 ) {
     var value by remember { mutableStateOf(initial) }
     // A Dialog cannot rely on the Activity's adjustResize for its IME inset. Constrain the whole
@@ -211,8 +212,9 @@ fun TextPromptDialog(
             placeholder = placeholder,
             maxLines = maxLines,
             confirmLabel = confirmLabel,
+            allowBlank = allowBlank,
             onDismiss = onDismiss,
-            onConfirm = { if (value.isNotBlank()) onConfirm(value) },
+            onConfirm = { if (allowBlank || value.isNotBlank()) onConfirm(value) },
         )
     }
 }
@@ -258,6 +260,7 @@ private fun TextPromptContent(
     placeholder: String,
     maxLines: Int,
     confirmLabel: String,
+    allowBlank: Boolean,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -321,7 +324,7 @@ private fun TextPromptContent(
             horizontalArrangement = Arrangement.End,
         ) {
             TextButton(onClick = onDismiss) { Text("取消") }
-            TextButton(onClick = onConfirm, enabled = value.isNotBlank()) { Text(confirmLabel) }
+            TextButton(onClick = onConfirm, enabled = allowBlank || value.isNotBlank()) { Text(confirmLabel) }
         }
     }
 }

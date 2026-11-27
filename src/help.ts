@@ -3,17 +3,17 @@ export const HELP = `🤖 *AI 私人助手 · 功能菜单*
 
 *对话*
 • 直接发送消息即可对话，支持图片、文件与语音
-• \`/new\` 新会话 · \`/stop\` 停止 · \`/retry\` 重试 · \`/queue\` 队列
+• \`/new\` 新会话 · \`/stop\` 停止 · \`/retry\` 重试 · \`/queue\` 队列 · \`/diff\` 代码改动 · \`/commit\` 提交
 
 *引擎与模型*
 • \`/agent\` 切换 Agent 引擎（推荐 OpenCode）
 • \`/model\` 切换模型（\`/model default\` 清除本会话选择） · \`/agents\` 安装/卸载 CLI
 • \`/dir\` 设置本会话 CLI 工作目录 · \`/status\` 运行状态
-• \`/usage\` 使用统计 · \`/report\` 每日报告 · \`/history\` 任务历史 · \`/export\` 导出历史
+• \`/usage\` 使用统计 · \`/budget\` 费用预算 · \`/report\` 每日报告 · \`/history\` 任务历史 · \`/export\` 导出历史
 
 *任务与提醒*
-• \`/schedule\` 定时 AI 任务 · \`/reminders\` 待触发提醒
-• \`/remind 30m 喝水\` 设定提醒
+• \`/schedule\` 定时 AI 任务 · \`/hooks\` Webhook 事件触发器 · \`/reminders\` 待触发提醒
+• \`/remind 30m 喝水\` 设定提醒 · \`/approvals\` 高危操作审批中心
 
 *效率*
 • \`/alias\` 自定义快捷指令：\`/alias add code 审查当前目录代码\` 后发送 \`/code\` 触发
@@ -45,19 +45,24 @@ export const HELP_FULL = `🤖 *AI 私人助手*
 • \`/dir\` - 查看本会话 CLI 工作目录；\`/dir <路径>\` 切换（支持 \`~\` 与相对路径），\`/dir reset\` 恢复默认
 • \`/new\` 或 \`/reset\` - 开启新会话，原会话存入历史
 • \`/sessions\` - 历史会话，切回后接着聊；\`/sessions 关键词\` 搜索，\`/sessions rename 序号 名称\` 改名
-• \`/undo\` - 撤销上一次 CLI 任务对工作目录（git 仓库）的改动
+• \`/diff\` - 查看当前工作目录（git 仓库）的代码 Diff 与撤销栈
+• \`/undo\` - 撤销上一次任务对工作目录（git 仓库）的改动（支持重启后多步撤销）
+• \`/commit <说明>\` - 暂存并提交当前工作目录的 git 改动（需按钮确认）
 • \`/secrets\` - 查看 / 清除通过安全输入卡片保存的密钥（\`/secrets clear\`）；命令里的密钥写成 \`?\` 会弹出安全输入卡片
 • \`/stop\` - 立即停止当前正在执行的任务
 • \`/retry\` - 重新发送上一条任务
 • \`/queue\` - 查看或清空排队中的消息
 • \`/status\` - 查看引擎、模型、运行时长与排队数
-• \`/usage\` - 查看任务量、成功率与耗时统计
+• \`/usage\` - 查看任务量、成功率、Token 与费用统计
+• \`/budget [美元|month 美元|off]\` - 查看或设置每日/每月费用预算与告警阈值
 • \`/report\` - 生成跨聊天的每日用量报告
 • \`/history [条数]\` - 查看最近的任务执行历史（引擎、模型、耗时与结果）
 • \`/export\` / \`/export json\` - 把任务历史导出为 Markdown / JSON 文件
 • \`/schedule\` - 查看/管理定时 AI 任务
 • \`/schedule add 每天 09:00 检查服务器\` - 到点自动执行 AI 任务
 • \`/schedule add --engine claude --model sonnet 2h 汇总日志\` - 指定引擎与模型
+• \`/approvals [auto|strict|off]\` - 高危操作审批中心：查看待审批卡片、切换防护级别
+• \`/hooks [add 名称 | 模板]\` - 管理入站 Webhook 事件触发器，供 GitHub/监控告警触发 AI 处理
 • \`/remind 30m 喝水\` - 设定定时提醒（支持 30s/10m/2h/1d、18:30、明天 08:30）
 • \`/remind every 30m 喝水\` - 重复提醒（也支持 \`每5分钟\`、\`每天 08:30\`、\`下午3点\`）
 • \`/reminders\` - 查看待触发的提醒
@@ -165,7 +170,7 @@ export const MAGPIE_HELP = `🧩 *magpie 模型网关*
 • \`/magpie\` · \`/magpie status\` - 面板（版本、网关、快捷入口）
 • \`/magpie providers\` - 已添加的 Provider
 • \`/magpie presets\` - 内置供应商模板
-• \`/magpie agents\` - 全部支持的 Agent；\`/magpie status\` 列出本机已检测的
+• \`/magpie agents\` - 全部支持的 Agent；\`/magpie ls\` 列出本机已检测的
 • \`/magpie models [agent]\` - 模型列表
 • \`/magpie groups\` - 路由组
 • \`/magpie quota [provider]\` · \`/magpie usage [today|7d|30d|all]\`
@@ -241,20 +246,25 @@ export const BOT_MENU_COMMANDS: { command: string; description: string }[] = [
   { command: "status", description: "查看运行状态" },
   { command: "new", description: "开启新会话（原会话存入历史，可切回）" },
   { command: "sessions", description: "历史会话：切回、置顶、改名与搜索" },
-  { command: "undo", description: "撤销上一次 CLI 任务对工作目录的改动" },
+  { command: "diff", description: "查看当前工作目录的代码 Diff 与撤销记录" },
+  { command: "undo", description: "撤销上一次任务对工作目录的改动" },
+  { command: "commit", description: "提交当前工作目录的 git 改动（需确认）" },
   { command: "secrets", description: "安全输入保存的密钥（/secrets clear 清除）" },
   { command: "agent", description: "查看或切换 Agent 引擎（推荐 OpenCode）" },
   { command: "model", description: "查看或切换大模型" },
   { command: "dir", description: "查看或切换本会话 CLI 工作目录" },
   { command: "agents", description: "检测、安装或卸载 Agent CLI" },
   { command: "schedule", description: "定时执行 AI 任务（查看/添加/暂停）" },
+  { command: "approvals", description: "高危操作审批中心与防护模式设置" },
+  { command: "hooks", description: "管理入站 Webhook 事件触发器" },
   { command: "reminders", description: "查看待触发的提醒" },
   { command: "remind", description: "设定定时提醒，如 /remind 30m 喝水" },
   { command: "cancel", description: "取消指定编号的提醒" },
   { command: "queue", description: "查看或清空排队消息" },
   { command: "stop", description: "停止当前任务" },
   { command: "retry", description: "重新发送上一条任务" },
-  { command: "usage", description: "查看任务量、成功率与耗时统计" },
+  { command: "usage", description: "查看任务量、成功率、Token 与费用统计" },
+  { command: "budget", description: "查看或设置每日/每月费用预算与告警" },
   { command: "report", description: "生成跨聊天的每日用量报告" },
   { command: "history", description: "查看最近的任务执行历史" },
   { command: "export", description: "导出任务历史为 Markdown/JSON 文件" },

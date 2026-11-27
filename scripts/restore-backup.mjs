@@ -126,10 +126,13 @@ if (!file.startsWith(`${backupDir}/`) && !file.startsWith(`${backupDir}\\`)) fai
 if (!existsSync(file)) fail(`备份不存在：${file}`)
 
 // A tar entry is normally a bare file name because the archive is built with -C; anything
-// carrying a separator or a parent segment would land outside the data directory.
+// carrying a separator, parent segment, or non-allowlisted filename (such as api-token.json)
+// must be rejected before extraction.
 const entries = archiveEntries(name)
 const unsafe = entries.filter((entry) => entry.includes("/") || entry.includes("\\") || entry.startsWith(".."))
 if (unsafe.length > 0) fail(`备份包含可疑条目，已拒绝恢复：${unsafe.slice(0, 3).join(", ")}`)
+const disallowed = entries.filter((entry) => (entry !== KEY_FILE && !entry.endsWith(".json")) || SECRET_FILES.has(entry))
+if (disallowed.length > 0) fail(`备份包含不允许恢复的文件，已拒绝恢复：${disallowed.slice(0, 3).join(", ")}`)
 const special = nonRegularEntries(name)
 if (special.length > 0) fail(`备份包含非普通文件（链接或目录），已拒绝恢复：${special.slice(0, 3).join(" | ")}`)
 
@@ -152,14 +155,17 @@ if (encryptedInArchive.length > 0 && !archiveHasKey) {
 
 const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17)
 const snapshotDir = join(backupDir, `pre-restore-${stamp}`)
-mkdirSync(snapshotDir, { recursive: true })
+mkdirSync(snapshotDir, { recursive: true, mode: 0o700 })
+chmodSync(snapshotDir, 0o700)
 let copied = 0
 for (const entry of readdirSync(dataDir)) {
   // The key goes in too: a restore may overwrite it, and the snapshot is the only way back
   if ((!entry.endsWith(".json") && entry !== KEY_FILE) || SECRET_FILES.has(entry)) continue
   const from = join(dataDir, entry)
   if (!statSync(from).isFile()) continue
-  cpSync(from, join(snapshotDir, entry))
+  const dest = join(snapshotDir, entry)
+  cpSync(from, dest)
+  chmodSync(dest, 0o600)
   copied += 1
 }
 
@@ -169,9 +175,12 @@ const extract = spawnSync("tar", ["-xzf", `backups/${name}`, "--no-same-owner"],
 if (extract.error) fail(`解压失败：${extract.error.message}`)
 if (extract.status !== 0) fail(`解压失败：${(extract.stderr ?? "").trim()}`)
 
+for (const entry of entries) {
+  const restored = join(dataDir, entry)
+  if (existsSync(restored)) chmodSync(restored, 0o600)
+}
 console.log(`已恢复 ${entries.length} 个文件到 ${dataDir}`)
 console.log(`恢复前的状态已快照到 ${snapshotDir}（${copied} 个文件）`)
-if (archiveHasKey) chmodSync(join(dataDir, KEY_FILE), 0o600)
 
 const envCopy = join(backupDir, name.replace(/\.tar\.gz$/, ".env"))
 if (process.argv.includes("--with-env")) {

@@ -26,7 +26,7 @@ const ENV_KEYS: Record<string, { baseURL: string; apiKey: string }> = {
 }
 
 export function supportsRelay(engine: string): boolean {
-  return engine in ENV_KEYS
+  return Object.hasOwn(ENV_KEYS, engine)
 }
 
 export class AgentProviderStore {
@@ -42,7 +42,8 @@ export class AgentProviderStore {
   }
 
   get(engine: string): AgentProviderConfig | undefined {
-    return this.#load()[engine]
+    const loaded = this.#load()
+    return Object.hasOwn(loaded, engine) ? loaded[engine] : undefined
   }
 
   /** Passing undefined removes the relay, so the engine goes back to its own default. */
@@ -74,7 +75,7 @@ export class AgentProviderStore {
    * two different relays.
    */
   envFor(engine: string, override?: { baseURL: string; apiKey?: string }): Record<string, string> {
-    const keys = ENV_KEYS[engine]
+    const keys = Object.hasOwn(ENV_KEYS, engine) ? ENV_KEYS[engine] : undefined
     const config = override ?? this.get(engine)
     if (!keys || !config) return {}
     const env: Record<string, string> = { [keys.baseURL]: config.baseURL }
@@ -93,7 +94,7 @@ export class AgentProviderStore {
   #loadStored(): Record<string, { baseURL: string; secret?: string }> {
     const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
     const engines = asRecord(raw?.engines)
-    const result: Record<string, { baseURL: string; secret?: string }> = {}
+    const result = Object.create(null) as Record<string, { baseURL: string; secret?: string }>
     if (!engines) return result
     for (const [engine, value] of Object.entries(engines)) {
       const record = asRecord(value)
@@ -113,8 +114,8 @@ export class AgentProviderStore {
   #load(): Record<string, AgentProviderConfig> {
     const raw = readJsonObject(this.#path, (message) => this.#log.warn(message))
     const engines = asRecord(raw?.engines)
-    if (!engines) return {}
-    const result: Record<string, AgentProviderConfig> = {}
+    const result = Object.create(null) as Record<string, AgentProviderConfig>
+    if (!engines) return result
     for (const [engine, value] of Object.entries(engines)) {
       const record = asRecord(value)
       const baseURL = typeof record?.baseURL === "string" ? record.baseURL.trim() : ""

@@ -16,9 +16,22 @@ if (existsSync(".env")) {
   }
 }
 
+function defaultHealthHost() {
+  const explicit = process.env.API_HEALTH_HOST?.trim()
+  if (explicit) return explicit
+  const bind = process.env.API_BIND?.trim()
+  if (bind && !["0.0.0.0", "::", "[::]"].includes(bind)) return bind
+  return "127.0.0.1"
+}
+
+function formatHost(value) {
+  const clean = value.replace(/^\[|\]$/g, "")
+  return clean.includes(":") ? `[${clean}]` : clean
+}
+
 const dataDir = process.env.DATA_DIR ?? "data"
 const port = process.env.API_PORT ?? "3080"
-const host = process.env.API_HEALTH_HOST ?? "127.0.0.1"
+const host = formatHost(defaultHealthHost())
 const startupPath = resolve(dataDir, "startup-check.json")
 
 function fail(message) {
@@ -124,6 +137,7 @@ function readToken() {
   }
 }
 
+const live = process.argv.includes("--live")
 const apiEnabled = enabled(process.env.API_ENABLED, true)
 const token = readToken()
 
@@ -138,17 +152,37 @@ if (apiEnabled && token) {
     if (body?.ok !== true) fail("body did not report ok")
 
     // /health can answer before Telegram/Feishu have finished initialising.
-    // Check the post-start self-check too when the supervisor supplied a start
-    // timestamp. Manual probes without one retain the old lightweight behavior.
-    if (process.env.RELEASE_START_AT) validateStartup(readStartupCheck())
-    const startup = readStartupCheck()
+    // Validate startup metadata whenever any release expectation env var is supplied.
+    const checkExpected = Boolean(
+      process.env.RELEASE_START_AT || process.env.RELEASE_EXPECTED_ID || process.env.RELEASE_EXPECTED_PID,
+    )
+    const startup = checkExpected ? validateStartup(readStartupCheck()) : readStartupCheck()
+    if (startup.failure) fail(`startup marked failed: ${startup.failure}`)
     if (startup.pid && body.pid !== undefined && startup.pid !== body.pid) {
       fail(`health pid ${body.pid} differs from startup pid ${startup.pid}`)
+    }
+    const wantPid = expectedPid()
+    if (wantPid !== undefined && body.pid !== undefined && body.pid !== wantPid) {
+      fail(`health pid ${body.pid} differs from expected pid ${wantPid}`)
+    }
+    if (checkExpected && typeof body.release === "string" && body.release) {
+      const wantRelease = expectedReleaseId()
+      if (body.release !== wantRelease) {
+        fail(`health release ${body.release} differs from expected ${wantRelease}`)
+      }
     }
     console.log(`health: ok ${body.version ?? ""} ${body.engine ?? ""}`.trim())
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err))
   }
+} else if (live) {
+  // Container/service liveness without an API: accept the startup record only
+  // when it succeeded and its recorded process is still alive.
+  const startup = validateStartup(readStartupCheck(), { requireStartedAt: false })
+  if (typeof startup.pid !== "number" || !processAlive(startup.pid)) {
+    fail(`startup pid ${startup.pid ?? "missing"} is not running`)
+  }
+  console.log(`health: live startup ok ${startup.version ?? ""} pid ${startup.pid}`.trim())
 } else {
   // API is intentionally off, or no token is available to authenticate a
   // probe. A Telegram/Feishu-only deployment is healthy only once the

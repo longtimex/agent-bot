@@ -7,6 +7,7 @@ import { StringDecoder } from "node:string_decoder"
 import { installerChildEnv } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { readJsonObject, writePrivateAtomic } from "./jsonStore.js"
+import { withFileLock } from "./lock.js"
 import { clipTail } from "./messages.js"
 import { EXIT_DRAIN_MS, terminateProcess } from "./childKill.js"
 import {
@@ -25,8 +26,10 @@ const PACKAGE_RE = /^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]
 // A non-root service (systemd, container) usually cannot write npm's global prefix.
 const PERMISSION_ERROR_RE = /EACCES|EPERM|permission denied|insufficient privilege|operation not permitted/i
 const EXTERNALLY_MANAGED_RE = /externally-managed-environment|externally managed/i
-// Only these retry flags may ever reach argv, including from the persisted install record
-const EXTRA_ARG_RE = /^--(?:prefix=[/~][\w.@+:/ -]{1,200}|break-system-packages)$/
+// Only these retry flags may ever reach argv, including from the persisted install record.
+// Accepts POSIX (/ or ~) and Windows (C:\) prefixes with Unicode home directories, while
+// excluding control characters and shell metacharacters.
+const EXTRA_ARG_RE = /^--(?:prefix=(?:[/~]|[A-Za-z]:[/\\])[^\x00-\x1F\x7F"'`$|;&<>]{1,240}|break-system-packages)$/
 
 function sanitizeExtraArgs(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined
@@ -255,15 +258,16 @@ export class AgentCliInstaller {
 
       this.#registry.reload(true)
       const bin = this.#registry.binPath(profile)
-      this.#managed[profile.id] = {
-        engine: profile.id,
-        method: spec.method,
-        package: spec.package,
-        bin: bin ?? profile.bin,
-        installedAt: new Date().toISOString(),
-        ...(extraArgs ? { extraArgs } : {}),
-      }
-      this.#save()
+      this.#mutateManaged(() => {
+        this.#managed[profile.id] = {
+          engine: profile.id,
+          method: spec.method,
+          package: spec.package,
+          bin: bin ?? profile.bin,
+          installedAt: new Date().toISOString(),
+          ...(extraArgs ? { extraArgs } : {}),
+        }
+      })
       const note = extraArgs
         ? `\n提示：默认安装位置不可用，已使用 \`${extraArgs.join(" ")}\` 完成安装。`
         : ""
@@ -314,13 +318,14 @@ export class AgentCliInstaller {
       const bin = profile ? this.#registry.binPath(profile) : undefined
       // A fallback that kicked in here must also apply to the next update and to uninstall
       const widened = ran.extraArgs?.join(" ") !== record.extraArgs?.join(" ")
-      this.#managed[engine] = {
-        ...record,
-        bin: bin ?? record.bin,
-        installedAt: new Date().toISOString(),
-        ...(ran.extraArgs ? { extraArgs: ran.extraArgs } : {}),
-      }
-      this.#save()
+      this.#mutateManaged(() => {
+        this.#managed[engine] = {
+          ...record,
+          bin: bin ?? record.bin,
+          installedAt: new Date().toISOString(),
+          ...(ran.extraArgs ? { extraArgs: ran.extraArgs } : {}),
+        }
+      })
       return {
         ok: true,
         message:
@@ -379,8 +384,9 @@ export class AgentCliInstaller {
       }
 
       if (spec.managed) {
-        delete this.#managed[engine]
-        this.#save()
+        this.#mutateManaged(() => {
+          delete this.#managed[engine]
+        })
       }
       this.#registry.reload(true)
       const profile = this.#registry.get(engine)
@@ -511,15 +517,23 @@ export class AgentCliInstaller {
       let settled = false
       let timedOut = false
       let drainTimer: NodeJS.Timeout | null = null
-      // Installing is long-running and pipes are never read again once we resolve, so
-      // the endpoints must be released explicitly or the child keeps them open.
+      // A multi-byte sequence split across chunks must not decode into U+FFFD, which
+      // would corrupt the Chinese text the installer echoes.
+      const out = new StringDecoder("utf8")
+      const err = new StringDecoder("utf8")
+      // Installing is long-running; detach listeners and drain rather than destroying
+      // stdio so terminateProcess's SIGKILL escalation can still finish off orphans.
       const finish = (code: number | null): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         if (drainTimer) clearTimeout(drainTimer)
-        child.stdout?.destroy()
-        child.stderr?.destroy()
+        stdout = clipTail(stdout + out.end(), MAX_OUTPUT_CHARS)
+        stderr = clipTail(stderr + err.end(), MAX_OUTPUT_CHARS)
+        child.stdout?.removeAllListeners("data")
+        child.stderr?.removeAllListeners("data")
+        child.stdout?.resume()
+        child.stderr?.resume()
         resolve({ code, stdout, stderr, timedOut })
       }
       const timer = setTimeout(() => {
@@ -528,15 +542,13 @@ export class AgentCliInstaller {
         finish(null)
       }, this.#timeoutMs)
 
-      // A multi-byte sequence split across chunks must not decode into U+FFFD, which
-      // would corrupt the Chinese text the installer echoes.
-      const out = new StringDecoder("utf8")
-      const err = new StringDecoder("utf8")
       child.stdout?.on("data", (chunk: Buffer) => {
+        if (settled) return
         stdout = clipTail(stdout + out.write(chunk), MAX_OUTPUT_CHARS)
         armDrain()
       })
       child.stderr?.on("data", (chunk: Buffer) => {
+        if (settled) return
         stderr = clipTail(stderr + err.write(chunk), MAX_OUTPUT_CHARS)
         armDrain()
       })
@@ -563,6 +575,19 @@ export class AgentCliInstaller {
 
   #terminate(child: ChildProcess): void {
     terminateProcess(child)
+  }
+
+  #mutateManaged(fn: () => void): void {
+    try {
+      withFileLock(`${this.#path}.lock`, this.#log, () => {
+        this.#managed = {}
+        this.#load()
+        fn()
+        this.#save()
+      })
+    } catch (err) {
+      this.#log.warn(`failed to update ${this.#path}:`, (err as Error).message)
+    }
   }
 
   #load(): void {

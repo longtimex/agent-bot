@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { existsSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 /**
@@ -61,14 +61,31 @@ export function loadOrCreateSecretKey(path: string, options: SecretKeyOptions = 
   }
   mkdirSync(dirname(path), { recursive: true })
   const key = randomBytes(32)
+  const keyHex = `${key.toString("hex")}\n`
   const staging = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
-  writeFileSync(staging, `${key.toString("hex")}\n`, { mode: 0o600 })
+  writeFileSync(staging, keyHex, { mode: 0o600 })
   try {
     linkSync(staging, path)
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
-    // Another process created it first: use that key, never our own
-    return readKey(path)
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "EEXIST") return readKey(path)
+    // Filesystems or sandboxes that disallow hard links still support O_EXCL creation.
+    if (code === "EPERM" || code === "ENOTSUP" || code === "EXDEV") {
+      try {
+        const fd = openSync(path, "wx", 0o600)
+        try {
+          writeSync(fd, keyHex)
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
+      } catch (openErr) {
+        if ((openErr as NodeJS.ErrnoException).code === "EEXIST") return readKey(path)
+        throw openErr
+      }
+    } else {
+      throw err
+    }
   } finally {
     try {
       unlinkSync(staging)

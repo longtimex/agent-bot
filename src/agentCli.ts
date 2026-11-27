@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { accessSync, constants, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { delimiter, isAbsolute, join, resolve, sep } from "node:path"
+import { delimiter, isAbsolute, join, parse as parsePath, resolve } from "node:path"
 import process from "node:process"
 import { StringDecoder } from "node:string_decoder"
 import { asRecord, stringArray } from "./util.js"
@@ -15,6 +15,8 @@ import type { Logger } from "./logger.js"
 import { clip, clipTail } from "./messages.js"
 import type { SessionStore } from "./store.js"
 import { withRecentTurns } from "./statelessContext.js"
+import { CliDraftTracker } from "./agentCliStream.js"
+import { extractCliUsage, type TokenUsage } from "./tokenUsage.js"
 
 const DEFAULT_TIMEOUT_MS = 600_000
 const MAX_OUTPUT_CHARS = 8 * 1024 * 1024
@@ -113,19 +115,23 @@ import { secretEnvFor } from "./secretVault.js"
 
 /** Default lookup PATH also covers the per-user global bin directories where the Bot installs CLIs. */
 export function whichSync(bin: string, envPath = extendedPath()): string | undefined {
-  const expanded = bin === "~" || bin.startsWith("~/") ? join(homedir(), bin.slice(1)) : bin
-  const candidates =
-    isAbsolute(expanded) || expanded.includes("/")
-      ? [resolve(expanded)]
-      : envPath.split(delimiter).filter(Boolean).map((dir) => join(dir, expanded))
-  for (const candidate of candidates) {
-    try {
-      const info = statSync(candidate)
-      if (!info.isFile()) continue
-      accessSync(candidate, constants.X_OK)
-      return candidate
-    } catch {
-      // keep looking
+  const expanded = bin === "~" || bin.startsWith("~/") || bin.startsWith("~\\") ? join(homedir(), bin.slice(1)) : bin
+  const bases = isAbsolute(expanded) || expanded.includes("/") || expanded.includes("\\")
+    ? [resolve(expanded)]
+    : envPath.split(delimiter).filter(Boolean).map((dir) => join(dir, expanded))
+  const exts = process.platform === "win32" && !/\.[A-Za-z0-9]+$/.test(expanded)
+    ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)]
+    : [""]
+  for (const base of bases) {
+    for (const ext of exts) {
+      const candidate = ext ? `${base}${ext}` : base
+      try {
+        if (!statSync(candidate).isFile()) continue
+        accessSync(candidate, constants.X_OK)
+        return candidate
+      } catch {
+        // keep looking
+      }
     }
   }
   return undefined
@@ -313,7 +319,6 @@ export class AgentCliRegistry {
       }
     }
     if (!force && stamp === this.#stamp) return
-    this.#stamp = stamp
 
     const profiles = new Map<string, AgentCliProfile>()
     for (const profile of BUILTIN_AGENT_PROFILES) profiles.set(profile.id, profile)
@@ -324,6 +329,10 @@ export class AgentCliRegistry {
         parsed = JSON.parse(readFileSync(this.#path, "utf8")) as ProfileFile
       } catch (err) {
         this.#log?.warn(`failed to read agent profiles ${this.#path}:`, (err as Error).message)
+        // Preserve the last known-good profiles and stamp so a transient edit/write never wipes them.
+        if (this.#profiles.size > 0) return
+        this.#profiles = profiles
+        return
       }
       const root = asRecord(parsed)
       const rawAgents = root?.agents ?? parsed
@@ -353,6 +362,7 @@ export class AgentCliRegistry {
       }
     }
 
+    this.#stamp = stamp
     this.#profiles = profiles
   }
 
@@ -568,9 +578,17 @@ function parseJsonl(mode: CliParseMode, raw: string): CliParseResult {
       } else if (type === "message") {
         const role = typeof record.role === "string" ? record.role : ""
         if (role === "assistant" || role === "model") {
-          const content = pickString(record, ["content", "text"])
+          // Preserve whitespace-only deltas (" ", "\n\n") instead of trimming them away.
+          const isDelta = record.delta === true
+          const content = isDelta
+            ? (typeof record.content === "string" && record.content
+                ? record.content
+                : typeof record.text === "string" && record.text
+                  ? record.text
+                  : undefined)
+            : pickString(record, ["content", "text"])
           if (content) {
-            const merged = appendAssistant(chunks.join(""), content, record.delta === true)
+            const merged = appendAssistant(chunks.join(""), content, isDelta)
             chunks.length = 0
             chunks.push(merged)
           }
@@ -761,10 +779,10 @@ const MAX_WORK_DIR_CHARS = 512
 export function normalizeWorkDirInput(raw: string, cwd: string, home: string): string | undefined {
   const text = raw.trim().replace(/^["']|["']$/g, "").replace(/[/\\]+$/, "")
   if (!text || text.length > MAX_WORK_DIR_CHARS || /[\u0000-\u001f\u007f]/.test(text)) return undefined
-  const expanded = text === "~" ? home : text.startsWith("~/") ? join(home, text.slice(2)) : text
+  const expanded = text === "~" ? home : (text.startsWith("~/") || text.startsWith("~\\")) ? join(home, text.slice(2)) : text
   const absolute = resolve(cwd, expanded)
-  // An agent that skips permission checks must never be handed the filesystem root
-  if (absolute === sep || absolute === "") return undefined
+  // An agent that skips permission checks must never be handed a filesystem or drive root
+  if (!absolute || parsePath(absolute).root === absolute) return undefined
   return absolute
 }
 
@@ -853,7 +871,10 @@ export class AgentCliService {
     onProgress?: (summary: string) => void,
     signal?: AbortSignal,
     attempt = 0,
+    onDraft?: (text: string) => void,
+    onUsage?: (usage: TokenUsage) => void,
   ): Promise<string> {
+    if (signal?.aborted) throw new Error("已取消当前任务。")
     const profile = this.registry.get(engine)
     if (!profile) throw new Error(`未知的 Agent 引擎：${engine}`)
 
@@ -863,8 +884,6 @@ export class AgentCliService {
       throw new Error(`未找到 ${profile.bin} 可执行文件，请先安装 ${profile.label}。${install}`)
     }
 
-    // Checked before a session id is spent: an oversized prompt never reaches the CLI,
-    // so it must not consume or rewrite the chat's session either
     const earlyBudget = argvBudgetError(profile.label, [query])
     if (earlyBudget) throw new Error(earlyBudget)
 
@@ -873,20 +892,13 @@ export class AgentCliService {
     if (profile.sessionMode !== "stateless") {
       sessionId = this.#store.getCliSession(key, profile.id)
       isNew = !sessionId
-      if (profile.sessionMode === "preassign" && !sessionId) {
-        sessionId = randomUUID()
-        this.#store.setCliSession(key, profile.id, sessionId)
-      }
+      if (profile.sessionMode === "preassign" && !sessionId) sessionId = randomUUID()
     }
 
-    // An omitted model is deliberate: the CLI's own configuration decides. Never
-    // inject a project default here, because it would override the user's choice.
     const model = profile.supportsModel
       ? (modelOverride ?? this.#store.getCliModel(key, profile.id))
       : undefined
     const workDir = this.#resolveWorkDir(key)
-    // A stateless CLI remembers nothing between runs: replay the last turns so a follow-up has
-    // something to refer to. Dropped rather than failing when it would overflow argv.
     const stateless = profile.sessionMode === "stateless"
     const recalled = stateless ? withRecentTurns(this.#store.getRecentTurns(key, profile.id), query) : query
     const prompt = argvBudgetError(profile.label, [recalled]) ? query : recalled
@@ -895,6 +907,7 @@ export class AgentCliService {
     })
     const budget = argvBudgetError(profile.label, args)
     if (budget) throw new Error(budget)
+    if (signal?.aborted) throw new Error("已取消当前任务。")
     this.#log.debug(
       `spawning ${profile.id} (${binPath}, isNew=${isNew}, session=${sessionId ?? "none"}, model=${model ?? "engine config"}, cwd=${workDir})`,
     )
@@ -907,7 +920,6 @@ export class AgentCliService {
           ...profile.env,
           ...this.#proxyEnv?.(),
           ...secretEnvFor(key),
-          // A relay configured for this engine wins over the ambient values
           ...this.#providerEnv?.(profile.id, model),
         }),
         stdio: ["ignore", "pipe", "pipe"],
@@ -918,14 +930,11 @@ export class AgentCliService {
       let stdout = ""
       let stderr = ""
       let progressBuffer = ""
-      // Each data event can split a multi-byte character in half, so the streams
-      // are decoded incrementally instead of per chunk: CLIs here emit CJK text
       const outDecoder = new StringDecoder("utf8")
       const errDecoder = new StringDecoder("utf8")
       let idleTimer: NodeJS.Timeout | null = null
       let hardTimer: NodeJS.Timeout | null = null
       let drainTimer: NodeJS.Timeout | null = null
-      // Set once the process itself is gone; the pipes may still be held by a helper
       let exitedWith: number | null | undefined
       let settled = false
 
@@ -950,19 +959,10 @@ export class AgentCliService {
         reject(new Error(message))
       }
       const onAbort = (): void => fail("已取消当前任务。")
-
-      if (signal) {
-        if (signal.aborted) {
-          onAbort()
-          return
-        }
-        signal.addEventListener("abort", onAbort, { once: true })
-      }
+      signal?.addEventListener("abort", onAbort, { once: true })
 
       const outputTail = (): string => stripAnsi(redactSecrets(clipTail(stdout, 500))).trim()
       const resetIdle = (): void => {
-        // Buffered output can still arrive after the promise settled; arming a
-        // timer then would keep a stray 10-minute handle alive per chunk
         if (settled) return
         if (idleTimer) clearTimeout(idleTimer)
         idleTimer = setTimeout(() => {
@@ -980,25 +980,25 @@ export class AgentCliService {
         }, this.#maxTimeoutMs)
       }
 
+      const draftTracker = onDraft ? new CliDraftTracker(profile.parse) : undefined
       const feedProgress = (chunk: string, flush = false): void => {
-        if (!onProgress) return
+        if (!onProgress && !draftTracker) return
         progressBuffer += chunk
-        // Spinners emit only \r, so splitting on \n alone would hold the whole run
-        // in the buffer and never report a line
         const lines = progressBuffer.split(/[\r\n]/)
         progressBuffer = flush ? "" : (lines.pop() ?? "")
         if (progressBuffer.length > MAX_PROGRESS_LINE_CHARS) {
           progressBuffer = progressBuffer.slice(progressBuffer.length - MAX_PROGRESS_LINE_CHARS)
         }
         for (const line of lines) {
-          const summary = progressFromLine(profile.parse, line)
-          if (summary) onProgress(summary)
+          if (onProgress) {
+            const summary = progressFromLine(profile.parse, line)
+            if (summary) onProgress(summary)
+          }
+          const draft = draftTracker?.acceptLine(line)
+          if (draft !== undefined) onDraft?.(draft)
         }
       }
 
-      // Trimming to the cap on every chunk past it would rebuild an 8 MB string
-      // per data event (O(n²) over a long run): grow up to 2× the cap, then cut
-      // back once, which keeps the retained tail within [cap, 2·cap)
       const trimOutput = (text: string): string =>
         text.length > MAX_OUTPUT_CHARS * 2 ? capTail(text, MAX_OUTPUT_CHARS) : text
       const appendStdout = (text: string): void => {
@@ -1011,6 +1011,7 @@ export class AgentCliService {
       }
 
       child.stdout?.on("data", (chunk: Buffer) => {
+        if (settled) return
         resetIdle()
         armDrain()
         const text = outDecoder.write(chunk)
@@ -1020,17 +1021,15 @@ export class AgentCliService {
       })
 
       child.stderr?.on("data", (chunk: Buffer) => {
+        if (settled) return
         resetIdle()
         armDrain()
         appendStderr(errDecoder.write(chunk))
       })
 
-      // Settles the run: reached from `close`, or from the exit drain below when a
-      // helper process keeps the pipes open and `close` therefore never arrives.
       const settle = (code: number | null): void => {
         this.#active.delete(child)
         if (!finish()) return
-        // A truncated sequence can still sit in the decoder when the process exits
         const outTail = outDecoder.end()
         const errTail = errDecoder.end()
         if (outTail) appendStdout(outTail)
@@ -1038,32 +1037,28 @@ export class AgentCliService {
         feedProgress(outTail, true)
 
         const parsed = parseCliOutput(profile.parse, stdout)
-        const errText = redactSecrets((parsed.error ? `${parsed.error}\n` : "") + (stderr.trim() || stdout.trim())).slice(
-          0,
-          2_000,
-        )
+        const combined = [parsed.error, stderr.trim(), stdout.trim()].filter(Boolean).join("\n")
+        const errText = clipTail(redactSecrets(combined), 2_000)
 
         if (code === 0 && !parsed.error) {
-          if (profile.sessionMode === "capture" && parsed.sessionId) {
+          if (profile.sessionMode === "preassign" && isNew && sessionId) {
+            this.#store.setCliSession(key, profile.id, sessionId)
+          } else if (profile.sessionMode === "capture" && parsed.sessionId) {
             if (isSafeSessionId(parsed.sessionId)) this.#store.setCliSession(key, profile.id, parsed.sessionId)
             else this.#log.warn(`${profile.id} reported an unusable session id; it was not persisted`)
           }
+          const usage = extractCliUsage(profile.parse, stdout, model)
+          if (usage) onUsage?.(usage)
           const reply = parsed.text.trim()
           if (stateless && reply) this.#store.pushRecentTurn(key, profile.id, query, reply)
           resolve(reply || `${profile.label} 已执行完毕，无文本返回。`)
           return
         }
 
-        if (
-          !isNew &&
-          sessionId &&
-          attempt < 1 &&
-          profile.resumeErrorPattern &&
-          new RegExp(profile.resumeErrorPattern, "i").test(errText)
-        ) {
+        if (!isNew && sessionId && attempt < 1 && profile.resumeErrorPattern && new RegExp(profile.resumeErrorPattern, "i").test(errText)) {
           this.#log.warn(`${profile.id} session ${sessionId} failed to resume, retrying with a fresh session`)
           this.#store.clearCliSession(key, profile.id)
-          this.prompt(key, engine, query, modelOverride, onProgress, signal, attempt + 1).then(resolve, reject)
+          this.prompt(key, engine, query, modelOverride, onProgress, signal, attempt + 1, onDraft, onUsage).then(resolve, reject)
           return
         }
 

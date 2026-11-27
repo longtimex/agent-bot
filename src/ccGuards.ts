@@ -67,10 +67,53 @@ export function ccAppFlagToken(args: string[]): string | undefined {
   return args.find((token) => CC_APP_FLAG.test(token))
 }
 
+const CC_LONE_SAFE_FLAGS = new Set(["-h", "--help", "-V", "--version"])
+const CC_SECRET_FLAGS = new Set(["--api-key", "-k", "--token", "--password", "--secret"])
+
+/** Drops leading `-*` tokens so global flags cannot shift subcommand positions. */
+function stripLeadingFlags(args: string[]): string[] {
+  let index = 0
+  while (index < args.length && args[index]!.startsWith("-")) index += 1
+  return args.slice(index)
+}
+
+/** True when the argv invokes `deeplink`, even behind leading global flags. */
+export function ccIsDeeplinkArgs(args: string[]): boolean {
+  const first = stripLeadingFlags(args)[0]
+  return first?.toLowerCase() === "deeplink"
+}
+
+/** Extracts secret values passed via native CLI flags so unlabelled keys can be masked exactly. */
+export function extractCliSecrets(args: string[]): string[] {
+  const secrets: string[] = []
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!
+    const eq = token.indexOf("=")
+    if (eq > 0) {
+      const flag = token.slice(0, eq).toLowerCase()
+      const value = token.slice(eq + 1).trim()
+      if (CC_SECRET_FLAGS.has(flag) && value) secrets.push(value)
+      continue
+    }
+    if (CC_SECRET_FLAGS.has(token.toLowerCase())) {
+      const next = args[i + 1]?.trim()
+      if (next && !next.startsWith("-")) {
+        secrets.push(next)
+        i += 1
+      }
+    }
+  }
+  return secrets
+}
+
 /** Why this argv must not run in a chat, or `undefined` when it is safe to hand to cc-switch. */
 export function ccBlockedReason(args: string[], surface = "Telegram"): string | undefined {
-  const [group = "", sub = ""] = args
-  const key = `${group} ${sub}`.trim().toLowerCase()
+  const effective = stripLeadingFlags(args)
+  const [rawGroup = "", rawSub = "", rawThird = ""] = effective
+  const group = rawGroup.toLowerCase()
+  const sub = rawSub.toLowerCase()
+  const third = rawThird.toLowerCase()
+  const key = `${group} ${sub}`.trim()
   const reason = CC_BLOCKED.get(key)
   if (reason) return reason(surface)
   if (group === "daemon" && sub === "start" && !args.includes("--detach")) {
@@ -78,8 +121,13 @@ export function ccBlockedReason(args: string[], surface = "Telegram"): string | 
   }
   // The third word is the only one that says what a memory blob operation does, and
   // `open-dir` spawns the desktop file manager — nothing to show a phone or a chat
-  if (group === "hermes" && sub === "memory" && args[2] === "open-dir") {
+  if (group === "hermes" && sub === "memory" && third === "open-dir") {
     return `\`hermes memory open-dir\` 会打开服务器上的文件管理器，无法在 ${surface} 中使用；读写请用 \`hermes memory show|set\`。`
+  }
+  // A leading global flag (e.g. `-v`, `--config /path`) could smuggle a value token and
+  // hide a blocked or destructive subcommand behind it; allow only lone help/version flags.
+  if (args[0]?.startsWith("-") && !(args.length === 1 && CC_LONE_SAFE_FLAGS.has(args[0]))) {
+    return `请把参数放在子命令之后（例如 \`provider list --json\`），不要在开头使用全局选项 \`${args[0]}\`。`
   }
   return undefined
 }
@@ -90,67 +138,71 @@ export function ccBlockedReason(args: string[], surface = "Telegram"): string | 
  * real run, so a confirmation never turns a dry run into nothing.
  */
 export function ccConfirmPlan(args: string[]): Omit<CcActionPlan, "args"> | undefined {
-  const [group = "", sub = ""] = args
+  const effective = stripLeadingFlags(args)
+  const [rawGroup = "", rawSub = "", rawThird = "", rawFourth = ""] = effective
+  const group = rawGroup.toLowerCase()
+  const sub = rawSub.toLowerCase()
+  const third = rawThird.toLowerCase()
   // Hermes memory needs three words to say what it overwrites, so the two-word key below
   // cannot name it. `clear` also exits 0 printing a refusal unless cc-switch sees `--yes`,
   // which is why the plan carries the flag instead of letting a confirmed clear no-op.
   if (group === "hermes" && sub === "memory") {
-    const file = args[3] === "user" ? "USER.md" : args[3] === "memory" ? "MEMORY.md" : "记忆文件"
-    if (args[2] === "clear") {
+    const file = rawFourth.toLowerCase() === "user" ? "USER.md" : rawFourth.toLowerCase() === "memory" ? "MEMORY.md" : "记忆文件"
+    if (third === "clear") {
       return { label: `清空 Hermes ${file}（写入空内容）`, appendArgs: ["--yes"] }
     }
-    if (args[2] === "set") {
+    if (third === "set") {
       return { label: `覆盖 Hermes ${file}` }
     }
     return undefined
   }
-  const key = `${group} ${sub}`.trim().toLowerCase()
+  const key = `${group} ${sub}`.trim()
   switch (key) {
     case "provider use":
       return {
-        label: `切换 Provider 到 \`${args[2] ?? "?"}\``,
+        label: `切换 Provider 到 ${rawThird || "?"}`,
         kind: "provider-use",
-        providerId: args[2] ?? "",
+        providerId: rawThird,
       }
     // Canonical spelling of `use`; /cc provider switch and /cc run bypass the
     // /cc use shortcut, so the same confirmation has to cover it here
     case "provider switch":
       return {
-        label: `切换 Provider 到 \`${args[2] ?? "?"}\`（修改 cc-switch 全局配置）`,
+        label: `切换 Provider 到 ${rawThird || "?"}（修改 cc-switch 全局配置）`,
         kind: "provider-use",
-        providerId: args[2] ?? "",
+        providerId: rawThird,
       }
     case "use":
       return {
-        label: `切换 Provider 到 \`${args[1] ?? "?"}\``,
+        label: `切换 Provider 到 ${rawSub || "?"}`,
         kind: "provider-use",
-        providerId: args[1] ?? "",
+        providerId: rawSub,
       }
     // The default decides which Provider every later new session starts on, which is a
     // global write of the same order as `use` even though nothing is switched right now
     case "provider set-default":
-      return { label: `设置默认 Provider 为 \`${args[2] ?? "?"}\`（影响之后的新会话）` }
+      return { label: `设置默认 Provider 为 ${rawThird || "?"}（影响之后的新会话）` }
     case "provider delete":
-      return { label: `删除 Provider \`${args[2] ?? "?"}\``, pty: true }
+      return { label: `删除 Provider ${rawThird || "?"}`, pty: true }
     // Removing an entry from the live config is the write that actually changes what the
     // next session talks to, and `import-live` overwrites whatever it matches; neither is
     // obvious from the command's name, so both ask
     case "provider remove-from-config":
-      return { label: `从 live 配置移除 Provider \`${args[2] ?? "?"}\`（本体保留）`, pty: true }
+      return { label: `从 live 配置移除 Provider ${rawThird || "?"}（本体保留）`, pty: true }
     case "provider import-live":
       return { label: "从 live 配置导入 Provider（会覆盖同名条目）" }
     case "auth default":
-      return { label: `设为默认 ChatGPT 账号 \`${args[2] ?? "?"}\`` }
+      return { label: `设为默认 ChatGPT 账号 ${rawThird || "?"}` }
     case "daemon stop":
       return { label: "停止 cc-switch 守护进程（代理转发与故障转移同时停止）" }
     case "mcp delete":
-      return { label: `删除 MCP 服务器 \`${args[2] ?? "?"}\``, pty: true }
+      return { label: `删除 MCP 服务器 ${rawThird || "?"}`, pty: true }
     case "prompts delete":
-      return { label: `删除提示词预设 \`${args[2] ?? "?"}\``, pty: true }
+      return { label: `删除提示词预设 ${rawThird || "?"}`, pty: true }
     case "skills uninstall":
-      return { label: `卸载技能 \`${args[2] ?? "?"}\``, pty: true }
+      return { label: `卸载技能 ${rawThird || "?"}`, pty: true }
     case "auth remove":
-      return { label: `移除 ChatGPT 账号 \`${args[2] ?? "?"}\``, pty: true }
+      return { label: `移除 ChatGPT 账号 ${rawThird || "?"}`, pty: true }
     case "auth logout":
       return { label: "登出并清除所有 ChatGPT OAuth 数据", pty: true }
     // Without --confirm cc-switch only runs a dry run; with it a banked reset
@@ -158,11 +210,11 @@ export function ccConfirmPlan(args: string[]): Omit<CcActionPlan, "args"> | unde
     case "auth reset-quota":
       return args.includes("--confirm") ? { label: "消耗一次 Codex 配额重置额度" } : undefined
     case "config import":
-      return { label: `导入配置 \`${args[2] ?? "?"}\`（会覆盖当前数据库）`, pty: true }
+      return { label: `导入配置 ${rawThird || "?"}（会覆盖当前数据库）`, pty: true }
     case "config reset":
       return { label: "重置 cc-switch 配置为默认值", pty: true }
     case "sessions delete":
-      return { label: `删除会话 \`${args[2] ?? "?"}\``, appendArgs: ["--yes"] }
+      return { label: `删除会话 ${rawThird || "?"}`, appendArgs: ["--yes"] }
     case "failover clear":
       return { label: "清空故障转移队列", appendArgs: ["--yes"] }
     case "failover enable":
@@ -182,7 +234,9 @@ export function ccConfirmPlan(args: string[]): Omit<CcActionPlan, "args"> | unde
 
 /** Network-bound and provider-touching subcommands need more than cc-switch's default timeout. */
 export function isLongCcCommand(args: string[]): boolean {
-  const [group = "", sub = ""] = args
+  const [rawGroup = "", rawSub = ""] = stripLeadingFlags(args)
+  const group = rawGroup.toLowerCase()
+  const sub = rawSub.toLowerCase()
   if (group === "update" || group === "deeplink") return true
   if (group === "provider" && ["speedtest", "stream-check", "fetch-models", "quota"].includes(sub)) return true
   if (group === "sessions" && sub === "search") return true

@@ -21,10 +21,10 @@ function harness(apiEnabled = false, entries: unknown[] = []) {
     timezone: () => "Asia/Shanghai",
     sendText: async (_chatId, text, keyboard) => { sent.push({ text, keyboard }); return true },
     sendPanel: async (_chatId, panel) => { panels.push(panel.text) },
-    queuePanel: () => ({ text: "queue", keyboard: undefined }),
+    queuePanel: () => ({ text: "queue", keyboard: new InlineKeyboard() }),
     statusText: () => "status",
     statusKeyboard: () => new InlineKeyboard(),
-    usagePanel: () => ({ text: "usage", keyboard: undefined }),
+    usagePanel: () => ({ text: "usage", keyboard: new InlineKeyboard() }),
   })
   return { commands, sent, panels }
 }

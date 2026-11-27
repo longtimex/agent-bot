@@ -14,6 +14,7 @@ import { join, resolve } from "node:path"
 import process from "node:process"
 import { parseEnv } from "node:util"
 import { whichSync } from "./agentCli.js"
+import { extendedPath, opencodeServerEnv } from "./binPath.js"
 import { loadDotEnvFile } from "./config.js"
 import { ReleaseManager } from "./releaseManager.js"
 import { readStartupSelfCheck, type StartupSelfCheck } from "./startupSelfCheck.js"
@@ -87,13 +88,33 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-/** Linux start time (field 22 of /proc/<pid>/stat) detects a recycled PID. */
+/** Process start-time signature used to detect a recycled PID across platforms. */
 export function processStartTime(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
     const close = stat.lastIndexOf(")")
     if (close < 0) return undefined
     return stat.slice(close + 2).split(" ")[19]
+  } catch {
+    // Fallback for macOS / BSD / Windows where /proc is unavailable.
+  }
+  if (process.platform !== "win32") {
+    try {
+      const res = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1_500 })
+      const value = res.status === 0 ? res.stdout.trim() : ""
+      return value || undefined
+    } catch {
+      return undefined
+    }
+  }
+  try {
+    const res = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`],
+      { encoding: "utf8", timeout: 3_000 },
+    )
+    const value = res.status === 0 ? res.stdout.trim() : ""
+    return /^\d+$/.test(value) ? value : undefined
   } catch {
     return undefined
   }
@@ -119,33 +140,73 @@ export function readLockIdentity(path: string): ProcessIdentity | undefined {
   }
 }
 
-function commandLine(pid: number): string | undefined {
+export function processCommandLine(pid: number): string | undefined {
+  if (pid === process.pid) return process.argv.join(" ").trim()
   try {
     return readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim()
   } catch {
-    return undefined
+    // Fallback for macOS / BSD / Windows where /proc is unavailable.
   }
-}
-
-function isBotCommand(pid: number): boolean {
-  const command = commandLine(pid)
-  return Boolean(command && (command.includes(BOT_ENTRY) || command.includes("src/index.ts")))
-}
-
-function isOpencodeCommand(pid: number): boolean {
-  const command = commandLine(pid)
-  return Boolean(command && /\bopencode\b/.test(command) && /\bserve\b/.test(command))
-}
-
-function readPidIdentity(path: string, predicate: (pid: number) => boolean): ProcessIdentity | undefined {
+  if (process.platform !== "win32") {
+    try {
+      const res = spawnSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8", timeout: 1_500 })
+      const value = res.status === 0 ? res.stdout.trim() : ""
+      return value || undefined
+    } catch {
+      return undefined
+    }
+  }
   try {
-    const pid = Number(readFileSync(path, "utf8").trim())
-    if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid) || !predicate(pid)) return undefined
-    const startTime = processStartTime(pid)
-    return { pid, ...(startTime ? { startTime } : {}) }
+    const res = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      { encoding: "utf8", timeout: 2_000 },
+    )
+    const value = res.status === 0 ? res.stdout.trim() : ""
+    return value || undefined
   } catch {
     return undefined
   }
+}
+
+function commandLine(pid: number): string | undefined {
+  return processCommandLine(pid)
+}
+
+function isBotCommand(command: string): boolean {
+  const normalized = command.replace(/\\/g, "/")
+  return normalized.includes(BOT_ENTRY) || normalized.includes("src/index.ts")
+}
+
+function isOpencodeCommand(command: string): boolean {
+  return /\bopencode\b/i.test(command) && /\bserve\b/i.test(command)
+}
+
+function inspectPidFile(
+  path: string,
+  predicate: (command: string) => boolean,
+): { identity?: ProcessIdentity; stale: boolean } {
+  let raw: string
+  try {
+    raw = readFileSync(path, "utf8").trim()
+  } catch {
+    return { stale: false }
+  }
+  const pid = Number(raw)
+  if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) return { stale: true }
+  const cmd = commandLine(pid)
+  if (cmd === undefined) {
+    // Process is alive, but its command line could not be inspected (e.g., EACCES or
+    // platform helper failure). Do not wipe a potentially live PID file.
+    return { stale: false }
+  }
+  if (!predicate(cmd)) return { stale: true }
+  const startTime = processStartTime(pid)
+  return { identity: { pid, ...(startTime ? { startTime } : {}) }, stale: false }
+}
+
+function readPidIdentity(path: string, predicate: (command: string) => boolean): ProcessIdentity | undefined {
+  return inspectPidFile(path, predicate).identity
 }
 
 function removeStale(path: string): void {
@@ -261,13 +322,14 @@ export function readRuntimeState(projectDir = process.cwd()): RuntimeState {
   const env = projectEnv(projectDir, process.env, { preferProject: true, ignoreHome: true })
   const paths = runtimePaths(projectDir, env)
   const lock = readLockIdentity(paths.lockPath)
-  const fromPid = lock ? undefined : readPidIdentity(paths.pidPath, isBotCommand)
-  if (!lock && !fromPid) removeStale(paths.pidPath)
-  const opencode = readPidIdentity(paths.opencodePidPath, isOpencodeCommand)
-  if (!opencode) removeStale(paths.opencodePidPath)
+  const botCheck = lock ? { stale: false } : inspectPidFile(paths.pidPath, isBotCommand)
+  if (!lock && botCheck.stale) removeStale(paths.pidPath)
+  const opencodeCheck = inspectPidFile(paths.opencodePidPath, isOpencodeCommand)
+  if (opencodeCheck.stale) removeStale(paths.opencodePidPath)
   const current = currentEntry(paths)
   const startup = readStartupSelfCheck(paths.dataDir)
-  const bot = lock ?? fromPid
+  const bot = lock ?? botCheck.identity
+  const opencode = opencodeCheck.identity
   const releases = new ReleaseManager({
     projectDir: paths.projectDir,
     dataDir: paths.dataDir,
@@ -309,25 +371,51 @@ function runHealthProbe(script: string, cwd: string, env: NodeJS.ProcessEnv, tim
   }
 }
 
-async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (!isAlive(pid)) return true
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
-  }
-  return !isAlive(pid)
+function isSameProcess(identity: ProcessIdentity): boolean {
+  if (!isAlive(identity.pid)) return false
+  if (!identity.startTime) return true
+  const current = processStartTime(identity.pid)
+  return !current || current === identity.startTime
 }
 
-async function stopProcess(identity: ProcessIdentity | undefined, label: string, timeoutMs = 10_000): Promise<string> {
+function signalProcess(identity: ProcessIdentity, signal: NodeJS.Signals, group: boolean): boolean {
+  if (!isSameProcess(identity)) return false
+  if (group && process.platform !== "win32") {
+    try {
+      process.kill(-identity.pid, signal)
+      return true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err
+    }
+  }
+  process.kill(identity.pid, signal)
+  return true
+}
+
+async function waitForExit(identity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!isSameProcess(identity)) return true
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+  }
+  return !isSameProcess(identity)
+}
+
+async function stopProcess(
+  identity: ProcessIdentity | undefined,
+  label: string,
+  timeoutMs = 10_000,
+  group = false,
+): Promise<string> {
   if (!identity) return `${label}未运行。`
   try {
-    process.kill(identity.pid, "SIGTERM")
+    if (!signalProcess(identity, "SIGTERM", group)) return `${label}（PID ${identity.pid}）已不存在。`
   } catch {
     return `${label}（PID ${identity.pid}）已不存在。`
   }
-  if (!(await waitForExit(identity.pid, timeoutMs))) {
+  if (!(await waitForExit(identity, timeoutMs))) {
     try {
-      process.kill(identity.pid, "SIGKILL")
+      signalProcess(identity, "SIGKILL", group)
     } catch {
       // already gone
     }
@@ -346,17 +434,19 @@ export async function stopBot(paths: RuntimePaths): Promise<string> {
 
 export async function stopOpencode(paths: RuntimePaths): Promise<string> {
   const identity = readPidIdentity(paths.opencodePidPath, isOpencodeCommand)
-  const result = await stopProcess(identity, "OpenCode ")
+  const result = await stopProcess(identity, "OpenCode ", 10_000, true)
   removeStale(paths.opencodePidPath)
   return result
 }
 
 export function localOpencodeTarget(env: NodeJS.ProcessEnv): { host: string; port: number } | undefined {
   try {
-    const url = new URL(env.OPENCODE_URL ?? "http://127.0.0.1:4096")
+    const raw = env.OPENCODE_URL?.trim()
+    const url = new URL(raw || "http://127.0.0.1:4096")
     const host = url.hostname.replace(/^\[|\]$/g, "")
     if (!["127.0.0.1", "localhost", "::1"].includes(host)) return undefined
-    return { host: host === "localhost" ? "127.0.0.1" : host, port: url.port ? Number(url.port) : 4096 }
+    const port = url.port ? Number(url.port) : raw ? (url.protocol === "https:" ? 443 : 80) : 4096
+    return { host: host === "localhost" ? "127.0.0.1" : host, port }
   } catch {
     return undefined
   }
@@ -399,14 +489,14 @@ export async function startOpencode(
   }
   const target = localOpencodeTarget(env)
   if (!target) return { ok: false, message: "OPENCODE_URL 不是本机地址，无法在本机启动 OpenCode。" }
-  const bin = whichSync(env.OPENCODE_BIN ?? "opencode")
+  const bin = whichSync(env.OPENCODE_BIN ?? "opencode", extendedPath(env.PATH))
   if (!bin) return { ok: false, message: "未找到 opencode CLI；请先安装 opencode-ai。" }
   mkdirSync(paths.dataDir, { recursive: true })
   const fd = openSync(paths.opencodeLogPath, "a", 0o600)
   try {
     const child = spawn(bin, ["serve", "--port", String(target.port), "--hostname", target.host], {
       cwd: paths.projectDir,
-      env,
+      env: opencodeServerEnv(env),
       detached: true,
       stdio: ["ignore", fd, fd],
     })
@@ -422,14 +512,17 @@ export async function startOpencode(
       await new Promise((resolvePromise) => setImmediate(resolvePromise))
       return { ok: false, message: `OpenCode 启动失败：${spawnError?.message ?? "没有返回 PID"}` }
     }
+    const identity = readProcessIdentity(child.pid) ?? { pid: child.pid }
     writeFileSync(paths.opencodePidPath, `${child.pid}\n`, { mode: 0o600 })
     const deadline = Date.now() + OPENCODE_START_WAIT_MS
     while (Date.now() < deadline) {
       if (await opencodeHealthy(env)) return { ok: true, message: `OpenCode 已启动（PID ${child.pid}）。` }
-      if (!isAlive(child.pid)) break
+      if (!isSameProcess(identity)) break
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     }
-    return { ok: false, message: `OpenCode 已启动（PID ${child.pid}），但健康检查未通过，请查看 ${paths.opencodeLogPath}。` }
+    if (isSameProcess(identity)) await stopProcess(identity, "OpenCode ", 3_000, true)
+    removeStale(paths.opencodePidPath)
+    return { ok: false, message: `OpenCode 启动后健康检查未通过，已终止进程并清理 PID，请查看 ${paths.opencodeLogPath}。` }
   } finally {
     closeSync(fd)
   }

@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process"
 
 const steps = [
   ["typecheck", ["run", "typecheck"]],
+  ["typecheck tests", ["run", "typecheck:tests"]],
   ["android sources", ["run", "check:android"]],
   ["size budget", ["run", "check:size"]],
   ["unit tests", ["test"]],

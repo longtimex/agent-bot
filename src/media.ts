@@ -200,9 +200,9 @@ function isPrivateIPv4(ip: string): boolean {
   )
 }
 
-/** Expand an IPv6 address (optionally ending in a dotted IPv4) into 8 16-bit groups. */
+/** Expand an IPv6 address (optionally ending in a dotted IPv4 or %zone) into 8 16-bit groups. */
 function parseIPv6Groups(raw: string): number[] | undefined {
-  let ip = raw
+  let ip = raw.split("%", 1)[0] ?? ""
   const dotted = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip)
   if (dotted) {
     const v4 = dotted[1]!.split(".").map(Number)
@@ -228,28 +228,27 @@ function embeddedIPv4(high: number, low: number): string {
 
 function isPrivateIPv6(ip: string): boolean {
   const groups = parseIPv6Groups(ip)
-  if (!groups) return false
+  // Fail closed: isIP() already classified this as IPv6, so an unparseable form must not pass as public.
+  if (!groups) return true
   const zero = (from: number, to: number): boolean => groups.slice(from, to).every((value) => value === 0)
 
   // :: (unspecified) and ::1 (loopback), including fully expanded spellings
   if (zero(0, 8)) return true
   if (zero(0, 7) && groups[7] === 1) return true
 
-  // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) addresses
+  // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d), and RFC 2765 IPv4-translated (::ffff:0:a.b.c.d)
   if (zero(0, 5) && (groups[5] === 0 || groups[5] === 0xffff)) {
     return isPrivateIPv4(embeddedIPv4(groups[6]!, groups[7]!))
   }
-
-  // NAT64 embeds the target IPv4 in the last two groups: the well-known
-  // 64:ff9b::/96 and RFC 6052's local-use 64:ff9b:1::/48 both resolve onto
-  // plain IPv4 hosts, so a private address behind either prefix is internal
-  if (
-    groups[0] === 0x64 &&
-    groups[1] === 0xff9b &&
-    (groups[2] === 0 || groups[2] === 1) &&
-    zero(3, 6)
-  ) {
+  if (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) {
     return isPrivateIPv4(embeddedIPv4(groups[6]!, groups[7]!))
+  }
+
+  // RFC 8215 local-use NAT64 64:ff9b:1::/48 is private across the whole /48;
+  // well-known 64:ff9b::/96 embeds the target IPv4 in the last two groups.
+  if (groups[0] === 0x64 && groups[1] === 0xff9b) {
+    if (groups[2] === 1) return true
+    if (groups[2] === 0 && zero(3, 6)) return isPrivateIPv4(embeddedIPv4(groups[6]!, groups[7]!))
   }
 
   // 6to4 embeds the target IPv4 in the first two groups after 2002:
@@ -265,8 +264,107 @@ function isPrivateIPv6(ip: string): boolean {
   return false
 }
 
+const CLOUD_METADATA_HOSTS = new Set([
+  "metadata.google.internal",
+  "metadata.goog",
+  "metadata.azure.internal",
+  "instance-data",
+])
+
+function isMetadataIPv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number)
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
+  const [a, b, c, d] = parts as [number, number, number, number]
+  // AWS/GCP/Azure/DO link-local IMDS (169.254.0.0/16), Alibaba (100.100.100.200), Oracle (192.0.0.192)
+  return (a === 169 && b === 254) || (a === 100 && b === 100 && c === 100 && d === 200) || (a === 192 && b === 0 && c === 0 && d === 192)
+}
+
+/** True when `address` is a cloud instance-metadata IP (v4, v6, or IPv4-mapped/NAT64 IPv6). */
+export function isMetadataAddress(address: string): boolean {
+  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "").split("%", 1)[0] ?? ""
+  const version = isIP(value)
+  if (version === 4) return isMetadataIPv4(value)
+  if (version !== 6) return false
+  const groups = parseIPv6Groups(value)
+  if (!groups) return true
+  const zero = (from: number, to: number): boolean => groups.slice(from, to).every((n) => n === 0)
+  // Link-local fe80::/10 and AWS IPv6 IMDS fd00:ec2::254
+  if ((groups[0]! & 0xffc0) === 0xfe80) return true
+  if (groups[0] === 0xfd00 && groups[1] === 0x0ec2 && zero(2, 7) && groups[7] === 0x0254) return true
+  // Embedded IPv4 metadata addresses (::ffff:, ::, ::ffff:0:, NAT64 64:ff9b:: & 64:ff9b:1::/48)
+  if (zero(0, 5) && (groups[5] === 0 || groups[5] === 0xffff)) return isMetadataIPv4(embeddedIPv4(groups[6]!, groups[7]!))
+  if (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) return isMetadataIPv4(embeddedIPv4(groups[6]!, groups[7]!))
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && ((groups[2] === 0 && zero(3, 6)) || groups[2] === 1)) {
+    return isMetadataIPv4(embeddedIPv4(groups[6]!, groups[7]!))
+  }
+  return false
+}
+
+/**
+ * Rejects non-HTTP(S) URLs and cloud instance-metadata endpoints (including trailing-dot hostnames,
+ * IPv6/IPv4-mapped forms, and DNS A/AAAA resolutions pointing to metadata IPs) while keeping
+ * localhost/LAN relays usable.
+ */
+export async function assertNotCloudMetadataUrl(rawUrl: string): Promise<URL> {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    throw new Error("URL 格式不合法")
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("地址需要以 http:// 或 https:// 开头")
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.+$/, "")
+  if (!host) throw new Error("URL 缺少主机名")
+  if (CLOUD_METADATA_HOSTS.has(host) || isMetadataAddress(host)) {
+    throw new Error("该地址是云主机元数据端点，拒绝探测；请填写模型服务的实际地址")
+  }
+  if (isIP(host.split("%", 1)[0] ?? "") === 0) {
+    try {
+      const records = await lookup(host, { all: true, verbatim: true })
+      if (records.some((record) => isMetadataAddress(record.address))) {
+        throw new Error("该地址解析到了云主机元数据端点，拒绝探测；请填写模型服务的实际地址")
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("元数据端点")) throw err
+      // Unresolvable hostnames fall through so the caller's own connection error surfaces
+    }
+  }
+  return url
+}
+
+/** Reads an HTTP response body as UTF-8 up to `maxBytes`, cancelling the stream on overflow. */
+export async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string> {
+  const declared = Number(res.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {})
+    throw new Error(`响应体超过 ${Math.round(maxBytes / 1024)}KB 上限`)
+  }
+  if (!res.body) return ""
+  const reader = res.body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+      total += buf.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw new Error(`响应体超过 ${Math.round(maxBytes / 1024)}KB 上限`)
+      }
+      chunks.push(buf)
+    }
+    return Buffer.concat(chunks, total).toString("utf8")
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 export function isPrivateAddress(address: string): boolean {
-  const value = address.trim().toLowerCase()
+  const value = address.trim().toLowerCase().replace(/^\[|\]$/g, "").split("%", 1)[0] ?? ""
   const version = isIP(value)
   if (version === 4) return isPrivateIPv4(value)
   if (version === 6) return isPrivateIPv6(value)
@@ -343,17 +441,23 @@ export async function assertUrlAllowed(target: string, allowPrivate: boolean): P
 export function pinnedLookup(host: string, pins: readonly string[]): LookupFunction {
   const familyFor = (address: string): 4 | 6 => (isIP(address) === 6 ? 6 : 4)
   return (hostname, options, callback) => {
+    const cb = callback as (err: NodeJS.ErrnoException | null, address?: unknown, family?: number) => void
     if (hostname.toLowerCase() !== host.toLowerCase()) {
-      callback(new Error(`媒体下载只允许连接已校验的主机 ${host}`), [], 0)
+      cb(new Error(`媒体下载只允许连接已校验的主机 ${host}`))
       return
     }
     const requested = options?.family
-    const match = pins.find((address) => !requested || requested === 0 || familyFor(address) === requested)
-    if (!match) {
-      callback(new Error(`媒体下载没有可用的已校验地址（${host}）`), [], 0)
+    const matches = pins.filter((address) => !requested || requested === 0 || familyFor(address) === requested)
+    if (matches.length === 0) {
+      cb(new Error(`媒体下载没有可用的已校验地址（${host}）`))
       return
     }
-    callback(null, match, familyFor(match))
+    // Node 20+ autoSelectFamily invokes lookup with `{ all: true }` and expects LookupAddress[].
+    if (options?.all) {
+      cb(null, matches.map((address) => ({ address, family: familyFor(address) })))
+      return
+    }
+    cb(null, matches[0]!, familyFor(matches[0]!))
   }
 }
 

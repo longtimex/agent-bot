@@ -23,7 +23,12 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +41,9 @@ import com.agentbot.app.ui.theme.TextTertiary
 /** Status + usage in one scrollable dashboard. */
 @Composable
 fun StatusScreen(vm: AppViewModel) {
+    var editBudget by remember { mutableStateOf(false) }
+    var dailyDraft by remember { mutableStateOf("") }
+    var monthlyDraft by remember { mutableStateOf("") }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -197,11 +205,83 @@ fun StatusScreen(vm: AppViewModel) {
                     ).joinToString(" · ")
                     DetailRow("最近活动", last, Modifier.padding(top = 14.dp))
                 }
+                if (usage.totalTokens > 0 || usage.costUsd > 0.0) {
+                    DetailRow(
+                        "Token / 费用",
+                        "累计 ${formatTokensUi(usage.totalTokens)}（${formatUsdUi(usage.costUsd)}）· 今日 ${formatTokensUi(usage.today.totalTokens)}（${formatUsdUi(usage.today.costUsd)}）",
+                        Modifier.padding(top = 6.dp),
+                    )
+                }
                 if (usage.engines.isNotEmpty()) {
                     val engines = usage.engines.entries
                         .sortedByDescending { it.value }
                         .joinToString(" · ") { "${it.key} ${it.value}" }
                     DetailRow("引擎分布", engines, Modifier.padding(top = 6.dp))
+                }
+            }
+
+            val budget = vm.budgetStatus
+            if (budget != null) {
+                SectionHeader(
+                    title = "费用与预算",
+                    modifier = Modifier.padding(top = 8.dp),
+                    action = {
+                        QuietButton(
+                            text = "设置预算",
+                            onClick = {
+                                dailyDraft = if (budget.dailyUsd > 0) budget.dailyUsd.toString() else ""
+                                monthlyDraft = if (budget.monthlyUsd > 0) budget.monthlyUsd.toString() else ""
+                                editBudget = true
+                            },
+                        )
+                    },
+                )
+                AppCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StatusPill(
+                            text = when (budget.alertLevel) {
+                                "exceeded" -> "已超预算"
+                                "warn" -> "接近上限"
+                                else -> "预算正常"
+                            },
+                            tone = when (budget.alertLevel) {
+                                "exceeded" -> StatusTone.Error
+                                "warn" -> StatusTone.Warning
+                                else -> StatusTone.Success
+                            },
+                        )
+                        Text(
+                            "80% 预警 · 100% 告警",
+                            color = TextTertiary,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        MetricTile(
+                            label = "今日费用",
+                            value = formatUsdUi(budget.todayUsd),
+                            modifier = Modifier.weight(1f),
+                            detail = if (budget.dailyUsd > 0) "上限 ${formatUsdUi(budget.dailyUsd)} (${budget.dailyPercent}%)" else "未设上限",
+                        )
+                        MetricTile(
+                            label = "本月费用",
+                            value = formatUsdUi(budget.monthUsd),
+                            modifier = Modifier.weight(1f),
+                            detail = if (budget.monthlyUsd > 0) "上限 ${formatUsdUi(budget.monthlyUsd)} (${budget.monthlyPercent}%)" else "未设上限",
+                        )
+                    }
+                    DetailRow(
+                        "Token 消耗",
+                        "今日 ${formatTokensUi(budget.todayTokens)} · 本月 ${formatTokensUi(budget.monthTokens)}",
+                        Modifier.padding(top = 10.dp),
+                    )
                 }
             }
 
@@ -264,6 +344,13 @@ fun StatusScreen(vm: AppViewModel) {
                     MetricTile("失败", "${totals.failed}", Modifier.weight(1f), "${totals.cancelled} 取消")
                 }
                 if (totals.tasks > 0) DetailRow("平均耗时", AppViewModel.formatDuration(totals.avgMs), Modifier.padding(top = 14.dp))
+                if (totals.totalTokens > 0 || totals.costUsd > 0.0) {
+                    DetailRow(
+                        "今日 Token / 费用",
+                        "${formatTokensUi(totals.totalTokens)} · ${formatUsdUi(totals.costUsd)}",
+                        Modifier.padding(top = 6.dp),
+                    )
+                }
                 if (report.byChat.isNotEmpty()) {
                     DetailRow(
                         "来源",
@@ -279,6 +366,48 @@ fun StatusScreen(vm: AppViewModel) {
                 DetailRow("近 7 天", "$spark · 共 ${report.trendTasks} 次", Modifier.padding(top = 6.dp))
             }
         }
+    }
+
+    if (editBudget) {
+        AppDialog(
+            onDismissRequest = { editBudget = false },
+            title = { Text("设置费用预算告警") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "留空或填 0 表示关闭该上限。达到 80% 与 100% 时会向聊天端和 App 通知中心推送告警。",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    AppTextField(
+                        value = dailyDraft,
+                        onValueChange = { dailyDraft = it },
+                        label = "每日预算（美元，如 5）",
+                        singleLine = true,
+                    )
+                    AppTextField(
+                        value = monthlyDraft,
+                        onValueChange = { monthlyDraft = it },
+                        label = "每月预算（美元，如 80）",
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val daily = if (dailyDraft.isBlank()) 0.0 else dailyDraft.trim().toDoubleOrNull()
+                    val monthly = if (monthlyDraft.isBlank()) 0.0 else monthlyDraft.trim().toDoubleOrNull()
+                    if (daily == null || daily < 0 || monthly == null || monthly < 0) {
+                        vm.showToast("请输入有效的非负美元金额")
+                        return@TextButton
+                    }
+                    vm.updateBudget(daily, monthly) { ok -> if (ok) editBudget = false }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editBudget = false }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -330,4 +459,18 @@ private fun formatUptime(ms: Long): String {
         hours > 0 -> "${hours} 小时 ${minutes} 分钟"
         else -> "${minutes} 分钟"
     }
+}
+
+private fun formatTokensUi(total: Long): String = when {
+    total >= 1_000_000L -> String.format("%.2fM", total / 1_000_000.0)
+    total >= 10_000L -> String.format("%.1fK", total / 1_000.0)
+    total >= 1_000L -> String.format("%.2fK", total / 1_000.0)
+    else -> total.toString()
+}
+
+private fun formatUsdUi(usd: Double): String = when {
+    usd <= 0.0 -> "$0.00"
+    usd < 0.01 -> String.format("$%.4f", usd)
+    usd < 1.0 -> String.format("$%.3f", usd)
+    else -> String.format("$%.2f", usd)
 }

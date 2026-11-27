@@ -7,12 +7,17 @@ import { channelOfChatId, type ChannelIdResolver } from "./channelRegistry.js"
 import { formatHistoryMarkdown, type TaskHistoryStore } from "./history.js"
 import type { Logger } from "./logger.js"
 import { clip, escapeMarkdown, type Panel } from "./messages.js"
+import type { UsageStore } from "./usage.js"
+import { formatBudgetSummary, type UsageBudgetStore } from "./usageBudget.js"
+import { formatUsd } from "./tokenUsage.js"
 
 export interface InfoCommandDeps {
   cfg: BotConfig
   log: Logger
   bot: Bot
   history: TaskHistoryStore
+  usage?: UsageStore
+  budget?: UsageBudgetStore
   timezone: () => string
   sendText: (chatId: number, text: string, keyboard?: InlineKeyboard) => Promise<unknown>
   sendPanel: (chatId: number, panel: Panel) => Promise<void>
@@ -148,6 +153,40 @@ export class TelegramInfoCommands {
 
   async handleUsage(chatId: number, key: string): Promise<void> {
     await this.#deps.sendPanel(chatId, this.#deps.usagePanel(key))
+  }
+
+  /** `/budget [金额|month 金额|off]`: view or update daily/monthly USD spend alerts. */
+  async handleBudget(chatId: number, arg: string): Promise<void> {
+    const budget = this.#deps.budget
+    const usage = this.#deps.usage
+    if (!budget || !usage) {
+      await this.#deps.sendText(chatId, "⚠️ 费用预算监控尚未初始化。")
+      return
+    }
+    const trimmed = arg.trim().toLowerCase()
+    if (!trimmed) {
+      await this.#deps.sendText(chatId, formatBudgetSummary(budget.status(usage, this.#deps.timezone())))
+      return
+    }
+    if (trimmed === "off" || trimmed === "clear" || trimmed === "reset" || trimmed === "0") {
+      budget.setLimits({ dailyUsd: null, monthlyUsd: null })
+      await this.#deps.sendText(chatId, "✅ 已关闭全部费用预算告警。\n\n" + formatBudgetSummary(budget.status(usage, this.#deps.timezone())))
+      return
+    }
+    const parts = trimmed.split(/\s+/)
+    const scope = parts[0] === "month" || parts[0] === "monthly" || parts[0] === "月" ? "month" : "day"
+    const rawNum = parts[0] === "day" || parts[0] === "daily" || parts[0] === "日" || scope === "month" ? parts[1] : parts[0]
+    const amount = Number((rawNum ?? "").replace(/^\$/, ""))
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100_000) {
+      await this.#deps.sendText(chatId, "用法：`/budget <每日美元>`、`/budget month <每月美元>` 或 `/budget off`")
+      return
+    }
+    if (scope === "month") budget.setLimits({ monthlyUsd: amount === 0 ? null : amount })
+    else budget.setLimits({ dailyUsd: amount === 0 ? null : amount })
+    const note = amount === 0
+      ? `✅ 已关闭${scope === "month" ? "每月" : "每日"}预算上限。`
+      : `✅ 已设置${scope === "month" ? "每月" : "每日"}预算上限为 ${formatUsd(amount)}（达 80% 与 100% 时告警）。`
+    await this.#deps.sendText(chatId, `${note}\n\n${formatBudgetSummary(budget.status(usage, this.#deps.timezone()))}`)
   }
 
 }

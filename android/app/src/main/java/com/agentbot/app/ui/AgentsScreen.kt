@@ -54,7 +54,7 @@ fun AgentsScreen(vm: AppViewModel) {
         }
         vm.clearAgentConfirmRequest()
         val (engine, action) = request
-        val agent = vm.agents.firstOrNull { it.id == engine || it.label.equals(engine, ignoreCase = true) }
+        val agent = vm.agents.matchEngine(engine)
         if (agent == null) {
             vm.showToast("未识别的 Agent CLI：$engine，可发送 /agents 查看可管理列表")
             return@LaunchedEffect
@@ -64,8 +64,10 @@ fun AgentsScreen(vm: AppViewModel) {
             action == "install" && agent.installed -> "${agent.label} 已安装，无需重复安装"
             action == "install" && !agent.installable ->
                 "${agent.label} 暂不支持自动安装${agent.install?.let { "，安装方式：$it" } ?: ""}"
-            action != "install" && !agent.managed ->
-                "${agent.label} 不是由 Bot 安装的，无法自动${if (action == "update") "更新" else "卸载"}"
+            action == "update" && !agent.updateable ->
+                "${agent.label} 不是由 Bot 安装的，无法自动更新"
+            action == "uninstall" && !agent.uninstallable ->
+                "${agent.label} 暂不支持自动卸载"
             action == "uninstall" && agent.id == vm.session?.engine ->
                 "当前正在使用 ${agent.label}，请先切换到其他引擎再卸载"
             else -> null
@@ -86,6 +88,11 @@ fun AgentsScreen(vm: AppViewModel) {
                     onClick = vm::refreshAgents,
                 )
             },
+        )
+
+        PageErrorNotice(
+            message = vm.connectionError,
+            onDismiss = { vm.connectionError = null },
         )
 
         // Telegram's /agent panel names the current engine, so the management page does too

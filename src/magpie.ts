@@ -5,6 +5,7 @@ import process from "node:process"
 import { childEnv, extendedPath } from "./binPath.js"
 import { redactSecrets, stripAnsi } from "./ccswitch.js"
 import { clip } from "./messages.js"
+import { ReEntrantWriteLock } from "./writeLock.js"
 
 /** magpie's local gateway defaults to this address in every released build. */
 export const MAGPIE_DEFAULT_URL = "http://127.0.0.1:3425"
@@ -30,6 +31,11 @@ export class MagpieRunError extends MagpieError {
   name = "MagpieRunError"
 }
 
+/** Another mutating magpie operation currently holds the service write lock. */
+export class MagpieBusyError extends MagpieError {
+  name = "MagpieBusyError"
+}
+
 export interface MagpieRunResult {
   code: number
   stdout: string
@@ -42,10 +48,14 @@ export interface MagpieOptions {
   bin?: string
   projectDir?: string
   env?: NodeJS.ProcessEnv
+  /** Dynamic proxy env (e.g. from ProxyService), merged into each child invocation. */
+  proxyEnv?: () => NodeJS.ProcessEnv
   timeoutMs?: number
   longTimeoutMs?: number
   gatewayUrl?: string
   runner?: MagpieRunner
+  /** Optional custom gateway health probe (defaults to HTTP probe on custom MAGPIE_URL). */
+  healthProbe?: (url: string, timeoutMs: number) => Promise<boolean>
 }
 
 export interface MagpieOverview {
@@ -211,25 +221,60 @@ export function assertModelRef(value: string): string {
  * validation, timeouts and redaction. Nothing here opens a UI or a foreground
  * server; those words are rejected by ./magpieGuards.ts before they reach it.
  */
+async function defaultGatewayHealthProbe(gatewayUrl: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${gatewayUrl}/health`, { signal: AbortSignal.timeout(timeoutMs) })
+    if (res.ok) return true
+    if (res.status === 404) {
+      const root = await fetch(gatewayUrl, { signal: AbortSignal.timeout(timeoutMs) })
+      return root.status < 500
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 export class MagpieService {
   readonly #projectDir: string
-  readonly #env: NodeJS.ProcessEnv
+  readonly #envOverride?: NodeJS.ProcessEnv
+  readonly #proxyEnv?: () => NodeJS.ProcessEnv
   readonly #timeoutMs: number
   readonly #longTimeoutMs: number
   readonly #gatewayUrl: string
   readonly #runnerOverride?: MagpieRunner
+  readonly #healthProbe?: (url: string, timeoutMs: number) => Promise<boolean>
   #explicitBin?: string
+  readonly #writeLock = new ReEntrantWriteLock()
 
   constructor(options: MagpieOptions = {}) {
     this.#projectDir = options.projectDir ?? process.cwd()
-    // magpie is a third-party binary whose argv can come from chat input; it gets the
-    // same scrubbed environment as the agent CLIs (no bot token, no provider secrets).
-    this.#env = childEnv(options.env ?? process.env)
+    this.#envOverride = options.env
+    this.#proxyEnv = options.proxyEnv
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.#longTimeoutMs = options.longTimeoutMs ?? MAGPIE_LONG_TIMEOUT_MS
     this.#gatewayUrl = (options.gatewayUrl ?? MAGPIE_DEFAULT_URL).replace(/\/+$/, "")
     this.#runnerOverride = options.runner
+    this.#healthProbe = options.healthProbe
     this.#explicitBin = options.bin
+  }
+
+  #childEnv(): NodeJS.ProcessEnv {
+    const base = childEnv(this.#envOverride ?? process.env)
+    const proxy = this.#proxyEnv?.()
+    const env: NodeJS.ProcessEnv = proxy ? { ...base, ...proxy } : { ...base }
+    if (this.#gatewayUrl !== MAGPIE_DEFAULT_URL && !env.MAGPIE_URL) {
+      env.MAGPIE_URL = this.#gatewayUrl
+    }
+    return env
+  }
+
+  /** Serializes mutating magpie calls across HTTP API and Telegram (re-entrant). */
+  runWriteLocked<T>(fn: () => Promise<T>, options: { failFast?: boolean } = {}): Promise<T> {
+    return this.#writeLock.run(fn, {
+      failFast: options.failFast,
+      onBusy: () => new MagpieBusyError("已有 magpie 操作在执行，请稍后再试"),
+    })
   }
 
   get gatewayUrl(): string {
@@ -238,7 +283,7 @@ export class MagpieService {
 
   get bin(): string | undefined {
     if (this.#runnerOverride) return this.#explicitBin ?? "magpie (runner)"
-    return resolveMagpieBin(this.#explicitBin, this.#projectDir, this.#env)
+    return resolveMagpieBin(this.#explicitBin, this.#projectDir, this.#childEnv())
   }
 
   get available(): boolean {
@@ -258,7 +303,7 @@ export class MagpieService {
   async run(args: string[], timeoutMs = this.#timeoutMs): Promise<MagpieRunResult> {
     const bin = this.#ensureBin()
     const runner =
-      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#env, NO_COLOR: "1", CLICOLOR: "0" })
+      this.#runnerOverride ?? defaultRunner(bin, this.#projectDir, { ...this.#childEnv(), NO_COLOR: "1", CLICOLOR: "0" })
     const result = await runner(args, { timeoutMs })
     if (result.code !== 0) throw new MagpieRunError(errorDetail(result))
     return result
@@ -270,18 +315,36 @@ export class MagpieService {
     return clean(result.stdout || result.stderr)
   }
 
+  async #readVersionStrict(): Promise<string | undefined> {
+    const out = await this.text(["--version"], HEALTH_TIMEOUT_MS)
+    const match = /magpie\s+([^\s]+)/i.exec(out)
+    return (match?.[1] ?? out.split("\n")[0])?.trim() || undefined
+  }
+
   async version(): Promise<string | undefined> {
     try {
-      const out = await this.text(["--version"], HEALTH_TIMEOUT_MS)
-      const match = /magpie\s+([^\s]+)/i.exec(out)
-      return (match?.[1] ?? out.split("\n")[0])?.trim() || undefined
+      return await this.#readVersionStrict()
     } catch {
       return undefined
     }
   }
 
-  /** `magpie healthcheck` exits 0 only when the local gateway answers. */
+  /**
+   * Checks gateway health. For the default local gateway, delegates to `magpie healthcheck`;
+   * when a custom `MAGPIE_URL` is configured, probes that URL directly so a local daemon on
+   * the default port cannot mask or spoof the configured gateway's actual status.
+   */
   async healthy(): Promise<boolean> {
+    if (this.#healthProbe) {
+      try {
+        return await this.#healthProbe(this.#gatewayUrl, HEALTH_TIMEOUT_MS)
+      } catch {
+        return false
+      }
+    }
+    if (this.#gatewayUrl !== MAGPIE_DEFAULT_URL && !this.#runnerOverride) {
+      return defaultGatewayHealthProbe(this.#gatewayUrl, HEALTH_TIMEOUT_MS)
+    }
     try {
       await this.run(["healthcheck"], HEALTH_TIMEOUT_MS)
       return true
@@ -298,7 +361,7 @@ export class MagpieService {
     let error: string | undefined
     let version: string | undefined
     try {
-      version = await this.version()
+      version = await this.#readVersionStrict()
     } catch (err) {
       error = redactSecrets(err instanceof Error ? err.message : String(err))
     }
@@ -376,8 +439,12 @@ export class MagpieService {
 
   /** `magpie <agent> <model>` — the one place every agent's model is picked. */
   async setAgentModel(agent: string, model: string): Promise<string> {
-    const result = await this.run([assertAgent(agent), assertModelRef(model)], this.#longTimeoutMs)
-    return clean(result.stdout || result.stderr)
+    const safeAgent = assertAgent(agent)
+    const safeModel = assertModelRef(model)
+    return this.runWriteLocked(async () => {
+      const result = await this.run([safeAgent, safeModel], this.#longTimeoutMs)
+      return clean(result.stdout || result.stderr)
+    })
   }
 
   async addProvider(preset: string, key: string): Promise<string> {
@@ -385,22 +452,29 @@ export class MagpieService {
     // labelled shapes (sk-…, api_key=…); a relay key without a known prefix, echoed by a
     // failing `provider add`, reached the chat and the App verbatim. Mask the exact value too,
     // on the error path as well, the way cc-switch's addProvider does.
+    const safePreset = assertPreset(preset)
     const secret = assertToken(key, "API Key", 500)
     if (secret.startsWith("-")) throw new MagpieError("API Key 不能以 - 开头。")
     const mask = (text: string): string => text.split(secret).join("***")
-    try {
-      const result = await this.run(["provider", "add", assertPreset(preset), secret])
-      return mask(redactSecrets(clean(result.stdout || result.stderr)))
-    } catch (err) {
-      if (err instanceof MagpieRunError) throw new MagpieRunError(mask(err.message))
-      if (err instanceof MagpieError) throw new MagpieError(mask(err.message))
-      throw err
-    }
+    return this.runWriteLocked(async () => {
+      try {
+        const result = await this.run(["provider", "add", safePreset, secret])
+        return mask(redactSecrets(clean(result.stdout || result.stderr)))
+      } catch (err) {
+        if (err instanceof MagpieRunError) throw new MagpieRunError(mask(err.message))
+        if (err instanceof MagpieError) throw new MagpieError(mask(err.message))
+        throw err
+      }
+    })
   }
 
   async providerAction(action: "test" | "models" | "rm", id: string): Promise<string> {
-    const result = await this.run(["provider", action, assertMagpieId(id, "Provider")], this.#longTimeoutMs)
-    return redactSecrets(clean(result.stdout || result.stderr))
+    const safeId = assertMagpieId(id, "Provider")
+    const exec = async (): Promise<string> => {
+      const result = await this.run(["provider", action, safeId], this.#longTimeoutMs)
+      return redactSecrets(clean(result.stdout || result.stderr))
+    }
+    return action === "rm" ? this.runWriteLocked(exec) : exec()
   }
 
   async addGroup(name: string, pairs: string[]): Promise<string> {
@@ -411,16 +485,19 @@ export class MagpieService {
         throw new MagpieError(`无法解析路由组参数 ${pair}，请按 key=value 书写。`)
       }
     }
-    const result = await this.run(["group", "add", safeName, ...pairs], this.#longTimeoutMs)
-    return clean(result.stdout || result.stderr)
+    return this.runWriteLocked(async () => {
+      const result = await this.run(["group", "add", safeName, ...pairs], this.#longTimeoutMs)
+      return clean(result.stdout || result.stderr)
+    })
   }
 
   removeGroup(id: string): Promise<string> {
-    return this.text(["group", "rm", assertMagpieId(id, "路由组")], this.#longTimeoutMs)
+    const safeId = assertMagpieId(id, "路由组")
+    return this.runWriteLocked(() => this.text(["group", "rm", safeId], this.#longTimeoutMs))
   }
 
   sync(): Promise<string> {
-    return this.text(["sync"], this.#longTimeoutMs)
+    return this.runWriteLocked(() => this.text(["sync"], this.#longTimeoutMs))
   }
 
   updateCheck(): Promise<string> {
@@ -428,16 +505,30 @@ export class MagpieService {
   }
 
   update(): Promise<string> {
-    return this.text(["update"], MAGPIE_UPDATE_TIMEOUT_MS)
+    return this.runWriteLocked(() => this.text(["update"], MAGPIE_UPDATE_TIMEOUT_MS))
   }
 
   daemon(action: "start" | "stop" | "restart"): Promise<string> {
-    return this.text(["daemon", action], action === "start" ? this.#longTimeoutMs : this.#timeoutMs)
+    return this.runWriteLocked(() =>
+      this.text(["daemon", action], action === "start" ? this.#longTimeoutMs : this.#timeoutMs),
+    )
   }
 
-  async runRaw(args: string[]): Promise<string> {
+  async runRaw(args: string[], timeoutMs = this.#longTimeoutMs): Promise<string> {
     if (args.length === 0) throw new MagpieError("缺少 magpie 参数。")
-    const result = await this.run(args, this.#longTimeoutMs)
-    return redactSecrets(clean(result.stdout || result.stderr))
+    // Raw `provider add <preset> <key>` can also carry an unlabelled key; mask exact value too.
+    const inlineKey =
+      args[0]?.toLowerCase() === "provider" && args[1]?.toLowerCase() === "add" && args[3] && !args[3].startsWith("-")
+        ? args[3]
+        : undefined
+    const mask = (text: string): string => (inlineKey ? text.split(inlineKey).join("***") : text)
+    try {
+      const result = await this.run(args, timeoutMs)
+      return mask(redactSecrets(clean(result.stdout || result.stderr)))
+    } catch (err) {
+      if (inlineKey && err instanceof MagpieRunError) throw new MagpieRunError(mask(err.message))
+      if (inlineKey && err instanceof MagpieError) throw new MagpieError(mask(err.message))
+      throw err
+    }
   }
 }

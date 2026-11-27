@@ -12,7 +12,7 @@ import {
   type CcSwitchProviderDraft,
   type CcSwitchService,
 } from "./ccswitch.js"
-import { ccAppFlagToken, ccBlockedReason, ccConfirmPlan, isLongCcCommand } from "./ccGuards.js"
+import { ccAppFlagToken, ccBlockedReason, ccConfirmPlan, ccIsDeeplinkArgs, extractCliSecrets, isLongCcCommand } from "./ccGuards.js"
 import { ApiError, type ApiRequestContext } from "./apiCore.js"
 import {
   CC_EXEC_COMMANDS,
@@ -408,7 +408,7 @@ export async function routeCc(
       if (appFlag) throw new ApiError(400, `不要在 args 中传 ${appFlag}；应用类型由 CC_SWITCH_APP 固定`)
       // A deep link is one bare argv whose URL can carry provider keys, and the
       // dedicated endpoint never echoes it back; that cannot be said of a raw run
-      if (args[0] === "deeplink") throw new ApiError(400, "Deep Link 请改用 POST /cc/deeplink")
+      if (ccIsDeeplinkArgs(args)) throw new ApiError(400, "Deep Link 请改用 POST /cc/deeplink")
       const blocked = ccBlockedReason(args, "App")
       if (blocked) throw new ApiError(400, redactSecrets(blocked))
       const plan = ccConfirmPlan(args)
@@ -436,16 +436,30 @@ export async function routeCc(
         if (!argv.includes(extra)) argv = [...argv, extra]
       }
       const timeoutMs = plan?.timeoutMs ?? (isLongCcCommand(args) ? CC_LONG_TIMEOUT_MS : undefined)
-      const result = await deps.runCcAction(() =>
-        plan?.pty ? cc.runWithConfirm(argv, timeoutMs) : cc.run(argv, timeoutMs),
-      )
-      const command = redactSecrets(args.slice(0, 3).map((token) => token.slice(0, 80)).join(" "))
+      const secrets = extractCliSecrets(args)
+      const maskCliSecrets = (text: string): string => {
+        let out = text
+        for (const secret of secrets) out = out.split(secret).join("***")
+        return out
+      }
+      let result
+      try {
+        result = await deps.runCcAction(() =>
+          plan?.pty ? cc.runWithConfirm(argv, timeoutMs) : cc.run(argv, timeoutMs),
+        )
+      } catch (err) {
+        if (secrets.length > 0 && err instanceof ApiError) {
+          throw new ApiError(err.status, maskCliSecrets(err.message))
+        }
+        throw err
+      }
+      const command = redactSecrets(maskCliSecrets(args.slice(0, 3).map((token) => token.slice(0, 80)).join(" ")))
       deps.json(ctx.res, 200, {
         ok: result.code === 0,
         code: result.code,
         command,
-        message: `${result.code === 0 ? "已完成" : "执行失败"}：${redactSecrets(plan?.label ?? command)}`,
-        text: clipCcOutput(redactSecrets(stripAnsi(result.stdout || result.stderr))),
+        message: `${result.code === 0 ? "已完成" : "执行失败"}：${redactSecrets(maskCliSecrets(plan?.label ?? command))}`,
+        text: clipCcOutput(redactSecrets(maskCliSecrets(stripAnsi(result.stdout || result.stderr)))),
       })
       return
     }
@@ -461,7 +475,7 @@ export async function routeCc(
       if (!needsAny && rawArg) throw new ApiError(400, "该操作不接受 arg 字段")
       if (needsAny && !rawArg) throw new ApiError(400, `缺少 arg 字段（${spec.targetLabel ?? "目标 ID"}）`)
       // The App prompts once, so a two-value command arrives as 「<id> <rest>」; Telegram
-      // types the same words into `/cc failover move p1 up`
+      // types the same words into `/cc failover move p1 up`, or `/cc mcp set-apps fs --apps opencode`
       const [head, ...tail] = rawArg.split(/\s+/)
       let target = ""
       if (spec.needsTarget) {
@@ -472,7 +486,8 @@ export async function routeCc(
           throw new ApiError(400, err instanceof Error ? err.message : "目标 ID 不合法")
         }
       }
-      const rawExtra = spec.needsTarget ? tail.join(" ").trim() : rawArg
+      const normalizedTail = normalizeCcExecExtraTail(spec.extra, tail)
+      const rawExtra = spec.needsTarget ? normalizedTail.join(" ").trim() : rawArg
       if (!spec.extra && rawExtra) throw new ApiError(400, `「${spec.label}」的 arg 只能是一个${spec.targetLabel ?? "目标 ID"}`)
       const extra = spec.extra ? validateCcExtra(spec.extra, rawExtra, spec.extraLabel ?? "参数") : ""
       const args = spec.args(target, extra)
@@ -526,7 +541,25 @@ async function hermesState(
     }
   }
 
-  /** cc-switch's ID guard throws its own error type; a bad id is the caller's mistake. */
+  /** Accepts the documented CLI flag prefix (`--apps a,b`, `--name 新名`) in two-value App args. */
+function normalizeCcExecExtraTail(
+  kind: "apps" | "direction" | "host" | "name" | "port" | undefined,
+  tail: string[],
+): string[] {
+  if (tail.length === 0) return tail
+  const first = tail[0]!
+  if (kind === "apps") {
+    if (first === "--apps") return tail.slice(1)
+    if (first.startsWith("--apps=")) return [first.slice("--apps=".length), ...tail.slice(1)]
+  }
+  if (kind === "name") {
+    if (first === "--name") return tail.slice(1)
+    if (first.startsWith("--name=")) return [first.slice("--name=".length), ...tail.slice(1)]
+  }
+  return tail
+}
+
+/** cc-switch's ID guard throws its own error type; a bad id is the caller's mistake. */
 function ccTargetId(raw: string, label: string): string {
     try {
       return assertSafeId(raw, label)

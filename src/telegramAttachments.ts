@@ -1,6 +1,7 @@
+import { unlinkSync } from "node:fs"
 import type { Bot } from "grammy"
 import type { Message } from "grammy/types"
-import { buildAttachmentSections } from "./attachmentInput.js"
+import { buildAttachmentSections, type ModelCapabilities } from "./attachmentInput.js"
 import {
   attachmentKind,
   isTextAttachment,
@@ -111,12 +112,20 @@ export class TelegramAttachments {
   }
 
   async downloadAttachment(chatId: number, att: AttachmentDescriptor, signal?: AbortSignal): Promise<SavedAttachment> {
+    if (signal?.aborted) throw new Error("已取消当前任务。")
     const feishuRef = decodeFeishuFileId(att.fileId)
     if (feishuRef) {
       if (!this.#deps.feishuStream) throw new Error("飞书附件下载器未配置")
       const source = await this.#deps.feishuStream(feishuRef, signal)
       const saved = await saveAttachmentStream(this.#deps.cfg.inboxDir, chatId, att.name, source)
-      if (signal?.aborted) throw new Error("已取消下载")
+      if (signal?.aborted) {
+        try {
+          unlinkSync(saved.path)
+        } catch {
+          // ignore cleanup failure
+        }
+        throw new Error("已取消当前任务。")
+      }
       const result: SavedAttachment = { ...att, path: saved.path, bytes: saved.bytes }
       if (isTextAttachment(att.mime, saved.name)) {
         try {
@@ -130,6 +139,7 @@ export class TelegramAttachments {
       return result
     }
     const file = await this.#deps.bot.api.getFile(att.fileId)
+    if (signal?.aborted) throw new Error("已取消当前任务。")
     if (!file.file_path) throw new Error("Telegram 未返回文件路径（文件可能超过 20MB）")
 
     const url = `https://api.telegram.org/file/bot${this.#deps.cfg.telegram.token}/${file.file_path}`
@@ -139,6 +149,7 @@ export class TelegramAttachments {
       const timeout = AbortSignal.timeout(60_000)
       res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
     } catch (err) {
+      if (signal?.aborted) throw new Error("已取消当前任务。")
       // undici can echo the request URL, which carries the bot token
       throw new Error(`下载附件失败：${this.#deps.maskToken(redactSecrets((err as Error).message))}`)
     }
@@ -156,6 +167,7 @@ export class TelegramAttachments {
     let bytes = 0
     const limited = async function* (): AsyncGenerator<Uint8Array> {
       for await (const chunk of body) {
+        if (signal?.aborted) throw new Error("已取消当前任务。")
         const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
         bytes += data.byteLength
         // The Bot API refuses getFile above 20MB before this code sees the bytes.
@@ -170,6 +182,14 @@ export class TelegramAttachments {
       }
     }
     const saved = await saveAttachmentStream(this.#deps.cfg.inboxDir, chatId, att.name, limited())
+    if (signal?.aborted) {
+      try {
+        unlinkSync(saved.path)
+      } catch {
+        // ignore cleanup failure
+      }
+      throw new Error("已取消当前任务。")
+    }
     const result: SavedAttachment = { ...att, path: saved.path, bytes: saved.bytes }
     if (isTextAttachment(att.mime, saved.name)) {
       try {
@@ -183,14 +203,21 @@ export class TelegramAttachments {
     return result
   }
 
-  async buildAttachmentInput(job: Job, model?: ModelRef, signal?: AbortSignal): Promise<{ text: string; files: PromptFile[] }> {
+  async buildAttachmentInput(
+    job: Job,
+    model?: ModelRef,
+    signal?: AbortSignal,
+    isOpencode = true,
+  ): Promise<{ text: string; files: PromptFile[] }> {
     const saved: SavedAttachment[] = []
     const failed: string[] = []
 
     for (const att of job.attachments ?? []) {
+      if (signal?.aborted) throw new Error("已取消当前任务。")
       try {
         saved.push(await this.downloadAttachment(job.chatId, att, signal))
       } catch (err) {
+        if (signal?.aborted) throw new Error("已取消当前任务。")
         // Telegram client errors can quote the API URL, which contains the bot token
         const detail = this.#deps.maskToken(redactSecrets(err instanceof Error ? err.message : String(err)))
         failed.push(`${att.name}: ${detail}`)
@@ -198,8 +225,11 @@ export class TelegramAttachments {
     }
     pruneInbox(this.#deps.cfg.inboxDir)
 
-    const caps = model ? await this.#deps.oc.inputCapabilities(model) : undefined
-    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: caps }, { signal })
+    const caps = isOpencode && model ? await this.#deps.oc.inputCapabilities(model) : undefined
+    // CLI engines cannot consume raw audio directly; explicitly tell STT audio is unsupported
+    // so voice notes are transcribed for CLI engines without blocking file paths for images.
+    const sttCaps: ModelCapabilities | undefined = isOpencode ? caps : { audio: false }
+    const stt = await applyStt(saved, { stt: this.#deps.cfg.stt, modelCapabilities: sttCaps }, { signal })
     failed.push(...stt.errors)
     return buildAttachmentSections(job.text, { saved: stt.saved, failed, modelCapabilities: caps })
   }

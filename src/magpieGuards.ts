@@ -59,31 +59,46 @@ const MAGPIE_CONFIRM: Record<string, string> = {
   "accounts switch-only": "只切换 agent 自身登录，不改变网关路由",
 }
 
+const MAGPIE_LONE_SAFE_FLAGS = new Set(["-h", "--help", "-V", "--version"])
+
+/** Drops leading `-*` tokens so global flags cannot hide subcommands from the guards. */
+function stripLeadingFlags(args: string[]): string[] {
+  let index = 0
+  while (index < args.length && args[index]!.startsWith("-")) index += 1
+  return args.slice(index)
+}
+
 /**
  * Why this argv must not run in a chat, or `undefined` when it is safe. An empty argv
  * is the panel itself, so it is allowed.
  */
 export function magpieBlockedReason(args: string[], surface = "Telegram"): string | undefined {
-  const group = (args[0] ?? "").toLowerCase()
-  if (!group) return undefined
+  const effective = stripLeadingFlags(args)
+  const group = (effective[0] ?? "").toLowerCase()
   for (const [name, reason] of MAGPIE_BLOCKED) {
     if (group !== name) continue
     return typeof reason === "function" ? reason(surface) : reason
   }
   // `accounts add|import` waits for a browser/keyboard; the listing and switching are not.
   if (group === "accounts" || group === "account") {
-    const sub = (args[1] ?? "").toLowerCase()
+    const sub = (effective[1] ?? "").toLowerCase()
     if (sub === "add" || sub === "import") {
       return `\`accounts ${sub}\` 需要交互登录或服务器文件，无法在 ${surface} 中完成。`
     }
+  }
+  // Leading flags (e.g. `-v`, `--config /path`) could smuggle value tokens and shift
+  // subcommand positions past the guards; allow only lone help/version flags.
+  if (args[0]?.startsWith("-") && !(args.length === 1 && MAGPIE_LONE_SAFE_FLAGS.has(args[0]))) {
+    return `请把参数放在子命令之后，不要在开头使用全局选项 \`${args[0]}\`。`
   }
   return undefined
 }
 
 /** The confirmation copy for a destructive argv, or undefined when it runs as-is. */
 export function magpieConfirmPlan(args: string[]): MagpieActionPlan | undefined {
-  const group = (args[0] ?? "").toLowerCase()
-  const sub = (args[1] ?? "").toLowerCase()
+  const effective = stripLeadingFlags(args)
+  const group = (effective[0] ?? "").toLowerCase()
+  const sub = (effective[1] ?? "").toLowerCase()
   const key = sub ? `${group} ${sub}` : group
   // Two-word keys (`provider rm`) win; a bare verb that takes an argument (`use work`,
   // `rm work`) falls back to its own entry, otherwise the argument would hide it.
@@ -97,7 +112,7 @@ export function magpieConfirmPlan(args: string[]): MagpieActionPlan | undefined 
     return { label: "升级 magpie 到最新版本", timeoutMs: MAGPIE_UPDATE_TIMEOUT_MS }
   }
   if (group === "settings" && (sub === "set" || sub === "reset")) {
-    return { label: `修改 magpie 设置（${args.slice(1, 3).join(" ")}）` }
+    return { label: `修改 magpie 设置（${effective.slice(1, 3).join(" ")}）` }
   }
   if (group === "model" && ["name", "efforts", "api"].includes(sub)) {
     return { label: `修改模型元数据（${sub}）` }
@@ -110,7 +125,9 @@ export function magpieConfirmPlan(args: string[]): MagpieActionPlan | undefined 
 
 /** Network-bound and provider-touching subcommands need more than the default timeout. */
 export function isLongMagpieCommand(args: string[]): boolean {
-  const [group = "", sub = ""] = args
+  const effective = stripLeadingFlags(args)
+  const group = (effective[0] ?? "").toLowerCase()
+  const sub = (effective[1] ?? "").toLowerCase()
   if (!group) return false
   if (["sync", "update"].includes(group)) return true
   if (["quota", "sessions", "accounts", "usage"].includes(group)) return true

@@ -200,8 +200,11 @@ export class TelegramAgentCommands {
       if (!this.#deps.installer.installCommand(profile)) return `${profile.label} 暂不支持在聊天内自动安装`
       return undefined
     }
-    if (!this.#deps.installer.isManaged(engine)) {
-      return `${profile.label} 不是由 Bot 安装的，无法自动${AGENT_ACTION_VERB[action]}`
+    if (action === "update" && !this.#deps.installer.isManaged(engine)) {
+      return `${profile.label} 不是由 Bot 安装的，无法自动更新`
+    }
+    if (action === "uninstall" && !this.#deps.installer.uninstallCommand(engine)) {
+      return `${profile.label} 暂不支持在聊天内自动卸载`
     }
     if (action === "uninstall" && this.#deps.store.getEngine(key) === engine) return "请先切换到 OpenCode 再卸载"
     return undefined

@@ -71,7 +71,7 @@ object LocalStore {
     fun read(context: Context, uri: Uri, fallbackName: String? = null): PendingAttachment {
         val resolver = context.contentResolver
         val name = queryDisplayName(resolver, uri) ?: fallbackName ?: "attachment.bin"
-        val declaredMime = resolver.getType(uri)?.takeIf { it.isNotBlank() }
+        val declaredMime = resolver.getType(uri)?.substringBefore(';')?.trim()?.takeIf { it.isNotBlank() }
         // Some document providers answer null or application/octet-stream for a perfectly
         // ordinary .mp4/.m4a. Trusting that makes the server treat it as an opaque file,
         // so fall back to the extension before classifying the attachment.
@@ -127,6 +127,8 @@ object LocalStore {
         val outboxId: String? = null,
         /** Names only: a 安全输入 card must survive a restart, its value is never stored. */
         val secretRequests: List<SecretRequest> = emptyList(),
+        /** Stable per-bubble identity so Compose LazyColumn never hits duplicate timestamp keys. */
+        val localId: String = "",
     )
 
     /**
@@ -150,6 +152,7 @@ object LocalStore {
                 it.attachments,
                 outboxId = it.outboxId,
                 secretRequests = it.secretRequests,
+                localId = it.localId,
             )
         }
         val encoded = stored.map { json.encodeToString(StoredMessage.serializer(), it) }
@@ -202,10 +205,13 @@ object LocalStore {
         // an older build, say — used to empty the whole chat, and the next save then wrote that
         // emptiness over the history.
         val rows = runCatching { json.parseToJsonElement(raw).jsonArray }.getOrNull() ?: return emptyList()
+        val seenIds = mutableSetOf<String>()
         return rows.mapNotNull { element ->
             val stored = runCatching { json.decodeFromJsonElement(StoredMessage.serializer(), element) }.getOrNull()
                 ?: return@mapNotNull null
             val role = com.agentbot.app.ui.ChatMessage.Role.entries.getOrNull(stored.role) ?: return@mapNotNull null
+            val candidateId = stored.localId.takeIf { it.isNotBlank() && seenIds.add(it) }
+                ?: java.util.UUID.randomUUID().toString().also { seenIds.add(it) }
             com.agentbot.app.ui.ChatMessage(
                 role = role,
                 text = stored.text,
@@ -218,6 +224,7 @@ object LocalStore {
                 attachments = stored.attachments,
                 outboxId = stored.outboxId,
                 secretRequests = stored.secretRequests,
+                localId = candidateId,
             )
         }
     }
@@ -247,7 +254,18 @@ object LocalStore {
         val file = archiveFile(context, id) ?: return
         if (messages.isEmpty()) return
         val stored = messages.map {
-            StoredMessage(it.role.ordinal, it.text, it.taskId, it.status, it.errorCode, it.engineNote, it.at, it.media, it.attachments)
+            StoredMessage(
+                it.role.ordinal,
+                it.text,
+                it.taskId,
+                it.status,
+                it.errorCode,
+                it.engineNote,
+                it.at,
+                it.media,
+                it.attachments,
+                localId = it.localId,
+            )
         }
         val tmp = File(file.parentFile, "${file.name}.tmp")
         tmp.writeText(json.encodeToString(stored))
@@ -265,10 +283,13 @@ object LocalStore {
         val file = archiveFile(context, id) ?: return emptyList()
         if (!file.exists()) return emptyList()
         val rows = runCatching { json.parseToJsonElement(file.readText()).jsonArray }.getOrNull()
+        val seenIds = mutableSetOf<String>()
         return rows?.mapNotNull { element ->
             val stored = runCatching { json.decodeFromJsonElement(StoredMessage.serializer(), element) }.getOrNull()
                 ?: return@mapNotNull null
             val role = com.agentbot.app.ui.ChatMessage.Role.entries.getOrNull(stored.role) ?: return@mapNotNull null
+            val candidateId = stored.localId.takeIf { it.isNotBlank() && seenIds.add(it) }
+                ?: java.util.UUID.randomUUID().toString().also { seenIds.add(it) }
             com.agentbot.app.ui.ChatMessage(
                 role = role,
                 text = stored.text,
@@ -279,6 +300,7 @@ object LocalStore {
                 at = stored.at,
                 media = stored.media,
                 attachments = stored.attachments,
+                localId = candidateId,
             )
         }.orEmpty()
     }

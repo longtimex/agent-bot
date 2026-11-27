@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { createServer, type Server } from "node:http"
+import type { AddressInfo } from "node:net"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
@@ -61,7 +62,7 @@ interface Harness {
   cleanup: () => Promise<void>
   ocCalls: Array<{ text: string; files: Array<{ mime?: string; filename?: string }> }>
   /** Swaps what OpenCode reports for /config/providers. */
-  setLiveProviders: typeof liveProviders extends never ? never : (value: Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }>) => void
+  setLiveProviders: (value: Array<{ id: string; name: string; models: Array<{ id: string; name?: string }> }>) => void
   installs: string[]
   notices: NoticeStore
   ccCalls: string[]
@@ -93,13 +94,13 @@ export async function withApi(
   const history = new TaskHistoryStore(join(dir, "history.json"), log)
   const reminders = new ReminderService(
     join(dir, "reminders.json"),
-    () => {},
+    async () => {},
     log,
     "Asia/Shanghai",
     () => true,
   )
   const registry = new AgentCliRegistry({ path: join(dir, "agents.json"), log })
-  const schedules = new ScheduleService(join(dir, "schedules.json"), () => {}, log, "Asia/Shanghai", registry)
+  const schedules = new ScheduleService(join(dir, "schedules.json"), async () => "ok", log, "Asia/Shanghai", registry)
   const agents = {
     registry,
     defaultWorkDir: dir,
@@ -2941,10 +2942,10 @@ test("api cc token tables let the app resolve typed /cc words", async () => {
     const shared = commands.flatMap((command) => command.tokens).filter((token) => viewTokens.has(token))
     assert.deepEqual(shared, [], "a token pair must not name both a view and a mutating command")
 
-    // The only known exec collision is skills-update / skills-update-all (disambiguated by needsTarget)
+    // Primary token pairs are now unique across exec commands too (`skills-update-all` owns `skills update --all`)
     const execPrimaries = commands.map((c) => c.tokens[0])
     const dupes = execPrimaries.filter((t, i) => execPrimaries.indexOf(t) !== i)
-    assert.deepEqual(dupes.sort(), ["skills update"], "only the skills-update collision is allowed among exec primaries")
+    assert.deepEqual(dupes, [], "primary cc exec token pairs must be unique")
   })
 })
 
@@ -3142,6 +3143,11 @@ test("api cc commands take the second half Telegram types in the same arg", asyn
     assert.equal(apps.status, 200)
     assert.equal(h.ccCalls.at(-1), "run:mcp set-apps --apps open-code,codex fs")
 
+    // Documented `/help cc` flag prefixes (`--apps`, `--name`) work identically in App chat
+    const appsFlag = await postExec({ name: "mcp-set-apps", arg: "fs --apps open-code,codex" })
+    assert.equal(appsFlag.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:mcp set-apps --apps open-code,codex fs")
+
     const badApps = await postExec({ name: "mcp-set-apps", arg: "fs open-code,bogus" })
     assert.equal(badApps.status, 400)
     assert.match(await errorOf(badApps), /应用列表/)
@@ -3149,6 +3155,10 @@ test("api cc commands take the second half Telegram types in the same arg", asyn
     // A prompt name is free text: spaces survive because it travels as one argv word
     const renamed = await postExec({ name: "prompt-rename", arg: "review 每日 复盘" })
     assert.equal(renamed.status, 200)
+    assert.equal(h.ccCalls.at(-1), "run:prompts rename review --name 每日 复盘")
+
+    const renamedFlag = await postExec({ name: "prompt-rename", arg: "review --name 每日 复盘" })
+    assert.equal(renamedFlag.status, 200)
     assert.equal(h.ccCalls.at(-1), "run:prompts rename review --name 每日 复盘")
 
     const flagName = await postExec({ name: "prompt-rename", arg: "review --help" })
@@ -3161,6 +3171,8 @@ test("api cc commands take the second half Telegram types in the same arg", asyn
     const port = commands.commands.find((entry) => entry.name === "proxy-listen-port")
     assert.equal(port?.needsTarget, true, "a command whose only value is its arg must ask for it")
     assert.deepEqual(port?.tokens, ["proxy config port"])
+    const skillsUpdateAll = commands.commands.find((entry) => entry.name === "skills-update-all")
+    assert.ok(skillsUpdateAll?.tokens.includes("skills update --all"))
 
     const setPort = await postExec({ name: "proxy-listen-port", arg: "8787" })
     assert.equal(setPort.status, 200)
@@ -3245,13 +3257,27 @@ test("api runs the raw cc-switch argv Telegram answers as /cc run", async () => 
     assert.equal(link.status, 400)
     assert.match(await errorOf(link), /deeplink/i)
 
-    // A key typed into the argv is masked in everything sent back
-    const keyed = await postRun({ args: ["provider", "add", "sk-abcdefghijklmnopqrstuvwxyz"] })
+    // Leading global flags cannot bypass deeplink, interactive blocks, or confirmation
+    for (const args of [
+      ["-v", "deeplink", "ccswitch://v1/import?a=1"],
+      ["-v", "interactive"],
+      ["--config", "/tmp/x", "provider", "delete", "p1"],
+    ]) {
+      const res = await postRun({ args, confirm: true })
+      assert.equal(res.status, 400, `${args.join(" ")} must be blocked`)
+    }
+
+    // A key typed into the argv is masked in everything sent back (both sk- and unlabelled --api-key)
+    const keyed = await postRun({ args: ["provider", "add", "--api-key", "relayUnlabelledKey5566", "sk-abcdefghijklmnopqrstuvwxyz"] })
     assert.equal(keyed.status, 200)
     const keyedBody = (await keyed.json()) as { text: string; command: string }
     assert.ok(
       !keyedBody.text.includes("sk-abcdefghijklmnopqrstuvwxyz"),
       `the echoed output leaked the typed key: ${keyedBody.text}`,
+    )
+    assert.ok(
+      !keyedBody.text.includes("relayUnlabelledKey5566"),
+      `the echoed output leaked the unlabelled --api-key: ${keyedBody.text}`,
     )
     assert.match(keyedBody.text, /sk-\*\*\*/)
 
@@ -3391,7 +3417,7 @@ test("api surfaces every Telegram /cc alias the app can stand for", async () => 
       fetch(`${h.base}/api/v1/cc/exec`, { headers: authHeaders() }),
     ])
     const { views } = (await viewsRes.json()) as { views: Array<{ tokens: string[] }> }
-    const { commands } = (await execRes.json()) as { commands: Array<{ tokens: string[] }> }
+    const { commands } = (await execRes.json()) as { commands: Array<{ name: string; tokens: string[] }> }
     const entries = [...views, ...commands]
 
     for (const [alias, pair] of Object.entries(CC_SUB_ALIASES)) {
@@ -4290,7 +4316,7 @@ test("api daily report aggregates every chat and renders the push text", async (
       const sources = body.byChat.map((row) => `${row.source}:${row.usage.tasks}`).sort()
       assert.deepEqual(sources, ["App:1", "Telegram 123:2"])
       assert.equal(body.trend.length, 7)
-      assert.equal(body.trend[6].tasks, 3)
+      assert.equal(body.trend[6]?.tasks, 3)
       assert.match(body.text, /每日用量报告/)
       assert.match(body.text, /今日任务：3/)
     },

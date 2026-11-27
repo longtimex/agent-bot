@@ -12,6 +12,7 @@ const STT: SttConfig = { baseUrl: "https://stt.example/v1", apiKey: "sk-test", m
 
 function audioItem(overrides: Partial<SavedAttachment> = {}): SavedAttachment {
   return {
+    fileId: "file-1",
     kind: "audio",
     name: "voice.ogg",
     mime: "audio/ogg",

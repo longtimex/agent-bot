@@ -388,6 +388,35 @@ data class SettingsView(
     val opencodeUrl: String? = null,
     /** What the running server dials — a saved value only lands after a restart. */
     val opencodeUrlEffective: String = "",
+    /** Push a summary to the paired Telegram/Feishu chat when an App task settles. */
+    val notifyChatOnAppTask: Boolean = false,
+)
+
+@Serializable
+data class TranscriptMessage(
+    val id: String = "",
+    val role: String = "user",
+    val text: String = "",
+    val at: Long = 0,
+    val engine: String? = null,
+    val model: String? = null,
+    val source: String? = null,
+)
+
+@Serializable
+data class TranscriptView(
+    val scope: String = "app",
+    val count: Int = 0,
+    val messages: List<TranscriptMessage> = emptyList(),
+)
+
+@Serializable
+data class HandoffResult(
+    val ok: Boolean = false,
+    val scope: String = "",
+    val message: String = "",
+    val session: Session = Session(),
+    val messages: List<TranscriptMessage> = emptyList(),
 )
 
 @Serializable
@@ -607,7 +636,7 @@ data class HistoryEntry(
     val scheduled: Boolean? = null,
 )
 
-/** One day's totals as `src/usage.ts` sends them: counts plus the summed duration. */
+/** One day's totals as `src/usage.ts` sends them: counts, duration, tokens and estimated cost. */
 @Serializable
 data class UsageDay(
     val tasks: Int = 0,
@@ -615,9 +644,15 @@ data class UsageDay(
     val failed: Int = 0,
     val cancelled: Int = 0,
     val totalMs: Long = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    val costUsd: Double = 0.0,
 ) {
     val avgMs: Long
         get() = if (tasks > 0) totalMs / tasks else 0
+    val totalTokens: Long
+        get() = inputTokens + outputTokens
 }
 
 @Serializable
@@ -627,6 +662,10 @@ data class Usage(
     val failed: Int = 0,
     val cancelled: Int = 0,
     val totalMs: Long = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    val costUsd: Double = 0.0,
     val lastAt: Long = 0,
     val lastEngine: String? = null,
     val lastModel: String? = null,
@@ -635,6 +674,8 @@ data class Usage(
 ) {
     val avgMs: Long
         get() = if (tasks > 0) totalMs / tasks else 0
+    val totalTokens: Long
+        get() = inputTokens + outputTokens
 }
 
 @Serializable
@@ -645,6 +686,79 @@ data class UsageTrendDay(
     val failed: Int = 0,
     val cancelled: Int = 0,
     val totalMs: Long = 0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+    val costUsd: Double = 0.0,
+)
+
+@Serializable
+data class BudgetStatus(
+    val dailyUsd: Double = 0.0,
+    val monthlyUsd: Double = 0.0,
+    val todayUsd: Double = 0.0,
+    val monthUsd: Double = 0.0,
+    val todayTokens: Long = 0,
+    val monthTokens: Long = 0,
+    val dailyPercent: Int = 0,
+    val monthlyPercent: Int = 0,
+    val alertLevel: String = "ok",
+    val ok: Boolean = true,
+    val message: String? = null,
+)
+
+@Serializable
+data class PendingApproval(
+    val id: String,
+    val key: String = "",
+    val source: String = "guard",
+    val title: String,
+    val detail: String = "",
+    val patternKey: String = "",
+    val createdAt: Long = 0,
+    val expiresAt: Long = 0,
+)
+
+@Serializable
+data class ApprovalsView(
+    val ok: Boolean = true,
+    val message: String? = null,
+    val mode: String = "auto",
+    val pending: List<PendingApproval> = emptyList(),
+)
+
+@Serializable
+data class WebhookEntry(
+    val id: String,
+    val name: String,
+    val secret: String = "",
+    val enabled: Boolean = true,
+    val engine: String? = null,
+    val model: String? = null,
+    val promptTemplate: String = "",
+    val silentToken: String? = null,
+    val createdAt: Long = 0,
+    val lastTriggeredAt: Long? = null,
+    val triggerCount: Int = 0,
+    val lastStatus: String? = null,
+    val lastSummary: String? = null,
+)
+
+@Serializable
+data class WebhooksView(
+    val hooks: List<WebhookEntry> = emptyList(),
+    val triggerBaseUrl: String? = null,
+)
+
+@Serializable
+data class WebhookActionResult(
+    val ok: Boolean = false,
+    val status: String? = null,
+    val message: String? = null,
+    val reply: String? = null,
+    val hook: WebhookEntry? = null,
+    val hooks: List<WebhookEntry> = emptyList(),
+    val triggerBaseUrl: String? = null,
 )
 
 /** One chat's slice of the cross-chat daily report (`source` is the display label). */
@@ -989,4 +1103,49 @@ data class HelpView(
     val commands: List<BotCommand> = emptyList(),
     /** Extra words that run a listed command, e.g. tz for timezone. */
     val aliases: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class WorkspaceFileDiff(
+    val path: String,
+    val status: String = "modified",
+    val added: Int = 0,
+    val removed: Int = 0,
+    val patch: String = "",
+)
+
+@Serializable
+data class WorkspaceHistoryEntry(
+    val id: String,
+    val root: String = "",
+    val createdAt: Long = 0,
+    val files: Int = 0,
+    val added: Int = 0,
+    val removed: Int = 0,
+    val engine: String? = null,
+    val undoable: Boolean = false,
+)
+
+@Serializable
+data class WorkspaceDiff(
+    val ok: Boolean = true,
+    val message: String? = null,
+    val root: String? = null,
+    val head: String? = null,
+    val count: Int = 0,
+    val added: Int = 0,
+    val removed: Int = 0,
+    val files: List<WorkspaceFileDiff> = emptyList(),
+    val truncated: Boolean = false,
+    val undoable: Boolean = false,
+    val recordsCount: Int = 0,
+    val history: List<WorkspaceHistoryEntry> = emptyList(),
+)
+
+@Serializable
+data class CommitResult(
+    val ok: Boolean = false,
+    val message: String = "",
+    val commitHash: String? = null,
+    val filesCount: Int? = null,
 )
