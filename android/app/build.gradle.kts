@@ -89,7 +89,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:core:3.5.4")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
